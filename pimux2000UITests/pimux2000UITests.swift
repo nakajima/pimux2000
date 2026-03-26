@@ -8,34 +8,69 @@
 import XCTest
 
 final class pimux2000UITests: XCTestCase {
+	override func setUpWithError() throws {
+		continueAfterFailure = false
+	}
 
-    override func setUpWithError() throws {
-        // Put setup code here. This method is called before the invocation of each test method in the class.
+	override func tearDownWithError() throws {}
 
-        // In UI tests it is usually best to stop immediately when a failure occurs.
-        continueAfterFailure = false
+	@MainActor
+	func testFixtureHostShowsSessions() throws {
+		let app = configuredApp()
+		app.launch()
 
-        // In UI tests it’s important to set the initial state - such as interface orientation - required for your tests before they run. The setUp method is a good place to do this.
-    }
+		let hostField = app.textFields["hostTextField"]
+		XCTAssertTrue(hostField.waitForExistence(timeout: 5))
+		hostField.tap()
+		hostField.typeText("demo@fixture")
 
-    override func tearDownWithError() throws {
-        // Put teardown code here. This method is called after the invocation of each test method in the class.
-    }
+		let addButton = app.buttons["addHostButton"]
+		XCTAssertTrue(addButton.isEnabled)
+		addButton.tap()
 
-    @MainActor
-    func testExample() throws {
-        // UI tests must launch the application that they test.
-        let app = XCUIApplication()
-        app.launch()
+		let hostCell = app.staticTexts["demo@fixture"]
+		XCTAssertTrue(hostCell.waitForExistence(timeout: 10))
+		let shellSummary = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Shell session health")).firstMatch
+		XCTAssertTrue(shellSummary.waitForExistence(timeout: 15))
 
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-    }
+		let logsSummary = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Watching logs")).firstMatch
+		XCTAssertTrue(logsSummary.waitForExistence(timeout: 15))
+		XCTAssertFalse(app.staticTexts["Couldn’t Load Sessions"].exists)
+	}
 
-    @MainActor
-    func testLaunchPerformance() throws {
-        // This measures how long it takes to launch your application.
-        measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
-        }
-    }
+	@MainActor
+	func testBrokenFixtureHostShowsRecoverableError() throws {
+		let app = configuredApp()
+		app.launch()
+
+		let hostField = app.textFields["hostTextField"]
+		XCTAssertTrue(hostField.waitForExistence(timeout: 5))
+		hostField.tap()
+		hostField.typeText("broken@fixture")
+
+		let addButton = app.buttons["addHostButton"]
+		XCTAssertTrue(addButton.isEnabled)
+		addButton.tap()
+
+		XCTAssertTrue(app.staticTexts["broken@fixture"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Couldn’t Load Sessions"].waitForExistence(timeout: 5))
+
+		let fixtureMessage = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "configured to fail")).firstMatch
+		XCTAssertTrue(fixtureMessage.waitForExistence(timeout: 5))
+	}
+
+	@MainActor
+	func testLaunchPerformance() throws {
+		measure(metrics: [XCTApplicationLaunchMetric()]) {
+			let app = configuredApp()
+			app.launch()
+		}
+	}
+
+	private func configuredApp() -> XCUIApplication {
+		let app = XCUIApplication()
+		app.terminate()
+		app.launchArguments += ["--uitesting-reset-db", "--uitesting-use-fixtures"]
+		return app
+	}
 }
