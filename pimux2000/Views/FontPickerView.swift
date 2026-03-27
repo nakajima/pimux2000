@@ -80,7 +80,7 @@ struct FontPickerView: View {
 	}
 
 	private func reloadFonts() {
-		fontOptions = ChatFontCatalog.monospacedFontOptions()
+		fontOptions = ChatFontCatalog.monospacedFontOptions(forceReload: true)
 	}
 }
 
@@ -97,27 +97,24 @@ private struct FontFace {
 }
 
 private enum ChatFontCatalog {
-	static func monospacedFontOptions() -> [MonospacedFontOption] {
-		let descriptors = (CTFontCollectionCreateMatchingFontDescriptors(CTFontCollectionCreateFromAvailableFonts(nil)) as? [CTFontDescriptor]) ?? []
-		var facesByFamily: [String: [FontFace]] = [:]
+	private static var cachedOptions: [MonospacedFontOption]?
 
-		for descriptor in descriptors {
-			let font = CTFontCreateWithFontDescriptor(descriptor, 12, nil)
-			guard CTFontGetSymbolicTraits(font).contains(.traitMonoSpace) else { continue }
-
-			let familyName = CTFontCopyFamilyName(font) as String
-			let fontName = CTFontCopyPostScriptName(font) as String
-			let styleName = (CTFontCopyName(font, kCTFontStyleNameKey) as String?) ?? "Regular"
-			facesByFamily[familyName, default: []].append(FontFace(fontName: fontName, styleName: styleName))
+	static func monospacedFontOptions(forceReload: Bool = false) -> [MonospacedFontOption] {
+		if !forceReload, let cachedOptions {
+			return cachedOptions
 		}
 
-		return facesByFamily.map { familyName, faces in
-			MonospacedFontOption(
-				familyName: familyName,
-				previewFontName: preferredFace(in: faces).fontName
-			)
-		}
-		.sorted { $0.familyName.localizedCaseInsensitiveCompare($1.familyName) == .orderedAscending }
+		let options: [MonospacedFontOption]
+		#if canImport(UIKit)
+		options = iOSMonospacedFontOptions()
+		#elseif canImport(AppKit)
+		options = macOSMonospacedFontOptions()
+		#else
+		options = []
+		#endif
+
+		cachedOptions = options
+		return options
 	}
 
 	static func resolvedFontName(forStoredValue storedValue: String) -> String {
@@ -133,6 +130,111 @@ private enum ChatFontCatalog {
 		}
 
 		return storedValue
+	}
+
+	private static func buildOptions(from facesByFamily: [String: [FontFace]]) -> [MonospacedFontOption] {
+		facesByFamily.map { familyName, faces in
+			MonospacedFontOption(
+				familyName: familyName,
+				previewFontName: preferredFace(in: faces).fontName
+			)
+		}
+		.sorted { $0.familyName.localizedCaseInsensitiveCompare($1.familyName) == .orderedAscending }
+	}
+
+	#if canImport(UIKit)
+	private static func iOSMonospacedFontOptions() -> [MonospacedFontOption] {
+		var facesByFamily: [String: [FontFace]] = [:]
+		var seenFontNames = Set<String>()
+
+		for familyName in UIFont.familyNames {
+			for fontName in UIFont.fontNames(forFamilyName: familyName) {
+				addUIKitFont(named: fontName, into: &facesByFamily, seenFontNames: &seenFontNames)
+			}
+		}
+
+		for fontName in (CTFontManagerCopyAvailablePostScriptNames() as? [String]) ?? [] {
+			addUIKitFont(named: fontName, into: &facesByFamily, seenFontNames: &seenFontNames)
+		}
+
+		let descriptors = (CTFontCollectionCreateMatchingFontDescriptors(CTFontCollectionCreateFromAvailableFonts(nil)) as? [CTFontDescriptor]) ?? []
+		for descriptor in descriptors {
+			let font = CTFontCreateWithFontDescriptor(descriptor, 12, nil)
+			let fontName = CTFontCopyPostScriptName(font) as String
+			addUIKitFont(named: fontName, into: &facesByFamily, seenFontNames: &seenFontNames)
+		}
+
+		return buildOptions(from: facesByFamily)
+	}
+
+	private static func addUIKitFont(
+		named fontName: String,
+		into facesByFamily: inout [String: [FontFace]],
+		seenFontNames: inout Set<String>
+	) {
+		guard seenFontNames.insert(fontName).inserted else { return }
+		guard let font = UIFont(name: fontName, size: 12) else { return }
+		guard isMonospaced(fontName: font.fontName) else { return }
+
+		let familyName = font.familyName
+		let styleName = (font.fontDescriptor.object(forKey: .face) as? String) ?? font.fontName
+		facesByFamily[familyName, default: []].append(FontFace(fontName: font.fontName, styleName: styleName))
+	}
+	#elseif canImport(AppKit)
+	private static func macOSMonospacedFontOptions() -> [MonospacedFontOption] {
+		let descriptors = (CTFontCollectionCreateMatchingFontDescriptors(CTFontCollectionCreateFromAvailableFonts(nil)) as? [CTFontDescriptor]) ?? []
+		var facesByFamily: [String: [FontFace]] = [:]
+
+		for descriptor in descriptors {
+			let font = CTFontCreateWithFontDescriptor(descriptor, 12, nil)
+			guard isMonospaced(font) else { continue }
+
+			let familyName = CTFontCopyFamilyName(font) as String
+			let fontName = CTFontCopyPostScriptName(font) as String
+			let styleName = (CTFontCopyName(font, kCTFontStyleNameKey) as String?) ?? "Regular"
+			facesByFamily[familyName, default: []].append(FontFace(fontName: fontName, styleName: styleName))
+		}
+
+		return buildOptions(from: facesByFamily)
+	}
+	#endif
+
+	private static func isMonospaced(fontName: String) -> Bool {
+		isMonospaced(CTFontCreateWithName(fontName as CFString, 12, nil))
+	}
+
+	private static func isMonospaced(_ font: CTFont) -> Bool {
+		if CTFontGetSymbolicTraits(font).contains(.traitMonoSpace) {
+			return true
+		}
+		return hasFixedGlyphAdvances(font)
+	}
+
+	private static func hasFixedGlyphAdvances(_ font: CTFont) -> Bool {
+		let sampleCharacters: [UniChar] = Array("ilWm0._".utf16)
+		var widths: [CGFloat] = []
+
+		for sampleCharacter in sampleCharacters {
+			var character = sampleCharacter
+			var glyph = CGGlyph()
+			guard CTFontGetGlyphsForCharacters(font, &character, &glyph, 1), glyph != 0 else { continue }
+
+			let glyphs = [glyph]
+			var advances = [CGSize.zero]
+			CTFontGetAdvancesForGlyphs(font, .horizontal, glyphs, &advances, 1)
+
+			let width = advances[0].width
+			guard width > 0 else { continue }
+			widths.append(width)
+		}
+
+		guard widths.count >= 4,
+				let minWidth = widths.min(),
+				let maxWidth = widths.max() else {
+			return false
+		}
+
+		return abs(maxWidth - minWidth) < 0.01
 	}
 
 	private static func preferredFace(in faces: [FontFace]) -> FontFace {
