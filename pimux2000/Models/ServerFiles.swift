@@ -1,5 +1,5 @@
 // Auto-generated: bundled pimux2000 server source files
-// These are written to ~/.pimux2000/server/ on the remote host during install
+// These are staged into ~/.pimux2000/releases/<version>/ on the remote host during install
 
 import Foundation
 
@@ -9,13 +9,14 @@ struct ServerFile {
 }
 
 enum ServerFiles {
-	static let version = "2026.03.27.1"
+	static let version = "2026.03.27.3"
 
 	static let all: [ServerFile] = [
 		packageJSON,
 		cli,
 		index,
 		install,
+		updater,
 		rpc,
 		sessions,
 	]
@@ -143,20 +144,80 @@ interface WSData {
 
 const clients = new Set<ServerWebSocket<WSData>>();
 
+function jsonResponse(data: unknown, init?: ResponseInit): Response {
+  const headers = new Headers(init?.headers);
+  headers.set("Content-Type", "application/json");
+  headers.set("Cache-Control", "no-store, max-age=0");
+  headers.set("Pragma", "no-cache");
+  return new Response(JSON.stringify(data), {
+    ...init,
+    headers,
+  });
+}
+
+function errorResponse(status: number, error: string): Response {
+  return jsonResponse({ error }, { status });
+}
+
 // MARK: - Server
 
 const server = Bun.serve<WSData>({
   port: PORT,
 
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url);
 
-    // Health check endpoint
-    if (url.pathname === "/health") {
-      return Response.json({
-        ok: true,
-        version: VERSION,
-      });
+    try {
+      if (url.pathname === "/health") {
+        return jsonResponse({
+          ok: true,
+          version: VERSION,
+        });
+      }
+
+      if (url.pathname === "/sessions") {
+        const sessions = await listSessions();
+        return jsonResponse({ data: sessions });
+      }
+
+      if (url.pathname === "/messages") {
+        const sessionFile = url.searchParams.get("sessionFile");
+        if (!sessionFile) {
+          return errorResponse(400, "sessionFile required");
+        }
+        const messages = await getMessages(sessionFile);
+        return jsonResponse({
+          sessionFile,
+          data: messages,
+        });
+      }
+
+      if (url.pathname === "/state") {
+        const sessionId = url.searchParams.get("sessionId");
+        if (!sessionId) {
+          return errorResponse(400, "sessionId required");
+        }
+        const state = await getState(sessionId);
+        return jsonResponse({
+          sessionId,
+          data: state,
+        });
+      }
+
+      if (url.pathname === "/last_assistant_text") {
+        const sessionFile = url.searchParams.get("sessionFile");
+        if (!sessionFile) {
+          return errorResponse(400, "sessionFile required");
+        }
+        const text = await getLastAssistantText(sessionFile);
+        return jsonResponse({
+          sessionFile,
+          text,
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return errorResponse(500, message);
     }
 
     const upgraded = server.upgrade(req, {
@@ -256,12 +317,12 @@ async function handleMessage(
       if (!ws.data.sessionWatchers.has(msg.sessionFile)) {
         const watcher = watchSessionFile(msg.sessionFile, async () => {
           try {
-            const updated = await getMessages(msg.sessionFile!);
             ws.send(
               JSON.stringify({
                 type: "messages_updated",
                 sessionFile: msg.sessionFile,
-                data: updated,
+                needsRefetch: true,
+                data: [],
               })
             );
           } catch {
@@ -395,6 +456,12 @@ import { execSync } from "child_process";
 const SERVICE_NAME = "pimux2000";
 const isMac = platform() === "darwin";
 
+function serverRootDir(): string {
+  const explicit = process.env.PIMUX2000_SERVER_ROOT?.trim();
+  if (explicit) return explicit;
+  return import.meta.dir;
+}
+
 function findBun(): string {
   if (process.execPath) {
     return process.execPath;
@@ -412,7 +479,7 @@ function findBun(): string {
 
 export function installServer(port: number = 7749) {
   const bunPath = findBun();
-  const serverEntry = join(import.meta.dir, "index.ts");
+  const serverEntry = join(serverRootDir(), "index.ts");
 
   if (isMac) {
     installLaunchd(bunPath, serverEntry, port);
@@ -613,6 +680,237 @@ function uninstallSystemd() {
 
   console.log(`${SERVICE_NAME} service removed`);
 }
+
+"""#
+	)
+}
+
+extension ServerFiles {
+	static let updater = ServerFile(
+		path: "bin/update.sh",
+		content: #"""
+#!/bin/sh
+set -eu
+
+VERSION="\#(Self.version)"
+PORT="${PIMUX2000_PORT:-7749}"
+BASE_DIR="$HOME/.pimux2000"
+RELEASE_DIR="$BASE_DIR/releases/$VERSION"
+CURRENT_LINK="$BASE_DIR/current"
+EXTENSIONS_DIR="$HOME/.pi/agent/extensions"
+SERVICE_NAME="pimux2000"
+LAUNCHD_LABEL="com.pimux2000.server"
+
+log() {
+  printf '%s\n' "$1"
+}
+
+find_bun() {
+  if command -v bun >/dev/null 2>&1; then
+    command -v bun
+    return 0
+  fi
+  if [ -x "$HOME/.bun/bin/bun" ]; then
+    printf '%s\n' "$HOME/.bun/bin/bun"
+    return 0
+  fi
+  if [ -x /opt/homebrew/bin/bun ]; then
+    printf '%s\n' /opt/homebrew/bin/bun
+    return 0
+  fi
+  if [ -x /usr/local/bin/bun ]; then
+    printf '%s\n' /usr/local/bin/bun
+    return 0
+  fi
+  return 1
+}
+
+stop_managed_service() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 || true
+  else
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+listener_pids() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | sort -u
+    return 0
+  fi
+
+  if command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null \
+      | awk -v port=":$PORT" '$4 ~ port { print $NF }' \
+      | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+      | sort -u
+    return 0
+  fi
+
+  return 1
+}
+
+describe_pid() {
+  ps -o user= -o pid= -o command= -p "$1" 2>/dev/null | sed 's/^ *//'
+}
+
+is_pimux_listener() {
+  command="$(ps -o command= -p "$1" 2>/dev/null || true)"
+  case "$command" in
+    *".pimux2000"*|*"pimux2000"*|*"/current/src/index.ts"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+cleanup_port_listener() {
+  pids="$(listener_pids || true)"
+  [ -z "$pids" ] && return 0
+
+  current_user="$(id -un)"
+  for pid in $pids; do
+    description="$(describe_pid "$pid")"
+    [ -z "$description" ] && continue
+
+    owner="$(printf '%s\n' "$description" | awk '{ print $1 }')"
+    if [ "$owner" != "$current_user" ]; then
+      log "Port $PORT is occupied by another user's process: $description"
+      exit 1
+    fi
+
+    if is_pimux_listener "$pid"; then
+      log "Stopping stale pimux listener on port $PORT: $description"
+      kill "$pid" >/dev/null 2>&1 || true
+    else
+      log "Port $PORT is occupied by another process: $description"
+      exit 1
+    fi
+  done
+
+  sleep 1
+
+  remaining="$(listener_pids || true)"
+  if [ -n "$remaining" ]; then
+    for pid in $remaining; do
+      if is_pimux_listener "$pid"; then
+        log "Force-stopping stale pimux listener on port $PORT: $(describe_pid "$pid")"
+        kill -9 "$pid" >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+
+  sleep 1
+
+  remaining="$(listener_pids || true)"
+  if [ -n "$remaining" ]; then
+    log "Port $PORT is still occupied after cleanup:"
+    for pid in $remaining; do
+      log "  $(describe_pid "$pid")"
+    done
+    exit 1
+  fi
+}
+
+activate_release() {
+  mkdir -p "$BASE_DIR/releases"
+  temp_link="$BASE_DIR/current.new"
+  rm -f "$temp_link"
+  ln -s "$RELEASE_DIR" "$temp_link"
+  rm -rf "$CURRENT_LINK"
+  mv -f "$temp_link" "$CURRENT_LINK"
+}
+
+install_extensions() {
+  mkdir -p "$EXTENSIONS_DIR"
+  if [ -d "$RELEASE_DIR/extensions" ]; then
+    for path in "$RELEASE_DIR"/extensions/*; do
+      [ -e "$path" ] || continue
+      cp "$path" "$EXTENSIONS_DIR/"
+      log "Installed extension $(basename "$path")"
+    done
+  fi
+}
+
+install_service() {
+  bun_path="$(find_bun || true)"
+  if [ -z "$bun_path" ]; then
+    log "bun was not found while applying the staged release."
+    exit 1
+  fi
+
+  export PATH="$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+  export PIMUX2000_SERVER_ROOT="$CURRENT_LINK/src"
+
+  log "Installing service from $CURRENT_LINK"
+  (
+    cd "$CURRENT_LINK"
+    "$bun_path" run src/cli.ts install-server --port="$PORT"
+  )
+}
+
+health_response() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" 2>/dev/null || true
+    return 0
+  fi
+
+  bun_path="$(find_bun || true)"
+  if [ -n "$bun_path" ]; then
+    "$bun_path" -e 'const url = process.argv[2]; const response = await fetch(url); process.stdout.write(await response.text());' -- "http://127.0.0.1:$PORT/health" 2>/dev/null || true
+  fi
+}
+
+verify_health() {
+  attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    response="$(health_response)"
+    if printf '%s' "$response" | grep -q '"version":"'"$VERSION"'"'; then
+      log "Verified live server version $VERSION"
+      return 0
+    fi
+    if [ -n "$response" ]; then
+      log "Waiting for server version $VERSION; health response: $response"
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+main() {
+  if [ ! -f "$RELEASE_DIR/package.json" ]; then
+    log "Staged release is incomplete: $RELEASE_DIR/package.json is missing"
+    exit 1
+  fi
+
+  log "Applying staged pimux2000 release $VERSION"
+  stop_managed_service
+  cleanup_port_listener
+  activate_release
+  install_extensions
+  install_service
+
+  if ! verify_health; then
+    log "Server failed to report bundled version $VERSION after restart."
+    remaining="$(listener_pids || true)"
+    if [ -n "$remaining" ]; then
+      log "Processes still listening on port $PORT:"
+      for pid in $remaining; do
+        log "  $(describe_pid "$pid")"
+      done
+    fi
+    exit 1
+  fi
+
+  log "Release $VERSION is now active."
+}
+
+main "$@"
 
 """#
 	)

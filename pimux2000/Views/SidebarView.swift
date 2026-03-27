@@ -14,6 +14,7 @@ struct HostsRequest: ValueObservationQueryable {
 
 struct SidebarView: View {
 	@Environment(\.appDatabase) private var appDatabase
+	@Environment(\.databaseContext) private var dbContext
 	@Query(PiSessionsRequest()) private var sessions: [SessionInfo]
 	@Query(HostsRequest()) private var hosts: [Host]
 	@Binding var selectedSessionID: String?
@@ -55,6 +56,10 @@ struct SidebarView: View {
 				Text("Servers")
 			}
 		}
+		.refreshable {
+			let syncer = PiSessionSync(dbContext: dbContext)
+			await syncer.sync()
+		}
 		.toolbar {
 			ToolbarItem(placement: .primaryAction) {
 				Button { isAddingServer = true } label: {
@@ -89,4 +94,33 @@ struct SidebarView: View {
 			}
 		}
 	}
+}
+
+#Preview {
+	let db = AppDatabase.preview()
+
+	try! db.dbQueue.write { dbConn in
+		var host = Host(sshTarget: "nakajima@mac-studio", createdAt: Date(), updatedAt: Date())
+		try host.insert(dbConn)
+
+		var session = PiSession(
+			hostID: host.id!,
+			summary: "Debug remote sync",
+			sessionID: "sidebar-preview-session",
+			sessionFile: "/tmp/sidebar-preview.jsonl",
+			model: "anthropic/claude-sonnet",
+			lastMessage: "Looks good",
+			lastMessageAt: Date(),
+			lastMessageRole: "assistant",
+			startedAt: Date(),
+			lastSeenAt: Date()
+		)
+		try session.insert(dbConn)
+	}
+
+	return NavigationStack {
+		SidebarView(selectedSessionID: .constant(nil))
+	}
+	.environment(\.appDatabase, db)
+	.databaseContext(.readWrite { db.dbQueue })
 }

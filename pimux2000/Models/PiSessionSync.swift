@@ -22,6 +22,12 @@ struct PiSessionSync {
 				group.addTask {
 					do {
 						try await self.sync(host: host)
+					} catch let error as PiError {
+						if case let .commandFailed(message) = error,
+							message == "The remote server is too old. Please update it from pimux2000." {
+							return
+						}
+						print("Error syncing \(host.sshTarget): \(error)")
 					} catch {
 						print("Error syncing \(host.sshTarget): \(error)")
 					}
@@ -34,9 +40,6 @@ struct PiSessionSync {
 		guard let hostID = host.id else { return }
 
 		let client = PiServerClient(serverURL: host.serverURL)
-		try await client.connect()
-		defer { Task { await client.disconnect() } }
-
 		let remoteSessions = try await client.listSessions().filter(Self.shouldSync)
 
 		for remoteSession in remoteSessions {

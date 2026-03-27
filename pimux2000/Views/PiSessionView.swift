@@ -104,6 +104,9 @@ struct PiSessionView: View {
 					}
 					.padding()
 				}
+				.refreshable {
+					await loadMessages()
+				}
 				.defaultScrollAnchor(.bottom)
 				.onChange(of: messages.count) {
 					scrollToBottom(proxy: proxy)
@@ -216,8 +219,7 @@ struct PiSessionView: View {
 				return
 			}
 
-			let client = try await connectToServer(host: context.host)
-			defer { Task { await client.disconnect() } }
+			let client = PiServerClient(serverURL: context.host.serverURL)
 			let remoteMessages = try await client.getMessages(sessionFile: sessionFile)
 
 			try await db.dbQueue.write { dbConn in

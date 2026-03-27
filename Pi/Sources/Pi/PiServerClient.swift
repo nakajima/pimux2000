@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - Server client that talks to the pimux2000 Bun WebSocket server
+// MARK: - Server client that talks to the pimux2000 Bun server
 
 public actor PiServerClient {
 	private let serverURL: URL
@@ -14,17 +14,26 @@ public actor PiServerClient {
 
 	public init(serverURL: URL) {
 		self.serverURL = serverURL
-		self.session = URLSession(configuration: .default)
+		self.session = Self.makeSession()
 	}
 
 	public init(serverURL: String) {
 		self.serverURL = URL(string: serverURL)!
-		self.session = URLSession(configuration: .default)
+		self.session = Self.makeSession()
+	}
+
+	private static func makeSession() -> URLSession {
+		let configuration = URLSessionConfiguration.default
+		configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+		configuration.urlCache = nil
+		return URLSession(configuration: configuration)
 	}
 
 	// MARK: - Connection
 
 	public func connect() async throws {
+		if webSocket != nil { return }
+
 		let wsURL: URL
 		if serverURL.scheme == "http" || serverURL.scheme == "https" {
 			var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false)!
@@ -47,13 +56,7 @@ public actor PiServerClient {
 		receiveTask = nil
 		webSocket?.cancel(with: .normalClosure, reason: nil)
 		webSocket = nil
-
-		// Fail any pending requests
-		let pending = pendingRequests
-		pendingRequests.removeAll()
-		for (_, continuation) in pending {
-			continuation.resume(throwing: PiError.commandFailed("Connection closed"))
-		}
+		failAllPendingRequests(error: PiError.commandFailed("Connection closed"))
 	}
 
 	// MARK: - Push handlers
@@ -69,7 +72,7 @@ public actor PiServerClient {
 	// MARK: - API
 
 	public func listSessions() async throws -> [JSONObject] {
-		let response = try await sendRequest(type: "list_sessions")
+		let response = try await sendHTTPGet(path: "/sessions")
 		guard let data = response["data"]?.arrayValue else {
 			throw PiError.invalidResponse("Missing sessions data")
 		}
@@ -77,9 +80,9 @@ public actor PiServerClient {
 	}
 
 	public func getMessages(sessionFile: String) async throws -> [JSONObject] {
-		let response = try await sendRequest(
-			type: "get_messages",
-			extra: ["sessionFile": .string(sessionFile)]
+		let response = try await sendHTTPGet(
+			path: "/messages",
+			queryItems: [URLQueryItem(name: "sessionFile", value: sessionFile)]
 		)
 		guard let data = response["data"]?.arrayValue else {
 			throw PiError.invalidResponse("Missing messages data")
@@ -88,17 +91,17 @@ public actor PiServerClient {
 	}
 
 	public func getState(sessionId: String) async throws -> JSONObject? {
-		let response = try await sendRequest(
-			type: "get_state",
-			extra: ["sessionId": .string(sessionId)]
+		let response = try await sendHTTPGet(
+			path: "/state",
+			queryItems: [URLQueryItem(name: "sessionId", value: sessionId)]
 		)
 		return response["data"]?.objectValue
 	}
 
 	public func getLastAssistantText(sessionFile: String) async throws -> String? {
-		let response = try await sendRequest(
-			type: "get_last_assistant_text",
-			extra: ["sessionFile": .string(sessionFile)]
+		let response = try await sendHTTPGet(
+			path: "/last_assistant_text",
+			queryItems: [URLQueryItem(name: "sessionFile", value: sessionFile)]
 		)
 		return response["text"]?.stringValue
 	}
@@ -112,6 +115,65 @@ public actor PiServerClient {
 		let response = try await sendRequest(type: "prompt", extra: extra)
 		try validatePromptResponse(response)
 		return response
+	}
+
+	// MARK: - HTTP
+
+	private func sendHTTPGet(path: String, queryItems: [URLQueryItem] = []) async throws -> JSONObject {
+		var components = URLComponents(url: httpBaseURL(), resolvingAgainstBaseURL: false)
+		components?.path = path
+		components?.queryItems = queryItems.isEmpty ? nil : queryItems
+
+		guard let url = components?.url else {
+			throw PiError.invalidResponse("Invalid server URL")
+		}
+
+		var request = URLRequest(url: url)
+		request.cachePolicy = .reloadIgnoringLocalCacheData
+		request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+		request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+
+		let (data, response) = try await session.data(for: request)
+		guard let httpResponse = response as? HTTPURLResponse else {
+			throw PiError.invalidResponse("Invalid HTTP response")
+		}
+
+		guard (200..<300).contains(httpResponse.statusCode) else {
+			let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+			if httpResponse.statusCode == 404 || message == "Expected WebSocket" {
+				throw PiError.commandFailed("The remote server is too old. Please update it from pimux2000.")
+			}
+
+			throw PiError.commandFailed(message?.isEmpty == false ? message! : "Server returned HTTP \(httpResponse.statusCode)")
+		}
+
+		guard let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+			let object = value.objectValue else {
+			throw PiError.invalidResponse("Invalid JSON response")
+		}
+
+		if let error = object["error"]?.stringValue {
+			throw PiError.rpcFailure(error)
+		}
+
+		return object
+	}
+
+	private func httpBaseURL() -> URL {
+		guard var components = URLComponents(url: serverURL, resolvingAgainstBaseURL: false) else {
+			return serverURL
+		}
+
+		switch components.scheme {
+		case "ws":
+			components.scheme = "http"
+		case "wss":
+			components.scheme = "https"
+		default:
+			break
+		}
+
+		return components.url ?? serverURL
 	}
 
 	// MARK: - Request/response plumbing
@@ -152,6 +214,14 @@ public actor PiServerClient {
 		}
 	}
 
+	private func failAllPendingRequests(error: Error) {
+		let pending = pendingRequests
+		pendingRequests.removeAll()
+		for (_, continuation) in pending {
+			continuation.resume(throwing: error)
+		}
+	}
+
 	private func validatePromptResponse(_ response: JSONObject) throws {
 		guard let responses = response["responses"]?.arrayValue else { return }
 
@@ -179,12 +249,15 @@ public actor PiServerClient {
 				}
 
 				guard let data = text.data(using: .utf8),
-				      let value = try? JSONDecoder().decode(JSONValue.self, from: data),
-				      let object = value.objectValue else { continue }
+					let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+					let object = value.objectValue else { continue }
 
 				await handleServerMessage(object)
 			} catch {
-				// Connection closed or error
+				if Task.isCancelled { break }
+				webSocket = nil
+				receiveTask = nil
+				failAllPendingRequests(error: error)
 				break
 			}
 		}
@@ -211,7 +284,7 @@ public actor PiServerClient {
 			}
 		case "messages_updated":
 			if let sessionFile = msg["sessionFile"]?.stringValue,
-			   let data = msg["data"]?.arrayValue {
+				let data = msg["data"]?.arrayValue {
 				onMessagesUpdated?(sessionFile, data.compactMap { $0.objectValue })
 			}
 		default:
