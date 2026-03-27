@@ -22,7 +22,7 @@ enum ServerFiles {
 	static let extensions: [ServerFile] = [
 		extReloadCoordinator,
 		extActiveSessionRegistry,
-		extReloadAll,
+		extPimux2000,
 	]
 }
 
@@ -1430,14 +1430,6 @@ export default function activeSessionRegistryExtension(pi: ExtensionAPI) {
 		latestLastMessageRole = lastMessage?.role;
 	}
 
-	pi.registerCommand("active-sessions-path", {
-		description: "Show the directory where the active pi session registry is written",
-		handler: async (_args, ctx) => {
-			await ensureRegistryDir();
-			ctx.ui.notify(`Active pi session registry: ${REGISTRY_DIR}`, "info");
-		},
-	});
-
 	pi.on("session_start", async (_event, ctx) => {
 		latestContext = ctx;
 		lastKnownModel = ctx.model
@@ -1496,34 +1488,54 @@ export default function activeSessionRegistryExtension(pi: ExtensionAPI) {
 """#
 	)
 
-	static let extReloadAll = ServerFile(
-		path: "reload-all.ts",
+	static let extPimux2000 = ServerFile(
+		path: "pimux2000.ts",
 		content: #"""
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { requestReloadForOtherInteractiveSessions } from "./reload-coordinator";
+import { REGISTRY_DIR, requestReloadForOtherInteractiveSessions } from "./reload-coordinator";
 
-export default function reloadAllExtension(pi: ExtensionAPI) {
-	pi.registerCommand("reload-all", {
-		description: "Reload all active pi sessions on this host, including the current one",
-		handler: async (_args, ctx) => {
-			const { requested, interactiveCount, skipped } = await requestReloadForOtherInteractiveSessions(process.pid, {
-				reason: "reload-all",
-			});
+export default function pimux2000Extension(pi: ExtensionAPI) {
+	pi.registerCommand("pimux2000", {
+		description: "pimux2000 utilities: reload-all, sessions-path",
+		handler: async (args, ctx) => {
+			const subcommand = args.trim().split(/\s+/)[0];
 
-			const parts = ["Reloaded current session"];
-			if (requested > 0) {
-				parts.push(`queued /reload for ${requested} other active session${requested === 1 ? "" : "s"}`);
-			}
-			if (interactiveCount === 1) {
-				parts.push("no other active interactive sessions found");
-			}
-			ctx.ui.notify(parts.join("; "), "info");
-			if (skipped.length > 0) {
-				ctx.ui.notify(`Skipped: ${skipped.slice(0, 4).join(", ")}${skipped.length > 4 ? ", …" : ""}`, "warning");
-			}
+			switch (subcommand) {
+				case "reload-all": {
+					const { requested, interactiveCount, skipped } = await requestReloadForOtherInteractiveSessions(process.pid, {
+						reason: "reload-all",
+					});
 
-			await ctx.reload();
-			return;
+					const parts = ["Reloaded current session"];
+					if (requested > 0) {
+						parts.push(`queued /reload for ${requested} other active session${requested === 1 ? "" : "s"}`);
+					}
+					if (interactiveCount === 1) {
+						parts.push("no other active interactive sessions found");
+					}
+					ctx.ui.notify(parts.join("; "), "info");
+					if (skipped.length > 0) {
+						ctx.ui.notify(`Skipped: ${skipped.slice(0, 4).join(", ")}${skipped.length > 4 ? ", …" : ""}`, "warning");
+					}
+
+					await ctx.reload();
+					return;
+				}
+
+				case "sessions-path": {
+					ctx.ui.notify(`Active session registry: ${REGISTRY_DIR}`, "info");
+					return;
+				}
+
+				default:
+					ctx.ui.notify(
+						"Usage: /pimux2000 <subcommand>\n" +
+						"  reload-all      Reload all active pi sessions\n" +
+						"  sessions-path   Show the session registry directory",
+						subcommand ? "warning" : "info"
+					);
+					return;
+			}
 		},
 	});
 }
