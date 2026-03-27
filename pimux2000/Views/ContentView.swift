@@ -37,8 +37,8 @@ struct ContentView: View {
 	@Query(PiSessionsRequest()) private var sessions: [SessionInfo]
 	@Query(HostsRequest()) private var hosts: [Host]
 	@State private var selectedSessionID: String?
-	@State private var launchUpdatePrompt: LaunchServerUpdatePrompt?
-	@State private var pendingLaunchUpdatePrompts: [LaunchServerUpdatePrompt] = []
+	@State private var launchVersionPrompt: LaunchVersionPrompt?
+	@State private var pendingLaunchVersionPrompts: [LaunchVersionPrompt] = []
 	@State private var launchWarning: LaunchServerWarning?
 	@State private var pendingLaunchWarnings: [LaunchServerWarning] = []
 	@State private var updateSheetRequest: ServerUpdateRequest?
@@ -92,20 +92,25 @@ struct ContentView: View {
 			await checkSavedHostServerVersions()
 		}
 		.alert(
-			"Server Update Available",
+			launchVersionPrompt?.title ?? "Version Mismatch",
 			isPresented: Binding(
-				get: { launchUpdatePrompt != nil },
+				get: { launchVersionPrompt != nil },
 				set: { isPresented in
 					if !isPresented {
-						advanceLaunchUpdatePromptQueue()
+						advanceLaunchVersionPromptQueue()
 					}
 				}
 			),
-			presenting: launchUpdatePrompt
+			presenting: launchVersionPrompt
 		) { prompt in
-			Button("Not Now", role: .cancel) {}
-			Button("Update") {
-				updateSheetRequest = ServerUpdateRequest(sshTarget: prompt.host.sshTarget)
+			switch prompt {
+			case .updateServer(let host, _):
+				Button("Not Now", role: .cancel) {}
+				Button("Update") {
+					updateSheetRequest = ServerUpdateRequest(sshTarget: host.sshTarget)
+				}
+			case .updateApp:
+				Button("OK", role: .cancel) {}
 			}
 		} message: { prompt in
 			Text(prompt.message)
@@ -120,7 +125,7 @@ struct ContentView: View {
 	}
 
 	private func checkSavedHostServerVersions() async {
-		var prompts: [LaunchServerUpdatePrompt] = []
+		var prompts: [LaunchVersionPrompt] = []
 		var warnings: [LaunchServerWarning] = []
 
 		await withTaskGroup(of: HostServerVersionStatus.self) { group in
@@ -134,7 +139,7 @@ struct ContentView: View {
 				switch status {
 				case .current:
 					break
-				case .outdated(let prompt):
+				case .prompt(let prompt):
 					prompts.append(prompt)
 				case .warning(let warning):
 					warnings.append(warning)
@@ -145,18 +150,18 @@ struct ContentView: View {
 		prompts.sort { $0.host.displayName < $1.host.displayName }
 		warnings.sort { $0.host.displayName < $1.host.displayName }
 
-		launchUpdatePrompt = prompts.first
-		pendingLaunchUpdatePrompts = Array(prompts.dropFirst())
+		launchVersionPrompt = prompts.first
+		pendingLaunchVersionPrompts = Array(prompts.dropFirst())
 		launchWarning = warnings.first
 		pendingLaunchWarnings = Array(warnings.dropFirst())
 	}
 
-	private func advanceLaunchUpdatePromptQueue() {
-		if let next = pendingLaunchUpdatePrompts.first {
-			launchUpdatePrompt = next
-			pendingLaunchUpdatePrompts.removeFirst()
+	private func advanceLaunchVersionPromptQueue() {
+		if let next = pendingLaunchVersionPrompts.first {
+			launchVersionPrompt = next
+			pendingLaunchVersionPrompts.removeFirst()
 		} else {
-			launchUpdatePrompt = nil
+			launchVersionPrompt = nil
 		}
 	}
 
@@ -167,6 +172,31 @@ struct ContentView: View {
 		} else {
 			launchWarning = nil
 		}
+	}
+
+	private static func compareVersions(_ lhs: String, _ rhs: String) -> ComparisonResult? {
+		let lhsParts = lhs.split(separator: ".", omittingEmptySubsequences: false)
+		let rhsParts = rhs.split(separator: ".", omittingEmptySubsequences: false)
+		guard !lhsParts.isEmpty, !rhsParts.isEmpty else { return nil }
+
+		let lhsNumbers = lhsParts.compactMap { Int($0) }
+		let rhsNumbers = rhsParts.compactMap { Int($0) }
+		guard lhsNumbers.count == lhsParts.count, rhsNumbers.count == rhsParts.count else {
+			return nil
+		}
+
+		for index in 0..<max(lhsNumbers.count, rhsNumbers.count) {
+			let lhsValue = index < lhsNumbers.count ? lhsNumbers[index] : 0
+			let rhsValue = index < rhsNumbers.count ? rhsNumbers[index] : 0
+			if lhsValue < rhsValue {
+				return .orderedAscending
+			}
+			if lhsValue > rhsValue {
+				return .orderedDescending
+			}
+		}
+
+		return .orderedSame
 	}
 
 	private static func checkServerVersion(for host: Host) async -> HostServerVersionStatus {
@@ -194,18 +224,31 @@ struct ContentView: View {
 			if let health = try? JSONDecoder().decode(ServerHealthResponse.self, from: data),
 				health.ok == true,
 				let version = health.version {
-				if version == ServerFiles.version {
+				switch Self.compareVersions(version, ServerFiles.version) {
+				case .orderedSame:
 					return .current
+				case .orderedAscending:
+					return .prompt(
+						.updateServer(host: host, remoteVersion: version)
+					)
+				case .orderedDescending:
+					return .prompt(
+						.updateApp(host: host, remoteVersion: version)
+					)
+				case nil:
+					return .warning(
+						LaunchServerWarning(
+							host: host,
+							message: "Couldn’t compare versions for \(host.displayName). Update the app or server manually if needed."
+						)
+					)
 				}
-				return .outdated(
-					LaunchServerUpdatePrompt(host: host, remoteVersion: version)
-				)
 			}
 
 			let legacyResponse = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
 			if legacyResponse == "ok" {
-				return .outdated(
-					LaunchServerUpdatePrompt(host: host, remoteVersion: nil)
+				return .prompt(
+					.updateServer(host: host, remoteVersion: nil)
 				)
 			}
 
@@ -239,7 +282,7 @@ struct ContentView: View {
 
 private enum HostServerVersionStatus {
 	case current
-	case outdated(LaunchServerUpdatePrompt)
+	case prompt(LaunchVersionPrompt)
 	case warning(LaunchServerWarning)
 }
 
@@ -248,17 +291,45 @@ private struct ServerHealthResponse: Decodable {
 	let version: String?
 }
 
-private struct LaunchServerUpdatePrompt: Identifiable, Equatable {
-	let host: Host
-	let remoteVersion: String?
+private enum LaunchVersionPrompt: Identifiable, Equatable {
+	case updateServer(host: Host, remoteVersion: String?)
+	case updateApp(host: Host, remoteVersion: String)
 
-	var id: String { host.sshTarget }
+	var host: Host {
+		switch self {
+		case .updateServer(let host, _), .updateApp(let host, _):
+			host
+		}
+	}
+
+	var id: String {
+		switch self {
+		case .updateServer(let host, _):
+			return "server-\(host.sshTarget)"
+		case .updateApp(let host, _):
+			return "app-\(host.sshTarget)"
+		}
+	}
+
+	var title: String {
+		switch self {
+		case .updateServer:
+			return "Server Update Available"
+		case .updateApp:
+			return "Update This App"
+		}
+	}
 
 	var message: String {
-		if let remoteVersion {
-			return "\(host.displayName) is running bundled server version \(remoteVersion), but this app includes \(ServerFiles.version). Update it now?"
+		switch self {
+		case .updateServer(let host, let remoteVersion):
+			if let remoteVersion {
+				return "\(host.displayName) is running bundled server version \(remoteVersion), but this app includes \(ServerFiles.version). Update the server now?"
+			}
+			return "\(host.displayName) is running a legacy bundled server without version info. Update the server now?"
+		case .updateApp(let host, let remoteVersion):
+			return "\(host.displayName) is running bundled server version \(remoteVersion), which is newer than this app’s bundled version \(ServerFiles.version). Update this iOS app instead of installing an older server."
 		}
-		return "\(host.displayName) is running a legacy bundled server without version info. Update it now?"
 	}
 }
 
