@@ -21,7 +21,6 @@ let package = Package(
 		),
 	],
 	dependencies: [
-		.package(path: "Packages/PiIOSSystemSupport"),
 		.package(url: "https://github.com/orlandos-nl/Citadel.git", from: "0.7.0"),
 	],
 	targets: [
@@ -30,7 +29,6 @@ let package = Package(
 		.target(
 			name: "Pi",
 			dependencies: [
-				.product(name: "PiIOSSystemSupport", package: "PiIOSSystemSupport", condition: .when(platforms: [.iOS])),
 				.product(name: "Citadel", package: "Citadel"),
 			]
 		),
