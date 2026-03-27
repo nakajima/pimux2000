@@ -49,6 +49,7 @@ struct PiSessionView: View {
 	@Query<MessagesRequest> var messages: [MessageInfo]
 	@State private var inputText = ""
 	@State private var isSending = false
+	@State private var pendingMessage: String?
 	@State private var sendError: String?
 
 	init(session: PiSession) {
@@ -65,14 +66,28 @@ struct PiSessionView: View {
 							MessageView(messageInfo: messageInfo)
 								.id(messageInfo.id)
 						}
+
+						if let pendingMessage {
+							PendingUserMessageView(text: pendingMessage)
+								.id("pending-user")
+
+							ThinkingIndicatorView()
+								.id("pending-thinking")
+						}
 					}
 					.padding()
 				}
 				.defaultScrollAnchor(.bottom)
 				.onChange(of: messages.count) {
-					if let lastID = messages.last?.id {
+					if pendingMessage != nil {
+						pendingMessage = nil
+					}
+					scrollToBottom(proxy: proxy)
+				}
+				.onChange(of: pendingMessage) {
+					if pendingMessage != nil {
 						withAnimation {
-							proxy.scrollTo(lastID, anchor: .bottom)
+							proxy.scrollTo("pending-thinking", anchor: .bottom)
 						}
 					}
 				}
@@ -84,18 +99,15 @@ struct PiSessionView: View {
 				TextField("Send a message…", text: $inputText, axis: .vertical)
 					.textFieldStyle(.plain)
 					.lineLimit(1...5)
+					.submitLabel(.send)
 					.disabled(isSending)
+					.onSubmit { Task { await sendPrompt() } }
 
 				Button {
 					Task { await sendPrompt() }
 				} label: {
-					if isSending {
-						ProgressView()
-							.controlSize(.small)
-					} else {
-						Image(systemName: "arrow.up.circle.fill")
-							.font(.title2)
-					}
+					Image(systemName: "arrow.up.circle.fill")
+						.font(.title2)
 				}
 				.disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending)
 			}
@@ -105,7 +117,7 @@ struct PiSessionView: View {
 		.task {
 			while !Task.isCancelled {
 				await loadMessages()
-				try? await Task.sleep(for: .seconds(3))
+				try? await Task.sleep(for: .seconds(isSending ? 1 : 3))
 			}
 		}
 		.alert("Send Failed", isPresented: .init(
@@ -115,6 +127,14 @@ struct PiSessionView: View {
 			Button("OK", role: .cancel) {}
 		} message: {
 			Text(sendError ?? "")
+		}
+	}
+
+	private func scrollToBottom(proxy: ScrollViewProxy) {
+		if pendingMessage != nil {
+			withAnimation { proxy.scrollTo("pending-thinking", anchor: .bottom) }
+		} else if let lastID = messages.last?.id {
+			withAnimation { proxy.scrollTo(lastID, anchor: .bottom) }
 		}
 	}
 
@@ -169,12 +189,11 @@ struct PiSessionView: View {
 
 	private func sendPrompt() async {
 		let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-		guard !text.isEmpty else { return }
-		guard let sessionFile = session.sessionFile else { return }
+		guard !text.isEmpty, let sessionFile = session.sessionFile else { return }
 
 		inputText = ""
+		pendingMessage = text
 		isSending = true
-		defer { isSending = false }
 
 		do {
 			guard let client = try await connectToServer() else { return }
@@ -183,6 +202,47 @@ struct PiSessionView: View {
 		} catch {
 			sendError = error.localizedDescription
 		}
+
+		pendingMessage = nil
+		isSending = false
+		await loadMessages()
+	}
+}
+
+// MARK: - Pending message views
+
+private struct PendingUserMessageView: View {
+	let text: String
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 6) {
+			HStack(spacing: 6) {
+				Image(systemName: "person.fill")
+				Text("You")
+					.font(.caption)
+					.fontWeight(.semibold)
+					.textCase(.uppercase)
+			}
+			.foregroundStyle(.blue)
+
+			Text(text)
+				.font(chatFont(style: .body))
+		}
+	}
+}
+
+private struct ThinkingIndicatorView: View {
+	var body: some View {
+		HStack(spacing: 6) {
+			Image(systemName: "sparkles")
+			Text("Thinking…")
+				.font(.caption)
+				.fontWeight(.semibold)
+				.textCase(.uppercase)
+			ProgressView()
+				.controlSize(.small)
+		}
+		.foregroundStyle(.purple)
 	}
 }
 
