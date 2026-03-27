@@ -65,6 +65,7 @@ struct PiSessionSync {
 		}
 
 		let summary = remoteSession["workSummary"]?.stringValue
+			?? remoteSession["sessionName"]?.stringValue
 			?? Self.cwdFolderName(remoteSession["cwd"]?.stringValue)
 			?? sessionId
 
@@ -127,7 +128,8 @@ struct PiSessionSync {
 	private nonisolated static func cwdFolderName(_ cwd: String?) -> String? {
 		guard let cwd, !cwd.isEmpty else { return nil }
 		let name = (cwd as NSString).lastPathComponent
-		return name.isEmpty ? nil : name
+		if name.isEmpty || name == "/" { return nil }
+		return name
 	}
 
 	nonisolated static func parseContentBlocks(from content: JSONValue?, messageID: Int64) -> [MessageContentBlock] {

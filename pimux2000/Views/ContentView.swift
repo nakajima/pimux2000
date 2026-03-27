@@ -3,12 +3,20 @@ import GRDBQuery
 import Pi
 import SwiftUI
 
-struct PiSessionsRequest: ValueObservationQueryable {
-	static var defaultValue: [PiSession] { [] }
+struct SessionInfo: Decodable, FetchableRecord, Identifiable, Equatable, Hashable {
+	var piSession: PiSession
+	var host: Host
+	var id: Int64? { piSession.id }
+}
 
-	func fetch(_ db: Database) throws -> [PiSession] {
+struct PiSessionsRequest: ValueObservationQueryable {
+	static var defaultValue: [SessionInfo] { [] }
+
+	func fetch(_ db: Database) throws -> [SessionInfo] {
 		try PiSession
+			.including(required: PiSession.host)
 			.order(Column("lastMessageAt").desc)
+			.asRequest(of: SessionInfo.self)
 			.fetchAll(db)
 	}
 }

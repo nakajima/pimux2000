@@ -68,6 +68,7 @@ struct PiSessionView: View {
 					}
 					.padding()
 				}
+				.defaultScrollAnchor(.bottom)
 				.onChange(of: messages.count) {
 					if let lastID = messages.last?.id {
 						withAnimation {

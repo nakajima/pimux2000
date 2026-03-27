@@ -42,7 +42,9 @@ struct AddServerSheet: View {
 		Form {
 			Section {
 				TextField("user@host", text: $sshTarget)
+					#if os(iOS)
 					.textInputAutocapitalization(.never)
+					#endif
 					.autocorrectionDisabled()
 			} footer: {
 				Text("The SSH target for the remote machine. A pimux2000 server will be set up automatically if one isn't running.")

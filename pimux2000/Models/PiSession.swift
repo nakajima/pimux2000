@@ -13,6 +13,7 @@ import SwiftUI
 struct PiSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
 	static let databaseTableName = "piSessions"
 	static let messages = hasMany(Message.self)
+	static let host = belongsTo(Host.self)
 
 	var id: Int64?
 	var hostID: Int64

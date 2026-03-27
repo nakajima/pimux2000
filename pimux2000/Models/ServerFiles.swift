@@ -778,6 +778,9 @@ export async function listSessions(): Promise<RegistryEntry[]> {
       const raw = await readFile(join(REGISTRY_DIR, file), "utf-8");
       const entry: RegistryEntry = JSON.parse(raw);
 
+      // Skip one-shot pi -p sessions (e.g. from summarization)
+      if (entry.mode === "print") continue;
+
       // Use cached summary if registry doesn't have one
       if (!entry.workSummary && entry.sessionFile) {
         const cached = summaryCache.get(entry.sessionFile);
