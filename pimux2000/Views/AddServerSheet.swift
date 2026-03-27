@@ -1,18 +1,43 @@
 import SwiftUI
 
 struct AddServerSheet: View {
+	enum Mode {
+		case add
+		case update
+
+		var navigationTitle: String {
+			switch self {
+			case .add: "Add Server"
+			case .update: "Update Server"
+			}
+		}
+
+		var primaryActionTitle: String {
+			switch self {
+			case .add: "Connect"
+			case .update: "Update"
+			}
+		}
+	}
+
 	@Environment(\.appDatabase) private var appDatabase
 	@Environment(\.dismiss) private var dismiss
-	@State private var sshTarget = ""
+	@State private var sshTarget: String
 	@State private var sshPassword = ""
 	@State private var installer: ServerInstaller?
 	@State private var phase: Phase = .input
+	private let mode: Mode
 
 	enum Phase {
 		case input
 		case checking
 		case installing
 		case done
+	}
+
+	init(initialSSHTarget: String = "", mode: Mode = .add) {
+		self.mode = mode
+		self._sshTarget = State(initialValue: initialSSHTarget)
 	}
 
 	var body: some View {
@@ -27,7 +52,7 @@ struct AddServerSheet: View {
 					installLogView
 				}
 			}
-			.navigationTitle("Add Server")
+			.navigationTitle(mode.navigationTitle)
 			.toolbar {
 				ToolbarItem(placement: .cancellationAction) {
 					Button("Cancel") { dismiss() }
@@ -47,19 +72,29 @@ struct AddServerSheet: View {
 					.textInputAutocapitalization(.never)
 					#endif
 					.autocorrectionDisabled()
+					.disabled(mode == .update)
 
 				SecureField("Password (optional)", text: $sshPassword)
 					.textContentType(.password)
 			} footer: {
-				Text("The SSH target for the remote machine. If you enter a password, it will be used for SSH during install/update and not stored. If left blank, the app will try SSH without a password first.")
+				Text(footerText)
 			}
 
 			Section {
-				Button("Connect") {
+				Button(mode.primaryActionTitle) {
 					Task { await connect() }
 				}
 				.disabled(sshTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 			}
+		}
+	}
+
+	private var footerText: String {
+		switch mode {
+		case .add:
+			"The SSH target for the remote machine. If you enter a password, it will be used for SSH during install/update and not stored. If left blank, the app will try SSH without a password first."
+		case .update:
+			"Update the bundled server and pi extensions on this host. If SSH requires a password, enter it here for this update only."
 		}
 	}
 

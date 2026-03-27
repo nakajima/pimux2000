@@ -15,15 +15,19 @@ struct Host: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
 		id = inserted.rowID
 	}
 
-	var serverURL: String {
-		// Extract hostname from user@host
-		let host: String
+	var serverHost: String {
 		if let atSign = sshTarget.firstIndex(of: "@") {
-			host = String(sshTarget[sshTarget.index(after: atSign)...])
-		} else {
-			host = sshTarget
+			return String(sshTarget[sshTarget.index(after: atSign)...])
 		}
-		return "ws://\(host):7749"
+		return sshTarget
+	}
+
+	var serverURL: String {
+		"ws://\(serverHost):7749"
+	}
+
+	var healthURL: URL? {
+		URL(string: "http://\(serverHost):7749/health")
 	}
 
 	var displayName: String {

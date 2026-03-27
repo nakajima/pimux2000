@@ -9,6 +9,8 @@ struct ServerFile {
 }
 
 enum ServerFiles {
+	static let version = "2026.03.27.1"
+
 	static let all: [ServerFile] = [
 		packageJSON,
 		cli,
@@ -32,7 +34,7 @@ extension ServerFiles {
 		content: #"""
 {
   "name": "pimux2000-server",
-  "version": "0.1.0",
+  "version": "\#(Self.version)",
   "type": "module",
   "bin": {
     "pimux2000": "./src/cli.ts"
@@ -119,6 +121,7 @@ import type { FSWatcher } from "fs";
 
 // MARK: - Config
 
+const VERSION = "\#(Self.version)";
 const PORT = parseInt(process.env.PIMUX2000_PORT ?? "7749", 10);
 
 // MARK: - Types
@@ -150,7 +153,10 @@ const server = Bun.serve<WSData>({
 
     // Health check endpoint
     if (url.pathname === "/health") {
-      return new Response("ok");
+      return Response.json({
+        ok: true,
+        version: VERSION,
+      });
     }
 
     const upgraded = server.upgrade(req, {

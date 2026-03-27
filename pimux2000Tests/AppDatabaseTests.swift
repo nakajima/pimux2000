@@ -62,4 +62,10 @@ struct AppDatabaseTests {
 		let host = Host(sshTarget: "myserver", createdAt: Date(), updatedAt: Date())
 		#expect(host.serverURL == "ws://myserver:7749")
 	}
+
+	@Test
+	func hostDerivedHealthURL() {
+		let host = Host(sshTarget: "nakajima@arch", createdAt: Date(), updatedAt: Date())
+		#expect(host.healthURL?.absoluteString == "http://arch:7749/health")
+	}
 }
