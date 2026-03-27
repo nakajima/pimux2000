@@ -2,6 +2,7 @@ import GRDB
 import GRDBQuery
 import Pi
 import SwiftUI
+import Foundation
 
 struct HostsRequest: ValueObservationQueryable {
 	static var defaultValue: [Host] { [] }
@@ -15,25 +16,29 @@ struct SidebarView: View {
 	@Environment(\.appDatabase) private var appDatabase
 	@Query(PiSessionsRequest()) private var sessions: [SessionInfo]
 	@Query(HostsRequest()) private var hosts: [Host]
+	@Binding var selectedSessionID: String?
 	@State private var isAddingServer = false
 	@State private var isShowingSettings = false
 
 	var body: some View {
-		List {
-			ForEach(sessions) { sessionInfo in
-				NavigationLink(value: Route.piSession(sessionInfo.piSession)) {
+		List(selection: $selectedSessionID) {
+			ForEach(sessions, id: \.session.sessionID) { sessionInfo in
+				VStack(alignment: .leading) {
+					Text(sessionInfo.session.summary)
 					VStack(alignment: .leading) {
-						Text(sessionInfo.piSession.summary)
-						if let lastMessage = sessionInfo.piSession.lastMessage, lastMessage != sessionInfo.piSession.summary {
-							Text(lastMessage)
-								.font(.caption)
-								.foregroundStyle(.secondary)
-								.lineLimit(2)
+						if let lastMessageAt = sessionInfo.session.lastMessageAt {
+							Text(lastMessageAt.formatted(.dateTime))
 						}
 						Text(sessionInfo.host.displayName)
-							.font(.caption2)
-							.foregroundStyle(.tertiary)
+							.bold()
 					}
+					.font(.caption)
+					.foregroundStyle(.secondary)
+				}
+				.tag(sessionInfo.session.sessionID)
+				.contentShape(Rectangle())
+				.onTapGesture {
+					selectedSessionID = sessionInfo.session.sessionID
 				}
 			}
 

@@ -160,6 +160,7 @@ public struct PiSessionRecord: Codable, Sendable, Equatable, Identifiable {
 
 public struct PiHostConfiguration: Sendable, Equatable {
 	public let sshTarget: String
+	public let sshPassword: String?
 	public let sshBinary: String
 	public let sshOptions: [String]
 	public let remotePiCommand: String
@@ -168,6 +169,7 @@ public struct PiHostConfiguration: Sendable, Equatable {
 
 	public init(
 		sshTarget: String,
+		sshPassword: String? = nil,
 		sshBinary: String = "/usr/bin/ssh",
 		sshOptions: [String] = [],
 		remotePiCommand: String = "pi",
@@ -175,6 +177,7 @@ public struct PiHostConfiguration: Sendable, Equatable {
 		executesLocally: Bool? = nil
 	) {
 		self.sshTarget = sshTarget
+		self.sshPassword = sshPassword
 		self.sshBinary = sshBinary
 		self.sshOptions = sshOptions
 		self.remotePiCommand = remotePiCommand
@@ -210,6 +213,7 @@ public enum PiError: Error, LocalizedError, Sendable {
 	case rpcFailure(String)
 	case processEnded(status: Int32, stderr: String)
 	case missingSessionFile(String)
+	case sshAuthenticationFailed(String)
 	case sessionBusy
 	case sessionNotFound(String)
 	case ambiguousSessionIdentifier(String, matches: [String])
@@ -221,6 +225,7 @@ public enum PiError: Error, LocalizedError, Sendable {
 		case let .rpcFailure(message): return "RPC failure: \(message)"
 		case let .processEnded(status, stderr): return "Process ended with status \(status): \(stderr)"
 		case let .missingSessionFile(sessionId): return "Session \(sessionId) has no session file"
+		case let .sshAuthenticationFailed(message): return message
 		case .sessionBusy: return "A prompt is already running on this RPC session"
 		case let .sessionNotFound(identifier): return "No active pi session found for identifier: \(identifier)"
 		case let .ambiguousSessionIdentifier(identifier, matches):
@@ -511,22 +516,42 @@ public enum SSH {
 
 	private static func runRemote(configuration: PiHostConfiguration, remoteCommand: String) async throws -> String {
 		let (username, host) = parseSSHTarget(configuration.sshTarget)
-
-		let client = try await SSHClient.connect(
-			host: host,
-			port: 22,
-			authenticationMethod: .custom(SSHNoneAuth(username: username)),
-			hostKeyValidator: .acceptAnything(),
-			reconnect: .never
-		)
+		let authenticationMethod: SSHAuthenticationMethod
+		if let password = configuration.sshPassword, !password.isEmpty {
+			authenticationMethod = .passwordBased(username: username, password: password)
+		} else {
+			authenticationMethod = .custom(SSHNoneAuth(username: username))
+		}
 
 		do {
-			let output = try await client.executeCommand(remoteCommand)
-			try await client.close()
-			return String(buffer: output)
-		} catch {
-			try? await client.close()
-			throw error
+			let client = try await SSHClient.connect(
+				host: host,
+				port: 22,
+				authenticationMethod: authenticationMethod,
+				hostKeyValidator: .acceptAnything(),
+				reconnect: .never
+			)
+
+			do {
+				let output = try await client.executeCommand(remoteCommand)
+				try await client.close()
+				return String(buffer: output)
+			} catch {
+				try? await client.close()
+				throw error
+			}
+		} catch let error as SSHClientError {
+			switch error {
+			case .allAuthenticationOptionsFailed:
+				if configuration.sshPassword?.isEmpty == false {
+					throw PiError.sshAuthenticationFailed("SSH authentication failed for \(configuration.sshTarget). Check the password and try again.")
+				}
+				throw PiError.sshAuthenticationFailed("SSH authentication failed for \(configuration.sshTarget). Enter the SSH password and try again.")
+			case .unsupportedPasswordAuthentication:
+				throw PiError.sshAuthenticationFailed("SSH password authentication is not enabled on \(configuration.sshTarget).")
+			default:
+				throw error
+			}
 		}
 	}
 

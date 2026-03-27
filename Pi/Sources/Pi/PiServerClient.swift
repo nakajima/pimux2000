@@ -109,7 +109,9 @@ public actor PiServerClient {
 			"message": .string(message),
 		]
 		if let cwd { extra["cwd"] = .string(cwd) }
-		return try await sendRequest(type: "prompt", extra: extra)
+		let response = try await sendRequest(type: "prompt", extra: extra)
+		try validatePromptResponse(response)
+		return response
 	}
 
 	// MARK: - Request/response plumbing
@@ -147,6 +149,17 @@ public actor PiServerClient {
 	private func failRequest(id: String, error: Error) {
 		if let continuation = pendingRequests.removeValue(forKey: id) {
 			continuation.resume(throwing: error)
+		}
+	}
+
+	private func validatePromptResponse(_ response: JSONObject) throws {
+		guard let responses = response["responses"]?.arrayValue else { return }
+
+		for item in responses {
+			guard let object = item.objectValue else { continue }
+			if object["success"]?.boolValue == false {
+				throw PiError.rpcFailure(object["error"]?.stringValue ?? "Unknown RPC error")
+			}
 		}
 	}
 

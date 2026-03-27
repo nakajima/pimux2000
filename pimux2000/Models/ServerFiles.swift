@@ -390,6 +390,10 @@ const SERVICE_NAME = "pimux2000";
 const isMac = platform() === "darwin";
 
 function findBun(): string {
+  if (process.execPath) {
+    return process.execPath;
+  }
+
   try {
     return execSync("which bun", { encoding: "utf-8" }).trim();
   } catch {
@@ -612,12 +616,40 @@ extension ServerFiles {
 	static let rpc = ServerFile(
 		path: "src/rpc.ts",
 		content: #"""
-import { spawn } from "child_process";
+import { execSync, spawn } from "child_process";
+import { existsSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
-const BUN_BIN = process.execPath;
-const PI_SCRIPT = join(homedir(), ".bun", "bin", "pi");
+function findPiCommand(): string {
+  const explicit = process.env.PIMUX2000_PI?.trim();
+  if (explicit) return explicit;
+
+  try {
+    const resolved = execSync("command -v pi", {
+      encoding: "utf-8",
+      shell: "/bin/sh",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (resolved) return resolved;
+  } catch {
+    // fall through to common locations
+  }
+
+  const candidates = [
+    join(homedir(), ".bun", "bin", "pi"),
+    "/opt/homebrew/bin/pi",
+    "/usr/local/bin/pi",
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  throw new Error(
+    "pi command not found. Set PIMUX2000_PI or install pi in a standard location."
+  );
+}
 
 // MARK: - Types
 
@@ -641,7 +673,8 @@ export async function runRPC(
   const input = commands.map((c) => JSON.stringify(c)).join("\n") + "\n";
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(BUN_BIN, [PI_SCRIPT, "--mode", "rpc"], {
+    const piCommand = findPiCommand();
+    const proc = spawn(piCommand, ["--mode", "rpc"], {
       cwd: cwd ?? undefined,
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env },
@@ -728,8 +761,8 @@ extension ServerFiles {
 import { readdir, readFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
-import { watch, type FSWatcher } from "fs";
-import { spawn } from "child_process";
+import { existsSync, watch, type FSWatcher } from "fs";
+import { execSync, spawn } from "child_process";
 
 // MARK: - Types
 
@@ -830,9 +863,35 @@ const summarizeInFlight = new Set<string>();
 
 // MARK: - LLM-based summary generation
 
-// Resolve paths at startup — launchd has a minimal PATH
-const BUN_BIN = process.execPath; // we're already running under bun
-const PI_SCRIPT = join(homedir(), ".bun", "bin", "pi");
+function findPiCommand(): string {
+  const explicit = process.env.PIMUX2000_PI?.trim();
+  if (explicit) return explicit;
+
+  try {
+    const resolved = execSync("command -v pi", {
+      encoding: "utf-8",
+      shell: "/bin/sh",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    if (resolved) return resolved;
+  } catch {
+    // fall through to common locations
+  }
+
+  const candidates = [
+    join(homedir(), ".bun", "bin", "pi"),
+    "/opt/homebrew/bin/pi",
+    "/usr/local/bin/pi",
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  throw new Error(
+    "pi command not found. Set PIMUX2000_PI or install pi in a standard location."
+  );
+}
 
 const summaryCache = new Map<
   string,
@@ -884,9 +943,10 @@ async function summarizeWithPi(
       resolve(value);
     };
 
+    const piCommand = findPiCommand();
     const proc = spawn(
-      BUN_BIN,
-      [PI_SCRIPT, "-p", "--no-session", "--model", "anthropic/claude-haiku-4-5", prompt],
+      piCommand,
+      ["-p", "--no-session", "--model", "anthropic/claude-haiku-4-5", prompt],
       { stdio: ["ignore", "pipe", "pipe"] }
     );
 

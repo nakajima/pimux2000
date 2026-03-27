@@ -4,6 +4,7 @@ struct AddServerSheet: View {
 	@Environment(\.appDatabase) private var appDatabase
 	@Environment(\.dismiss) private var dismiss
 	@State private var sshTarget = ""
+	@State private var sshPassword = ""
 	@State private var installer: ServerInstaller?
 	@State private var phase: Phase = .input
 
@@ -46,8 +47,11 @@ struct AddServerSheet: View {
 					.textInputAutocapitalization(.never)
 					#endif
 					.autocorrectionDisabled()
+
+				SecureField("Password (optional)", text: $sshPassword)
+					.textContentType(.password)
 			} footer: {
-				Text("The SSH target for the remote machine. A pimux2000 server will be set up automatically if one isn't running.")
+				Text("The SSH target for the remote machine. If you enter a password, it will be used for SSH during install/update and not stored. If left blank, the app will try SSH without a password first.")
 			}
 
 			Section {
@@ -99,29 +103,43 @@ struct AddServerSheet: View {
 			Divider()
 
 			if let installer {
-				HStack {
+				Group {
 					if installer.isComplete {
-						Label("Server running", systemImage: "checkmark.circle.fill")
-							.foregroundStyle(.green)
-						Spacer()
-						Button("Done") {
-							Task { await saveAndDismiss() }
+						HStack {
+							Label("Server running", systemImage: "checkmark.circle.fill")
+								.foregroundStyle(.green)
+							Spacer()
+							Button("Done") {
+								Task { await saveAndDismiss() }
+							}
+							.buttonStyle(.borderedProminent)
 						}
-						.buttonStyle(.borderedProminent)
 					} else if installer.error != nil {
-						Label("Failed", systemImage: "xmark.circle.fill")
-							.foregroundStyle(.red)
-						Spacer()
-						Button("Retry") {
-							Task { await installer.install() }
+						VStack(alignment: .leading, spacing: 12) {
+							HStack {
+								Label("Failed", systemImage: "xmark.circle.fill")
+									.foregroundStyle(.red)
+								Spacer()
+								Button("Retry") {
+									Task { await connect() }
+								}
+								.buttonStyle(.bordered)
+							}
+
+							SecureField("SSH password", text: $sshPassword)
+								.textContentType(.password)
+							Text("If the SSH server requires a password, enter it and retry. The password is not stored.")
+								.font(.caption)
+								.foregroundStyle(.secondary)
 						}
-						.buttonStyle(.bordered)
 					} else {
-						ProgressView()
-							.controlSize(.small)
-						Text("Installing...")
-							.foregroundStyle(.secondary)
-						Spacer()
+						HStack {
+							ProgressView()
+								.controlSize(.small)
+							Text("Installing...")
+								.foregroundStyle(.secondary)
+							Spacer()
+						}
 					}
 				}
 				.padding()
@@ -135,26 +153,15 @@ struct AddServerSheet: View {
 		let trimmed = sshTarget.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard !trimmed.isEmpty else { return }
 
-		let inst = ServerInstaller(sshTarget: trimmed)
+		let password = sshPassword.isEmpty ? nil : sshPassword
+		let inst = ServerInstaller(sshTarget: trimmed, sshPassword: password)
 		self.installer = inst
 		phase = .checking
 
-		// Try connecting to existing server first
-		if await inst.checkServerRunning() {
-			// Server already running — just save the host
-			do {
-				try appDatabase?.addHost(sshTarget: trimmed)
-				dismiss()
-			} catch {
-				inst.error = error.localizedDescription
-				phase = .installing
-			}
-			return
-		}
+		let serverAlreadyRunning = await inst.checkServerRunning()
 
-		// No server running — install it
 		phase = .installing
-		await inst.install()
+		await inst.install(updatingExistingServer: serverAlreadyRunning)
 		if inst.isComplete {
 			phase = .done
 		}

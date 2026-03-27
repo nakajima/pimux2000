@@ -8,17 +8,37 @@ import SwiftUI
 struct MessageInfo: Identifiable, Equatable {
 	let message: Message
 	let contentBlocks: [MessageContentBlock]
-	var id: Int64? { message.id }
+	var id: String { "\(message.piSessionID)-\(message.position)" }
+
+	static func == (lhs: MessageInfo, rhs: MessageInfo) -> Bool {
+		lhs.message.piSessionID == rhs.message.piSessionID
+			&& lhs.message.position == rhs.message.position
+			&& lhs.message.role == rhs.message.role
+			&& lhs.message.toolName == rhs.message.toolName
+			&& lhs.contentBlocks.elementsEqual(rhs.contentBlocks, by: Self.blocksEqual)
+	}
+
+	private static func blocksEqual(_ lhs: MessageContentBlock, _ rhs: MessageContentBlock) -> Bool {
+		lhs.position == rhs.position
+			&& lhs.type == rhs.type
+			&& lhs.text == rhs.text
+			&& lhs.toolCallName == rhs.toolCallName
+	}
 }
 
 struct MessagesRequest: ValueObservationQueryable {
 	static var defaultValue: [MessageInfo] { [] }
 
-	let session: PiSession
+	let sessionID: String
 
 	func fetch(_ db: Database) throws -> [MessageInfo] {
+		guard let currentSession = try PiSession
+			.filter(Column("sessionID") == sessionID)
+			.fetchOne(db),
+			let piSessionID = currentSession.id else { return [] }
+
 		let messages = try Message
-			.filter(Column("piSessionID") == session.id)
+			.filter(Column("piSessionID") == piSessionID)
 			.order(Column("position").asc)
 			.fetchAll(db)
 
@@ -49,12 +69,14 @@ struct PiSessionView: View {
 	@Query<MessagesRequest> var messages: [MessageInfo]
 	@State private var inputText = ""
 	@State private var isSending = false
+	@State private var isLoadingMessages = false
 	@State private var pendingMessage: String?
 	@State private var sendError: String?
+	@State private var loadError: String?
 
 	init(session: PiSession) {
 		self.session = session
-		self._messages = Query(MessagesRequest(session: session))
+		self._messages = Query(MessagesRequest(sessionID: session.sessionID))
 	}
 
 	var body: some View {
@@ -62,8 +84,13 @@ struct PiSessionView: View {
 			ScrollViewReader { proxy in
 				ScrollView {
 					LazyVStack(alignment: .leading, spacing: 16) {
+						if messages.isEmpty, pendingMessage == nil {
+							emptyStateView
+						}
+
 						ForEach(messages) { messageInfo in
 							MessageView(messageInfo: messageInfo)
+								.equatable()
 								.id(messageInfo.id)
 						}
 
@@ -79,16 +106,11 @@ struct PiSessionView: View {
 				}
 				.defaultScrollAnchor(.bottom)
 				.onChange(of: messages.count) {
-					if pendingMessage != nil {
-						pendingMessage = nil
-					}
 					scrollToBottom(proxy: proxy)
 				}
 				.onChange(of: pendingMessage) {
 					if pendingMessage != nil {
-						withAnimation {
-							proxy.scrollTo("pending-thinking", anchor: .bottom)
-						}
+						proxy.scrollTo("pending-thinking", anchor: .bottom)
 					}
 				}
 			}
@@ -114,11 +136,8 @@ struct PiSessionView: View {
 			.padding()
 		}
 		.navigationTitle(session.summary)
-		.task {
-			while !Task.isCancelled {
-				await loadMessages()
-				try? await Task.sleep(for: .seconds(isSending ? 1 : 3))
-			}
+		.task(id: session.sessionID) {
+			await loadMessages()
 		}
 		.alert("Send Failed", isPresented: .init(
 			get: { sendError != nil },
@@ -132,73 +151,110 @@ struct PiSessionView: View {
 
 	private func scrollToBottom(proxy: ScrollViewProxy) {
 		if pendingMessage != nil {
-			withAnimation { proxy.scrollTo("pending-thinking", anchor: .bottom) }
+			proxy.scrollTo("pending-thinking", anchor: .bottom)
 		} else if let lastID = messages.last?.id {
-			withAnimation { proxy.scrollTo(lastID, anchor: .bottom) }
+			proxy.scrollTo(lastID, anchor: .bottom)
 		}
 	}
 
-	private func connectToServer() async throws -> PiServerClient? {
-		guard let db = appDatabase else { return nil }
-		let host = try await db.dbQueue.read { db in
-			try Host.fetchOne(db, id: session.hostID)
+	@ViewBuilder
+	private var emptyStateView: some View {
+		if isLoadingMessages {
+			ContentUnavailableView {
+				ProgressView()
+			} description: {
+				Text("Loading messages…")
+			}
+		} else if let loadError {
+			ContentUnavailableView {
+				Label("Couldn’t Load Messages", systemImage: "exclamationmark.triangle")
+			} description: {
+				Text(loadError)
+			} actions: {
+				Button("Retry") {
+					Task { await loadMessages() }
+				}
+			}
+		} else {
+			ContentUnavailableView("No messages yet", systemImage: "text.bubble")
 		}
-		guard let host else { return nil }
+	}
 
+	private func currentSessionContext() async throws -> (session: PiSession, host: Host)? {
+		guard let db = appDatabase else { return nil }
+		return try await db.dbQueue.read { db in
+			guard let currentSession = try PiSession
+				.filter(Column("sessionID") == session.sessionID)
+				.fetchOne(db),
+				let host = try Host.fetchOne(db, id: currentSession.hostID) else { return nil }
+			return (currentSession, host)
+		}
+	}
+
+	private func connectToServer(host: Host) async throws -> PiServerClient {
 		let client = PiServerClient(serverURL: host.serverURL)
 		try await client.connect()
 		return client
 	}
 
 	private func loadMessages() async {
-		guard let db = appDatabase, let sessionID = session.id else { return }
-		guard let sessionFile = session.sessionFile else { return }
+		guard let db = appDatabase, !isLoadingMessages else { return }
+		isLoadingMessages = true
+		defer { isLoadingMessages = false }
 
 		do {
-			guard let client = try await connectToServer() else { return }
+			guard let context = try await currentSessionContext() else {
+				loadError = "This session is no longer available locally."
+				return
+			}
+			guard let sessionID = context.session.id else {
+				loadError = "This session doesn’t have a local database ID yet."
+				return
+			}
+			guard let sessionFile = context.session.sessionFile else {
+				loadError = "This session has no session file."
+				return
+			}
+
+			let client = try await connectToServer(host: context.host)
+			defer { Task { await client.disconnect() } }
 			let remoteMessages = try await client.getMessages(sessionFile: sessionFile)
-			await client.disconnect()
 
 			try await db.dbQueue.write { dbConn in
-				try Message.filter(Column("piSessionID") == sessionID).deleteAll(dbConn)
-
-				for (index, msg) in remoteMessages.enumerated() {
-					let roleString = msg["role"]?.stringValue ?? "unknown"
-					var message = Message(
-						piSessionID: sessionID,
-						role: Message.Role(roleString),
-						toolName: msg["toolName"]?.stringValue,
-						position: index,
-						createdAt: Date()
-					)
-					try message.insert(dbConn)
-
-					let blocks = PiSessionSync.parseContentBlocks(
-						from: msg["content"],
-						messageID: message.id!
-					)
-					for var block in blocks {
-						try block.insert(dbConn)
-					}
-				}
+				try PiSessionSync.storeMessages(remoteMessages, piSessionID: sessionID, in: dbConn)
 			}
+			loadError = nil
 		} catch {
-			print("Error loading messages: \(error)")
+			loadError = error.localizedDescription
+			print("Error loading messages for \(session.sessionID): \(error)")
 		}
 	}
 
 	private func sendPrompt() async {
 		let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-		guard !text.isEmpty, let sessionFile = session.sessionFile else { return }
+		guard !text.isEmpty else { return }
 
 		inputText = ""
 		pendingMessage = text
 		isSending = true
 
 		do {
-			guard let client = try await connectToServer() else { return }
+			guard let context = try await currentSessionContext() else {
+				sendError = "This session is no longer available locally."
+				pendingMessage = nil
+				isSending = false
+				return
+			}
+			guard let sessionFile = context.session.sessionFile else {
+				sendError = "This session has no session file."
+				pendingMessage = nil
+				isSending = false
+				return
+			}
+
+			let client = try await connectToServer(host: context.host)
+			defer { Task { await client.disconnect() } }
 			_ = try await client.prompt(sessionFile: sessionFile, message: text)
-			await client.disconnect()
 		} catch {
 			sendError = error.localizedDescription
 		}
@@ -248,7 +304,7 @@ private struct ThinkingIndicatorView: View {
 
 // MARK: - MessageView
 
-struct MessageView: View {
+struct MessageView: View, Equatable {
 	let messageInfo: MessageInfo
 
 	private var message: Message { messageInfo.message }
@@ -270,8 +326,12 @@ struct MessageView: View {
 			}
 			.foregroundStyle(roleColor)
 
-			ForEach(messageInfo.contentBlocks) { block in
-				ContentBlockView(block: block)
+			ForEach(messageInfo.contentBlocks, id: \.position) { block in
+				ContentBlockView(
+					block: block,
+					messageRole: message.role,
+					messageTitle: messageTitle
+				)
 			}
 		}
 	}
@@ -302,20 +362,27 @@ struct MessageView: View {
 		case .other: .secondary
 		}
 	}
+
+	private var messageTitle: String {
+		if let toolName = message.toolName {
+			return "\(roleLabel) · \(toolName)"
+		}
+		return roleLabel
+	}
 }
 
 // MARK: - ContentBlockView
 
 struct ContentBlockView: View {
 	let block: MessageContentBlock
+	let messageRole: Message.Role
+	let messageTitle: String
 
 	var body: some View {
 		switch block.type {
 		case "text":
 			if let text = block.text, !text.isEmpty {
-				Text(text)
-					.font(chatFont(style: .body))
-					.textSelection(.enabled)
+				MessageMarkdownView(text: text, role: messageRole, title: messageTitle)
 			}
 
 		case "thinking":
