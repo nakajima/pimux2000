@@ -2,10 +2,6 @@ import Citadel
 import Foundation
 import NIO
 @preconcurrency import NIOSSH
-#if os(iOS)
-	import Darwin
-	import ios_system
-#endif
 
 public typealias JSONObject = [String: JSONValue]
 
@@ -548,42 +544,13 @@ public enum SSH {
 
 	private static func runLocally(command: String) throws -> String {
 		#if os(iOS)
-			return try runLocallyWithIOSSystem(command: command)
+			throw PiError.commandFailed("Local command execution is not supported on iOS")
 		#else
 			return try runLocallyWithProcess(command: command)
 		#endif
 	}
 
-	#if os(iOS)
-		private static let iosSystemBootstrap: Void = {
-			initializeEnvironment()
-		}()
-
-		private static func runLocallyWithIOSSystem(command: String) throws -> String {
-			_ = iosSystemBootstrap
-
-			let homeDirectory = NSHomeDirectory()
-			setenv("HOME", homeDirectory, 1)
-
-			let tempDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-			try FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
-			defer { try? FileManager.default.removeItem(at: tempDirectory) }
-
-			let stdoutURL = tempDirectory.appendingPathComponent("stdout.txt")
-			let stderrURL = tempDirectory.appendingPathComponent("stderr.txt")
-			let redirectedCommand = "\(command) > \(shellQuote(stdoutURL.path)) 2> \(shellQuote(stderrURL.path))"
-
-			let status = redirectedCommand.withCString { ios_system($0) }
-			let stdout = (try? String(contentsOf: stdoutURL, encoding: .utf8)) ?? ""
-			let stderr = (try? String(contentsOf: stderrURL, encoding: .utf8)) ?? ""
-
-			guard status == 0 else {
-				throw PiError.commandFailed(stderr.isEmpty ? "local command failed with status \(status)" : stderr)
-			}
-
-			return stdout
-		}
-	#else
+	#if !os(iOS)
 		private static func runLocallyWithProcess(command: String) throws -> String {
 			let process = Process()
 			let stdoutPipe = Pipe()
