@@ -68,6 +68,15 @@ final class ServerInstaller {
 			}
 			log("Server files written.")
 
+			log("Installing pi extensions to ~/.pi/agent/extensions/...")
+			try await ssh("mkdir -p ~/.pi/agent/extensions")
+
+			for file in ServerFiles.extensions {
+				try await writeRemoteFile(path: "~/.pi/agent/extensions/\(file.path)", content: file.content)
+				log("  \(file.path)")
+			}
+			log("Extensions installed.")
+
 			log("Installing server as system service...")
 			let installOutput = try await ssh("cd ~/.pimux2000/server && bun run src/cli.ts install-server")
 			for line in installOutput.split(separator: "\n") {
