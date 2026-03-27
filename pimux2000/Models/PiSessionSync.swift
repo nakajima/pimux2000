@@ -1,9 +1,3 @@
-//
-//  PiSessionSync.swift
-//  pimux2000
-//
-//  Created by Pat Nakajima on 3/26/26.
-//
 import Foundation
 import GRDB
 import GRDBQuery
@@ -39,30 +33,50 @@ struct PiSessionSync {
 	private nonisolated func sync(host: Host) async throws {
 		guard let hostID = host.id else { return }
 
-		let client = PiClient(configuration: .init(sshTarget: host.sshTarget))
-		let sessions = try await client.listSessions()
+		let client = PiServerClient(serverURL: host.serverURL)
+		try await client.connect()
+		defer { Task { await client.disconnect() } }
 
-		for remoteSession in sessions {
+		let remoteSessions = try await client.listSessions()
+
+		for remoteSession in remoteSessions {
 			try await self.sync(remoteSession: remoteSession, hostID: hostID, client: client)
 		}
 	}
 
-	private func sync(remoteSession: PiSessionRecord, hostID: Int64, client: PiClient) async throws {
+	private func sync(remoteSession: JSONObject, hostID: Int64, client: PiServerClient) async throws {
+		let sessionId = remoteSession["sessionId"]?.stringValue ?? ""
+		guard !sessionId.isEmpty else { return }
+
 		let formatter = ISO8601DateFormatter()
 		formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-		let startedAt = formatter.date(from: remoteSession.startedAt) ?? Date.distantPast
-		let lastSeenAt = formatter.date(from: remoteSession.lastSeenAt) ?? Date.distantPast
 
-		let lastMessageAt = remoteSession.lastMessageAt.flatMap { formatter.date(from: $0) }
+		let startedAt = remoteSession["startedAt"]?.stringValue.flatMap { formatter.date(from: $0) } ?? Date.distantPast
+		let lastSeenAt = remoteSession["lastSeenAt"]?.stringValue.flatMap { formatter.date(from: $0) } ?? Date.distantPast
+		let lastMessageAt = remoteSession["lastMessageAt"]?.stringValue.flatMap { formatter.date(from: $0) }
+
+		let modelString: String
+		if let model = remoteSession["model"]?.objectValue {
+			let provider = model["provider"]?.stringValue ?? ""
+			let id = model["id"]?.stringValue ?? ""
+			modelString = "\(provider)/\(id)"
+		} else {
+			modelString = "unknown model"
+		}
+
+		let summary = remoteSession["workSummary"]?.stringValue
+			?? Self.cwdFolderName(remoteSession["cwd"]?.stringValue)
+			?? sessionId
 
 		let session = PiSession(
 			hostID: hostID,
-			summary: remoteSession.workSummary ?? remoteSession.sessionId,
-			sessionID: remoteSession.sessionId,
-			model: remoteSession.model.map { "\($0)" } ?? "unknown model",
-			lastMessage: remoteSession.lastMessage,
+			summary: summary,
+			sessionID: sessionId,
+			sessionFile: remoteSession["sessionFile"]?.stringValue,
+			model: modelString,
+			lastMessage: remoteSession["lastMessage"]?.stringValue,
 			lastMessageAt: lastMessageAt,
-			lastMessageRole: remoteSession.lastMessageRole,
+			lastMessageRole: remoteSession["lastMessageRole"]?.stringValue,
 			startedAt: startedAt,
 			lastSeenAt: lastSeenAt
 		)
@@ -73,33 +87,25 @@ struct PiSessionSync {
 			return session.id!
 		}
 
-		guard remoteSession.registryFile != nil else { return }
+		// Sync messages if we have a session file
+		guard let sessionFile = remoteSession["sessionFile"]?.stringValue else { return }
 		do {
-			try await self.syncMessages(for: remoteSession, piSessionID: piSessionID, client: client)
+			try await self.syncMessages(sessionFile: sessionFile, piSessionID: piSessionID, client: client)
 		} catch {
-			print("Error syncing messages for \(remoteSession.sessionId): \(error)")
+			print("Error syncing messages for \(sessionId): \(error)")
 		}
 	}
 
 	// MARK: - Message sync
 
-	private func syncMessages(for remoteSession: PiSessionRecord, piSessionID: Int64, client: PiClient) async throws {
-		guard let registryFile = remoteSession.registryFile else { return }
-
-		// Messages file is written by the extension alongside the registry file: {pid}-messages.json
-		let messagesFile = registryFile.replacingOccurrences(of: ".json", with: "-messages.json")
-		let quoted = "'" + messagesFile.replacingOccurrences(of: "'", with: "'\\''") + "'"
-		let command = "cat \(quoted) 2>/dev/null || echo '[]'"
-		let output = try await client.runCommand(command)
-		let data = Data(output.utf8)
-		let remoteMessages = try JSONDecoder().decode([JSONValue].self, from: data)
+	private func syncMessages(sessionFile: String, piSessionID: Int64, client: PiServerClient) async throws {
+		let remoteMessages = try await client.getMessages(sessionFile: sessionFile)
 
 		let now = Date()
 		try await self.dbContext.writer.write { db in
 			try Message.filter(Column("piSessionID") == piSessionID).deleteAll(db)
 
-			for (messageIndex, value) in remoteMessages.enumerated() {
-				guard let remoteMessage = value.objectValue else { continue }
+			for (messageIndex, remoteMessage) in remoteMessages.enumerated() {
 				let roleString = remoteMessage["role"]?.stringValue ?? "unknown"
 				var message = Message(
 					piSessionID: piSessionID,
@@ -118,7 +124,13 @@ struct PiSessionSync {
 		}
 	}
 
-	private nonisolated static func parseContentBlocks(from content: JSONValue?, messageID: Int64) -> [MessageContentBlock] {
+	private nonisolated static func cwdFolderName(_ cwd: String?) -> String? {
+		guard let cwd, !cwd.isEmpty else { return nil }
+		let name = (cwd as NSString).lastPathComponent
+		return name.isEmpty ? nil : name
+	}
+
+	nonisolated static func parseContentBlocks(from content: JSONValue?, messageID: Int64) -> [MessageContentBlock] {
 		guard let content else { return [] }
 
 		if let text = content.stringValue {

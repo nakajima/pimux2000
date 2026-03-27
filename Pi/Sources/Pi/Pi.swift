@@ -503,8 +503,8 @@ private final class SSHNoneAuth: NIOSSHClientUserAuthenticationDelegate, @unchec
 	}
 }
 
-enum SSH {
-	static func run(configuration: PiHostConfiguration, remoteCommand: String) async throws -> String {
+public enum SSH {
+	public static func run(configuration: PiHostConfiguration, remoteCommand: String) async throws -> String {
 		if configuration.executesLocally {
 			return try runLocally(command: remoteCommand)
 		}

@@ -1,14 +1,7 @@
-//
-//  SidebarView.swift
-//  pimux2000
-//
-//  Created by Pat Nakajima on 3/26/26.
-//
-
-import SwiftUI
-import GRDBQuery
 import GRDB
+import GRDBQuery
 import Pi
+import SwiftUI
 
 struct HostsRequest: ValueObservationQueryable {
 	static var defaultValue: [Host] { [] }
@@ -22,10 +15,8 @@ struct SidebarView: View {
 	@Environment(\.appDatabase) private var appDatabase
 	@Query(PiSessionsRequest()) private var sessions: [PiSession]
 	@Query(HostsRequest()) private var hosts: [Host]
-	@State private var isAddingHost = false
-	@State private var isConnecting = false
-	@State private var newHostTarget = ""
-	@State private var addHostError: String?
+	@State private var isAddingServer = false
+	@State private var isShowingSettings = false
 
 	var body: some View {
 		List {
@@ -35,59 +26,36 @@ struct SidebarView: View {
 
 			Section {
 				ForEach(hosts) { host in
-					Text(host.sshTarget)
+					Text(host.displayName)
 				}
 			} header: {
-				Text("Hosts")
+				Text("Servers")
 			}
 		}
 		.toolbar {
 			ToolbarItem(placement: .primaryAction) {
-				Button { isAddingHost = true } label: {
-					Label("Add Host", systemImage: "plus")
+				Button { isAddingServer = true } label: {
+					Label("Add Server", systemImage: "plus")
 				}
-				.disabled(isConnecting)
+			}
+			ToolbarItem(placement: .bottomBar) {
+				Button { isShowingSettings = true } label: {
+					Label("Settings", systemImage: "gearshape")
+				}
 			}
 		}
-		.alert("Add Host", isPresented: $isAddingHost) {
-			TextField("user@host", text: $newHostTarget)
-				.textInputAutocapitalization(.never)
-				.autocorrectionDisabled()
-			Button("Add") { Task { await addHost() } }
-			Button("Cancel", role: .cancel) { newHostTarget = "" }
+		.sheet(isPresented: $isAddingServer) {
+			AddServerSheet()
 		}
-		.alert("Connection Failed", isPresented: .init(
-			get: { addHostError != nil },
-			set: { if !$0 { addHostError = nil } }
-		)) {
-			Button("OK", role: .cancel) {}
-		} message: {
-			Text(addHostError ?? "")
-		}
-		.overlay {
-			if isConnecting {
-				ProgressView("Connecting…")
-					.padding()
-					.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+		.sheet(isPresented: $isShowingSettings) {
+			NavigationStack {
+				FontPickerView()
+					.toolbar {
+						ToolbarItem(placement: .confirmationAction) {
+							Button("Done") { isShowingSettings = false }
+						}
+					}
 			}
-		}
-	}
-
-	private func addHost() async {
-		let trimmed = newHostTarget.trimmingCharacters(in: .whitespacesAndNewlines)
-		newHostTarget = ""
-		guard !trimmed.isEmpty else { return }
-
-		isConnecting = true
-		defer { isConnecting = false }
-
-		let client = PiClient(configuration: .init(sshTarget: trimmed))
-
-		do {
-			_ = try await client.listSessions()
-			try appDatabase?.addHost(sshTarget: trimmed)
-		} catch {
-			addHostError = error.localizedDescription
 		}
 	}
 }

@@ -31,51 +31,55 @@ private struct CLI {
 		switch command {
 		case .help:
 			print(Self.help)
-		case let .list(host):
-			let client = PiClient(configuration: .init(sshTarget: host))
+		case let .list(server):
+			let client = try await connect(to: server)
 			let sessions = try await client.listSessions()
+			await client.disconnect()
+
 			if sessions.isEmpty {
-				print("No active pi sessions on \(host)")
+				print("No active pi sessions")
 				return
 			}
 
 			for (index, session) in sessions.enumerated() {
 				if index > 0 { print("") }
-				print("sessionId: \(session.sessionId)")
-				print("workSummary: \(session.workSummary ?? "-")")
-				print("name: \(session.sessionName ?? "-")")
-				print("pid: \(session.pid)")
-				print("cwd: \(session.cwd)")
-				print("mode: \(session.mode)")
-				print("model: \(formattedModel(session.model))")
-				print("startedAt: \(session.startedAt)")
-				print("lastSeenAt: \(session.lastSeenAt)")
-				print("workSummaryUpdatedAt: \(session.workSummaryUpdatedAt ?? "-")")
-				print("sessionFile: \(session.sessionFile ?? "-")")
+				print("sessionId: \(session["sessionId"]?.stringValue ?? "-")")
+				print("workSummary: \(session["workSummary"]?.stringValue ?? "-")")
+				print("sessionName: \(session["sessionName"]?.stringValue ?? "-")")
+				print("pid: \(session["pid"]?.intValue.map(String.init) ?? "-")")
+				print("cwd: \(session["cwd"]?.stringValue ?? "-")")
+				print("mode: \(session["mode"]?.stringValue ?? "-")")
+				print("model: \(formattedModel(session["model"]?.objectValue))")
+				print("startedAt: \(session["startedAt"]?.stringValue ?? "-")")
+				print("lastSeenAt: \(session["lastSeenAt"]?.stringValue ?? "-")")
+				print("sessionFile: \(session["sessionFile"]?.stringValue ?? "-")")
 			}
-		case let .state(host, sessionID):
-			let client = PiClient(configuration: .init(sshTarget: host))
-			let rpc = try await client.connect(sessionId: sessionID)
-			defer { Task { await rpc.stop() } }
-			let state = try await rpc.getState()
-			print("sessionId: \(state.sessionId ?? "-")")
-			print("sessionName: \(state.sessionName ?? "-")")
-			print("sessionFile: \(state.sessionFile ?? "-")")
-			print("isStreaming: \(state.isStreaming.map(String.init) ?? "-")")
-			printKeyValue(from: state.raw, keys: [
-				"thinkingLevel",
-				"isCompacting",
-				"steeringMode",
-				"followUpMode",
-				"autoCompactionEnabled",
-				"messageCount",
-				"pendingMessageCount",
+		case let .state(server, sessionID):
+			let client = try await connect(to: server)
+			let state = try await client.getState(sessionId: sessionID)
+			await client.disconnect()
+
+			guard let state else {
+				print("Session not found: \(sessionID)")
+				return
+			}
+
+			printKeyValue(from: state, keys: [
+				"sessionId",
+				"sessionFile",
+				"mode",
+				"lastMessage",
+				"lastMessageAt",
+				"lastMessageRole",
+				"startedAt",
+				"lastSeenAt",
 			])
-		case let .messages(host, sessionID):
-			let client = PiClient(configuration: .init(sshTarget: host))
-			let rpc = try await client.connect(sessionId: sessionID)
-			defer { Task { await rpc.stop() } }
-			let messages = try await rpc.getMessages()
+		case let .messages(server, sessionIdentifier):
+			let client = try await connect(to: server)
+			let sessionFile = try await resolveSessionFile(client: client, identifier: sessionIdentifier)
+			let messages = try await client.getMessages(sessionFile: sessionFile)
+			await client.disconnect()
+
 			print("messageCount: \(messages.count)")
 			for (index, message) in messages.enumerated() {
 				print("")
@@ -83,40 +87,90 @@ private struct CLI {
 				if let toolName = message["toolName"]?.stringValue {
 					print("toolName: \(toolName)")
 				}
-				if let toolCallId = message["toolCallId"]?.stringValue {
-					print("toolCallId: \(toolCallId)")
-				}
 				if let summary = summarize(message: message) {
 					print(summary)
 				}
 			}
-		case let .last(host, sessionID):
-			let client = PiClient(configuration: .init(sshTarget: host))
-			let rpc = try await client.connect(sessionId: sessionID)
-			defer { Task { await rpc.stop() } }
-			try print(await rpc.getLastAssistantText() ?? "")
-		case let .prompt(host, sessionID, message):
-			let client = PiClient(configuration: .init(sshTarget: host))
-			let rpc = try await client.connect(sessionId: sessionID)
-			defer { Task { await rpc.stop() } }
-			let events = try await rpc.promptAndWait(message)
-			print("eventCount: \(events.count)")
-			print("")
-			try print(await rpc.getLastAssistantText() ?? "")
+		case let .last(server, sessionIdentifier):
+			let client = try await connect(to: server)
+			let sessionFile = try await resolveSessionFile(client: client, identifier: sessionIdentifier)
+			let text = try await client.getLastAssistantText(sessionFile: sessionFile)
+			await client.disconnect()
+			print(text ?? "")
+		case let .prompt(server, sessionIdentifier, message):
+			let client = try await connect(to: server)
+			let sessionFile = try await resolveSessionFile(client: client, identifier: sessionIdentifier)
+			let result = try await client.prompt(sessionFile: sessionFile, message: message)
+			await client.disconnect()
+
+			if let events = result["events"]?.arrayValue {
+				print("eventCount: \(events.count)")
+			}
 		}
+	}
+
+	private func connect(to server: String) async throws -> PiServerClient {
+		var url = server
+		if !url.hasPrefix("ws://") && !url.hasPrefix("wss://") {
+			// Bare host or host:port — assume ws://
+			if url.contains("://") {
+				throw CLIError.invalidServer(url)
+			}
+			url = "ws://\(url)"
+			if !url.contains(":7749") && url.split(separator: ":").count < 3 {
+				url += ":7749"
+			}
+		}
+		let client = PiServerClient(serverURL: url)
+		try await client.connect()
+		return client
+	}
+
+	private func resolveSessionFile(client: PiServerClient, identifier: String) async throws -> String {
+		let sessions = try await client.listSessions()
+
+		// Exact session ID match
+		if let match = sessions.first(where: { $0["sessionId"]?.stringValue == identifier }) {
+			guard let file = match["sessionFile"]?.stringValue else {
+				throw CLIError.noSessionFile(identifier)
+			}
+			return file
+		}
+
+		// Prefix match on session ID
+		let prefixMatches = sessions.filter { $0["sessionId"]?.stringValue?.hasPrefix(identifier) == true }
+		if prefixMatches.count == 1, let file = prefixMatches[0]["sessionFile"]?.stringValue {
+			return file
+		}
+
+		// Substring match on workSummary
+		let needle = identifier.lowercased()
+		let summaryMatches = sessions.filter {
+			$0["workSummary"]?.stringValue?.lowercased().contains(needle) == true
+		}
+		if summaryMatches.count == 1, let file = summaryMatches[0]["sessionFile"]?.stringValue {
+			return file
+		}
+
+		if prefixMatches.count > 1 || summaryMatches.count > 1 {
+			throw CLIError.ambiguous(identifier)
+		}
+
+		throw CLIError.notFound(identifier)
 	}
 
 	static let help = """
 	Usage:
-	  pi-client list <host>
-	  pi-client state <host> <session-id-or-work-summary>
-	  pi-client messages <host> <session-id-or-work-summary>
-	  pi-client prompt <host> <session-id-or-work-summary> <message>
-	  pi-client last <host> <session-id-or-work-summary>
+	  pi-client list <server-url>
+	  pi-client state <server-url> <session-id>
+	  pi-client messages <server-url> <session-id-or-summary>
+	  pi-client prompt <server-url> <session-id-or-summary> <message>
+	  pi-client last <server-url> <session-id-or-summary>
 	  pi-client help
 
-	Notes:
-	  Use localhost, 127.0.0.1, or ::1 to talk to the local pi runtime without SSH.
+	Examples:
+	  pi-client list ws://localhost:7749
+	  pi-client messages ws://myserver:7749 chat-ui
 	"""
 }
 
@@ -158,6 +212,10 @@ private enum Command {
 private enum CLIError: LocalizedError {
 	case usage
 	case unknownCommand(String)
+	case notFound(String)
+	case ambiguous(String)
+	case noSessionFile(String)
+	case invalidServer(String)
 
 	var errorDescription: String? {
 		switch self {
@@ -165,13 +223,23 @@ private enum CLIError: LocalizedError {
 			return "invalid arguments"
 		case let .unknownCommand(command):
 			return "unknown command: \(command)"
+		case let .notFound(id):
+			return "no session found for: \(id)"
+		case let .ambiguous(id):
+			return "ambiguous session identifier: \(id)"
+		case let .noSessionFile(id):
+			return "session \(id) has no session file"
+		case let .invalidServer(url):
+			return "invalid server URL: \(url) (expected ws://host:port)"
 		}
 	}
 }
 
-private func formattedModel(_ model: PiModelInfo?) -> String {
+private func formattedModel(_ model: JSONObject?) -> String {
 	guard let model else { return "-" }
-	return "\(model.provider)/\(model.id)"
+	let provider = model["provider"]?.stringValue ?? ""
+	let id = model["id"]?.stringValue ?? ""
+	return "\(provider)/\(id)"
 }
 
 private func printKeyValue(from object: JSONObject, keys: [String]) {

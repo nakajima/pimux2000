@@ -14,4 +14,19 @@ struct Host: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, E
 	mutating func didInsert(_ inserted: InsertionSuccess) {
 		id = inserted.rowID
 	}
+
+	var serverURL: String {
+		// Extract hostname from user@host
+		let host: String
+		if let atSign = sshTarget.firstIndex(of: "@") {
+			host = String(sshTarget[sshTarget.index(after: atSign)...])
+		} else {
+			host = sshTarget
+		}
+		return "ws://\(host):7749"
+	}
+
+	var displayName: String {
+		sshTarget
+	}
 }

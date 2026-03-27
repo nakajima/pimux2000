@@ -35,6 +35,7 @@ struct AppDatabase {
 					.references("hosts", onDelete: .cascade)
 				t.column("summary", .text).notNull()
 				t.column("sessionID", .text).notNull().unique()
+				t.column("sessionFile", .text)
 				t.column("model", .text).notNull()
 				t.column("lastMessage", .text)
 				t.column("lastMessageAt", .datetime)

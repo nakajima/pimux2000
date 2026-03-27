@@ -9,17 +9,17 @@ struct AppDatabaseTests {
 	func addHostTrimsWhitespaceAndDeduplicates() async throws {
 		let database = AppDatabase.preview()
 
-		try database.addHost(sshTarget: "  root@pi  ")
+		try database.addHost(sshTarget: "  nakajima@arch  ")
 		let firstHosts = try await database.dbQueue.read { db in
 			try Host.fetchAll(db)
 		}
 
 		#expect(firstHosts.count == 1)
-		#expect(firstHosts[0].sshTarget == "root@pi")
+		#expect(firstHosts[0].sshTarget == "nakajima@arch")
 		let initialUpdatedAt = firstHosts[0].updatedAt
 
 		try await Task.sleep(for: .milliseconds(20))
-		try database.addHost(sshTarget: "root@pi")
+		try database.addHost(sshTarget: "nakajima@arch")
 
 		let secondHosts = try await database.dbQueue.read { db in
 			try Host.fetchAll(db)
@@ -33,8 +33,8 @@ struct AppDatabaseTests {
 	func deleteHostsRemovesRows() async throws {
 		let database = AppDatabase.preview()
 
-		try database.addHost(sshTarget: "root@one")
-		try database.addHost(sshTarget: "root@two")
+		try database.addHost(sshTarget: "nakajima@arch")
+		try database.addHost(sshTarget: "nakajima@pi")
 
 		let hosts = try await database.dbQueue.read { db in
 			try Host.fetchAll(db)
@@ -48,6 +48,18 @@ struct AppDatabaseTests {
 		}
 
 		#expect(remainingHosts.count == 1)
-		#expect(remainingHosts[0].sshTarget == "root@two")
+		#expect(remainingHosts[0].sshTarget == "nakajima@pi")
+	}
+
+	@Test
+	func hostDerivedServerURL() {
+		let host = Host(sshTarget: "nakajima@arch", createdAt: Date(), updatedAt: Date())
+		#expect(host.serverURL == "ws://arch:7749")
+	}
+
+	@Test
+	func hostDerivedServerURLWithoutUser() {
+		let host = Host(sshTarget: "myserver", createdAt: Date(), updatedAt: Date())
+		#expect(host.serverURL == "ws://myserver:7749")
 	}
 }
