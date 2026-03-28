@@ -1,9 +1,9 @@
 [project]
 name = "pimux-server"
-# auto-tag = true  # detect Cargo.toml version, create/push git tag v<version> before releasing to git
+auto-tag = true  # detect Cargo.toml version, create/push git tag v<version> before releasing to git
 # binary = "pimux-server"  # defaults to project name
 # binaries = ["pimux-server", "pimux-server-cli"]  # optional extra release assets
-repo = "owner/pimux-server"
+repo = "nakajima/pimux2000"
 # version-command = "git describe --tags --abbrev=0"
 
 [build]
@@ -32,7 +32,7 @@ enabled = true
 # [channels.cargo]
 # crate-name = "pimux-server"
 
-# [channels.curl]
+[channels.curl]
 
 # [channels.nix]
 # flake-repo = "owner/nix-repo"  # defaults to project repo

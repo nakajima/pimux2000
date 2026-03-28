@@ -199,6 +199,7 @@ async fn session_messages(
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionMessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
     if let Some(cached) = cached_transcript(&state, &session_id).await {
+        let _host_location = &cached.host_location;
         return Ok(Json(cached.response));
     }
 
@@ -326,21 +327,18 @@ fn upsert_cached_transcript(
 
 fn should_replace_cached_transcript(
     existing: &CachedTranscript,
-    incoming_host_location: &str,
+    _incoming_host_location: &str,
     incoming: &SessionMessagesResponse,
 ) -> bool {
     let incoming_score = transcript_score(incoming);
     let existing_score = transcript_score(&existing.response);
 
-    incoming_score > existing_score
-        || (incoming_score == existing_score && incoming_host_location != existing.host_location)
+    incoming_score >= existing_score
 }
 
-fn transcript_score(response: &SessionMessagesResponse) -> (i64, bool, bool, u8, u8, usize) {
+fn transcript_score(response: &SessionMessagesResponse) -> (i64, u8, u8, usize) {
     (
         response.freshness.as_of.timestamp_millis(),
-        response.activity.active,
-        response.activity.attached,
         freshness_rank(response.freshness.state),
         source_rank(response.freshness.source),
         response.messages.len(),
@@ -379,11 +377,11 @@ mod tests {
         http::{Method, Request},
     };
     use chrono::{TimeZone, Utc};
-    use serde::de::DeserializeOwned;
+    use serde::{Serialize, de::DeserializeOwned};
     use tower::util::ServiceExt;
 
     use crate::{
-        host::{HostAuth, HostSessions},
+        host::{HostAuth, HostIdentity, HostSessions},
         message::{Message, Role},
         session::ActiveSession,
         transcript::{
@@ -586,6 +584,66 @@ mod tests {
 
         let returned: SessionMessagesResponse = json_response(response).await;
         assert_eq!(returned, live);
+    }
+
+    #[tokio::test]
+    async fn replaces_equally_fresh_attached_snapshot_with_detached_snapshot() {
+        let app = app(AppState::default());
+        let attached = sample_transcript(
+            "session-1",
+            "final live reply",
+            TranscriptFreshnessState::Live,
+            TranscriptSource::Extension,
+            true,
+            true,
+            4_000,
+        );
+        let detached = sample_transcript(
+            "session-1",
+            "final live reply",
+            TranscriptFreshnessState::Live,
+            TranscriptSource::Extension,
+            false,
+            false,
+            4_000,
+        );
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/agent/session-messages",
+                &SessionMessagesBatchReport {
+                    host_location: "dev@mac".to_string(),
+                    sessions: vec![attached],
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/agent/session-messages",
+                &SessionMessagesBatchReport {
+                    host_location: "dev@mac".to_string(),
+                    sessions: vec![detached.clone()],
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = app
+            .oneshot(empty_request(Method::GET, "/sessions/session-1/messages"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let returned: SessionMessagesResponse = json_response(response).await;
+        assert_eq!(returned, detached);
     }
 
     async fn poll_pending_requests(
