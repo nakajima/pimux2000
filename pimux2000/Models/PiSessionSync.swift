@@ -38,13 +38,22 @@ struct PiSessionSync {
 		in db: Database
 	) throws {
 		var latestHostUpdates: [String: Date] = [:]
+		let remoteLocations = Set(remoteHosts.map(\.location)).union(remoteSessions.map(\.hostLocation))
+		let now = Date()
 
 		for remoteHost in remoteHosts {
-			let latestSessionUpdate = remoteHost.sessions.map(\.updatedAt).max() ?? Date.distantPast
-			latestHostUpdates[remoteHost.location] = max(
-				latestHostUpdates[remoteHost.location] ?? Date.distantPast,
-				latestSessionUpdate
-			)
+			if let latestSessionUpdate = remoteHost.sessions.map(\.updatedAt).max() {
+				latestHostUpdates[remoteHost.location] = max(
+					latestHostUpdates[remoteHost.location] ?? Date.distantPast,
+					latestSessionUpdate
+				)
+			}
+			if let lastSeenAt = remoteHost.lastSeenAt {
+				latestHostUpdates[remoteHost.location] = max(
+					latestHostUpdates[remoteHost.location] ?? Date.distantPast,
+					lastSeenAt
+				)
+			}
 		}
 
 		for remoteSession in remoteSessions {
@@ -54,14 +63,13 @@ struct PiSessionSync {
 			)
 		}
 
-		let remoteLocations = Set(latestHostUpdates.keys)
 		let existingHosts = try Host.fetchAll(db)
 		var existingHostsByLocation = Dictionary(uniqueKeysWithValues: existingHosts.map { ($0.location, $0) })
 		var hostIDByLocation: [String: Int64] = [:]
-		let now = Date()
 
 		for location in remoteLocations.sorted() {
-			let updatedAt = latestHostUpdates[location] ?? now
+			let fallbackUpdatedAt = existingHostsByLocation[location]?.updatedAt ?? now
+			let updatedAt = latestHostUpdates[location] ?? fallbackUpdatedAt
 			if var host = existingHostsByLocation.removeValue(forKey: location) {
 				host.updatedAt = updatedAt
 				try host.update(db)
@@ -82,10 +90,11 @@ struct PiSessionSync {
 			_ = try Host.filter(staleHostIDs.contains(Column("id"))).deleteAll(db)
 		}
 
+		let canonicalRemoteSessions = canonicalRemoteSessions(from: remoteSessions)
 		let existingSessions = try PiSession.fetchAll(db)
 		var existingSessionsByID = Dictionary(uniqueKeysWithValues: existingSessions.map { ($0.sessionID, $0) })
 
-		for remoteSession in remoteSessions {
+		for remoteSession in canonicalRemoteSessions {
 			guard let hostID = hostIDByLocation[remoteSession.hostLocation] else { continue }
 
 			let lastMessageAt = max(remoteSession.lastUserMessageAt, remoteSession.lastAssistantMessageAt)
@@ -101,6 +110,11 @@ struct PiSessionSync {
 				session.lastMessage = nil
 				session.lastMessageAt = lastMessageAt
 				session.lastMessageRole = lastMessageRole
+				if !remoteSession.hostConnected {
+					session.isCliActive = false
+				}
+				session.contextTokensUsed = remoteSession.contextUsage?.usedTokens
+				session.contextTokensMax = remoteSession.contextUsage?.maxTokens
 				session.startedAt = remoteSession.createdAt
 				session.lastSeenAt = remoteSession.updatedAt
 				try session.update(db)
@@ -116,6 +130,8 @@ struct PiSessionSync {
 					lastMessageAt: lastMessageAt,
 					lastMessageRole: lastMessageRole,
 					lastReadMessageAt: lastMessageAt,
+					contextTokensUsed: remoteSession.contextUsage?.usedTokens,
+					contextTokensMax: remoteSession.contextUsage?.maxTokens,
 					startedAt: remoteSession.createdAt,
 					lastSeenAt: remoteSession.updatedAt
 				)
@@ -127,6 +143,43 @@ struct PiSessionSync {
 		if !staleSessionIDs.isEmpty {
 			_ = try PiSession.filter(staleSessionIDs.contains(Column("id"))).deleteAll(db)
 		}
+	}
+
+	nonisolated private static func canonicalRemoteSessions(from remoteSessions: [PimuxListedSession]) -> [PimuxListedSession] {
+		var sessionsByID: [String: PimuxListedSession] = [:]
+
+		for remoteSession in remoteSessions {
+			guard let existing = sessionsByID[remoteSession.id] else {
+				sessionsByID[remoteSession.id] = remoteSession
+				continue
+			}
+
+			if shouldPrefer(remoteSession, over: existing) {
+				sessionsByID[remoteSession.id] = remoteSession
+			}
+		}
+
+		return sessionsByID.values.sorted { $0.id < $1.id }
+	}
+
+	nonisolated private static func shouldPrefer(_ candidate: PimuxListedSession, over existing: PimuxListedSession) -> Bool {
+		if candidate.hostConnected != existing.hostConnected {
+			return candidate.hostConnected && !existing.hostConnected
+		}
+
+		if candidate.updatedAt != existing.updatedAt {
+			return candidate.updatedAt > existing.updatedAt
+		}
+
+		if candidate.lastAssistantMessageAt != existing.lastAssistantMessageAt {
+			return candidate.lastAssistantMessageAt > existing.lastAssistantMessageAt
+		}
+
+		if candidate.lastUserMessageAt != existing.lastUserMessageAt {
+			return candidate.lastUserMessageAt > existing.lastUserMessageAt
+		}
+
+		return candidate.hostLocation < existing.hostLocation
 	}
 
 	nonisolated static func storeMessages(_ remoteMessages: [PimuxTranscriptMessage], piSessionID: Int64, in db: Database) throws {

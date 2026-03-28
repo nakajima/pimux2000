@@ -95,7 +95,10 @@ async fn run(
                 let _ = events.send(Event::Disconnected);
             }
             Err(error) => {
-                eprintln!("agent websocket connect failed: {error}");
+                eprintln!(
+                    "agent websocket connect failed: {error}; retrying in {}s",
+                    RECONNECT_DELAY.as_secs()
+                );
             }
         }
 

@@ -18,7 +18,9 @@ struct SidebarView: View {
 	@Query(CurrentServerConfigurationRequest()) private var serverConfiguration: ServerConfiguration?
 	@Binding var selectedSessionID: String?
 	@State private var isShowingServerSheet = false
+	@State private var isShowingAddHostSheet = false
 	@State private var isShowingSettings = false
+	@State private var hostMutationErrorMessage: String?
 
 	var body: some View {
 		List(selection: $selectedSessionID) {
@@ -30,13 +32,16 @@ struct SidebarView: View {
 					ForEach(sessions, id: \.session.sessionID) { sessionInfo in
 						HStack(alignment: .top, spacing: 12) {
 							VStack(alignment: .leading, spacing: 4) {
-								Text(sessionInfo.session.summary)
-								VStack(alignment: .leading, spacing: 4) {
-									if let lastMessageAt = sessionInfo.session.lastMessageAt {
-										Text(lastMessageAt.formatted(.dateTime))
+								Text(verbatim: sessionInfo.session.summary)
+								HStack(spacing: 6) {
+									SessionActivityBadge(isActive: sessionInfo.session.isCliActive)
+									VStack(alignment: .leading, spacing: 4) {
+										if let lastMessageAt = sessionInfo.session.lastMessageAt {
+											Text(verbatim: lastMessageAt.formatted(.dateTime))
+										}
+										Text(verbatim: sessionInfo.host.displayName)
+											.bold()
 									}
-									Text(sessionInfo.host.displayName)
-										.bold()
 								}
 								.font(.caption)
 								.foregroundStyle(.secondary)
@@ -57,12 +62,26 @@ struct SidebarView: View {
 				}
 			}
 
-			if !hosts.isEmpty {
+			if serverConfiguration != nil || !hosts.isEmpty {
 				Section("Hosts") {
 					ForEach(hosts) { host in
-						Text(host.displayName)
+						Text(verbatim: host.displayName)
 							.bold()
+							.swipeActions {
+								Button(role: .destructive) {
+									Task { await deleteHost(host) }
+								} label: {
+									Label("Delete", systemImage: "trash")
+								}
+							}
 					}
+
+					Button {
+						isShowingAddHostSheet = true
+					} label: {
+						Label("Add Host", systemImage: "plus")
+					}
+					.disabled(serverConfiguration == nil)
 				}
 			}
 		}
@@ -95,6 +114,19 @@ struct SidebarView: View {
 		.sheet(isPresented: $isShowingServerSheet) {
 			ServerConnectionSheet(initialServerURL: serverConfiguration?.serverURL ?? "")
 		}
+		.sheet(isPresented: $isShowingAddHostSheet) {
+			AddHostSheet { location in
+				try await addHost(location: location)
+			}
+		}
+		.alert("Host Error", isPresented: Binding(
+			get: { hostMutationErrorMessage != nil },
+			set: { if !$0 { hostMutationErrorMessage = nil } }
+		)) {
+			Button("OK", role: .cancel) {}
+		} message: {
+			Text(verbatim: hostMutationErrorMessage ?? "")
+		}
 		.sheet(isPresented: $isShowingSettings) {
 			NavigationStack {
 				FontPickerView()
@@ -105,6 +137,44 @@ struct SidebarView: View {
 					}
 			}
 		}
+	}
+
+	private func addHost(location: String) async throws {
+		guard let serverConfiguration else {
+			throw PimuxServerError.serverError("No pimux server configured.")
+		}
+
+		let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+		try await client.addHost(location: location)
+		let syncer = PiSessionSync(dbContext: dbContext)
+		await syncer.sync()
+	}
+
+	private func deleteHost(_ host: Host) async {
+		guard let serverConfiguration else {
+			hostMutationErrorMessage = "No pimux server configured."
+			return
+		}
+
+		do {
+			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+			try await client.deleteHost(location: host.location)
+			let syncer = PiSessionSync(dbContext: dbContext)
+			await syncer.sync()
+		} catch {
+			hostMutationErrorMessage = error.localizedDescription
+		}
+	}
+}
+
+private struct SessionActivityBadge: View {
+	let isActive: Bool
+
+	var body: some View {
+		Circle()
+			.fill(isActive ? .green : .gray.opacity(0.4))
+			.frame(width: 8, height: 8)
+			.accessibilityLabel(isActive ? "Active CLI session" : "Inactive CLI session")
 	}
 }
 
@@ -126,7 +196,7 @@ private struct UnreadSessionBadge: View {
 		var host = Host(id: nil, location: "nakajima@mac-studio", createdAt: now, updatedAt: now)
 		try host.insert(dbConn)
 
-		var readSession = PiSession(
+		var activeSession = PiSession(
 			id: nil,
 			hostID: host.id!,
 			summary: "Watch live transcripts",
@@ -137,10 +207,11 @@ private struct UnreadSessionBadge: View {
 			lastMessageAt: now.addingTimeInterval(-120),
 			lastMessageRole: "assistant",
 			lastReadMessageAt: now.addingTimeInterval(-120),
+			isCliActive: true,
 			startedAt: now.addingTimeInterval(-600),
 			lastSeenAt: now.addingTimeInterval(-120)
 		)
-		try readSession.insert(dbConn)
+		try activeSession.insert(dbConn)
 
 		var unreadSession = PiSession(
 			id: nil,
@@ -153,10 +224,28 @@ private struct UnreadSessionBadge: View {
 			lastMessageAt: now,
 			lastMessageRole: "assistant",
 			lastReadMessageAt: now.addingTimeInterval(-300),
+			isCliActive: true,
 			startedAt: now.addingTimeInterval(-1800),
 			lastSeenAt: now
 		)
 		try unreadSession.insert(dbConn)
+
+		var inactiveSession = PiSession(
+			id: nil,
+			hostID: host.id!,
+			summary: "Old debugging session",
+			sessionID: "sidebar-preview-session-inactive",
+			sessionFile: nil,
+			model: "anthropic/claude-sonnet",
+			lastMessage: nil,
+			lastMessageAt: now.addingTimeInterval(-3600),
+			lastMessageRole: "assistant",
+			lastReadMessageAt: now.addingTimeInterval(-3600),
+			isCliActive: false,
+			startedAt: now.addingTimeInterval(-7200),
+			lastSeenAt: now.addingTimeInterval(-3600)
+		)
+		try inactiveSession.insert(dbConn)
 	}
 
 	return NavigationStack {

@@ -12,14 +12,13 @@ use tokio::{
     sync::{mpsc::UnboundedSender, oneshot},
 };
 
-use crate::{
-    message::{Message, MessageContentBlock, Role, collapse_whitespace, normalized_display_text},
-    transcript::SessionMessagesResponse,
+use crate::message::{
+    Message, MessageContentBlock, Role, collapse_whitespace, normalized_display_text,
 };
 
 use super::{
     discovery::DiscoveredSession,
-    live::{LiveSessionEvent, LiveSessionStoreHandle},
+    live::{LiveSessionEvent, LiveSessionStoreHandle, LiveUpdate},
     transcript,
 };
 
@@ -30,7 +29,7 @@ pub async fn send_message_to_session(
     body: String,
     pi_agent_dir: PathBuf,
     live_store: LiveSessionStoreHandle,
-    live_updates: UnboundedSender<SessionMessagesResponse>,
+    live_updates: UnboundedSender<LiveUpdate>,
 ) -> Result<(), String> {
     let session_id = discovered_session.id.clone();
     let existing_snapshot = live_store.snapshot_for_session(&session_id).await;
@@ -82,7 +81,7 @@ pub async fn send_message_to_session(
 
     ack_rx.await.map_err(|_| {
         format!(
-            "headless pi runner for session {} ended before acknowledging the prompt",
+            "headless pi runner for session {} ended before confirming message delivery",
             session_id
         )
     })?
@@ -93,7 +92,7 @@ async fn run_headless_prompt(
     body: String,
     pi_agent_dir: PathBuf,
     live_store: LiveSessionStoreHandle,
-    live_updates: UnboundedSender<SessionMessagesResponse>,
+    live_updates: UnboundedSender<LiveUpdate>,
     was_active: bool,
     ack_tx: oneshot::Sender<Result<(), String>>,
 ) {
@@ -154,7 +153,9 @@ async fn run_headless_prompt(
             .map_err(|error| format!("failed to flush pi rpc runner stdin: {error}"))?;
 
         let mut lines = BufReader::new(stdout).lines();
-        let mut prompt_acknowledged = false;
+        let mut prompt_accepted = false;
+        let mut delivery_confirmed = false;
+        let mut saw_user_message_end = false;
         let mut pending_partial: Option<Message> = None;
         let mut last_partial_sent_at: Option<Instant> = None;
 
@@ -178,10 +179,13 @@ async fn run_headless_prompt(
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 if success {
-                    if let Some(ack_tx) = ack_tx.take() {
-                        let _ = ack_tx.send(Ok(()));
+                    // In pi RPC mode, the prompt command responds immediately after enqueueing work.
+                    // Wait for the actual user message event (or turn completion as a fallback)
+                    // before telling the server that delivery succeeded.
+                    prompt_accepted = true;
+                    if saw_user_message_end {
+                        confirm_delivery(&mut ack_tx, &mut delivery_confirmed);
                     }
-                    prompt_acknowledged = true;
                 } else {
                     let error = response_error_message(&event);
                     if let Some(ack_tx) = ack_tx.take() {
@@ -229,18 +233,28 @@ async fn run_headless_prompt(
                     .await;
 
                     if let Some(message) = event.get("message").and_then(rpc_message_to_message) {
+                        let role = message.role.clone();
                         publish_event(
                             &live_store,
                             &live_updates,
                             LiveSessionEvent::SessionAppend {
                                 session_id: session_id.clone(),
-                                messages: vec![message.clone()],
+                                messages: vec![message],
                             },
                         )
                         .await;
 
-                        if message.role == Role::Assistant {
-                            last_partial_sent_at = None;
+                        match role {
+                            Role::Assistant => {
+                                last_partial_sent_at = None;
+                            }
+                            Role::User => {
+                                saw_user_message_end = true;
+                                if prompt_accepted {
+                                    confirm_delivery(&mut ack_tx, &mut delivery_confirmed);
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -252,15 +266,25 @@ async fn run_headless_prompt(
                         &mut pending_partial,
                     )
                     .await;
+                    if prompt_accepted {
+                        confirm_delivery(&mut ack_tx, &mut delivery_confirmed);
+                    }
                     break;
                 }
                 _ => {}
             }
         }
 
-        if !prompt_acknowledged {
+        if !prompt_accepted {
             return Err(format!(
-                "pi rpc runner for session {} ended before acknowledging the prompt",
+                "pi rpc runner for session {} ended before accepting the prompt",
+                session_id
+            ));
+        }
+
+        if !delivery_confirmed {
+            return Err(format!(
+                "pi rpc runner for session {} ended before confirming message delivery",
                 session_id
             ));
         }
@@ -290,20 +314,37 @@ async fn run_headless_prompt(
     }
 }
 
+fn confirm_delivery(
+    ack_tx: &mut Option<oneshot::Sender<Result<(), String>>>,
+    delivery_confirmed: &mut bool,
+) {
+    if *delivery_confirmed {
+        return;
+    }
+
+    if let Some(ack_tx) = ack_tx.take() {
+        let _ = ack_tx.send(Ok(()));
+    }
+    *delivery_confirmed = true;
+}
+
 async fn publish_event(
     live_store: &LiveSessionStoreHandle,
-    live_updates: &UnboundedSender<SessionMessagesResponse>,
+    live_updates: &UnboundedSender<LiveUpdate>,
     event: LiveSessionEvent,
 ) {
     if let Some(snapshot) = live_store.apply_event(event).await {
-        let _ = live_updates.send(snapshot);
+        let _ = live_updates.send(LiveUpdate {
+            snapshot,
+            active_session: None,
+        });
     }
 }
 
 async fn flush_pending_partial(
     session_id: &str,
     live_store: &LiveSessionStoreHandle,
-    live_updates: &UnboundedSender<SessionMessagesResponse>,
+    live_updates: &UnboundedSender<LiveUpdate>,
     pending_partial: &mut Option<Message>,
 ) {
     let Some(message) = pending_partial.take() else {

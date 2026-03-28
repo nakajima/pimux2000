@@ -24,7 +24,7 @@ use crate::{
     host::{HostAuth, HostIdentity},
     report::{ReportPayload, VersionResponse},
     session::{parse_local_date_filter, utc_range_for_local_date},
-    transcript::{SessionMessagesResponse, TranscriptFetchFulfillment},
+    transcript::TranscriptFetchFulfillment,
 };
 
 pub use summarizer::DEFAULT_SUMMARY_MODEL;
@@ -200,7 +200,17 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     let version_url = build_server_url(&config.server_url, "/version")?;
     let websocket_url = build_websocket_url(&config.server_url, "/agent/connect")?;
     let client = Client::new();
-    ensure_server_reachable(&client, &config.server_url, &health_url, &version_url).await?;
+    match ensure_server_reachable(&client, &config.server_url, &health_url, &version_url).await {
+        Ok(()) => {
+            println!("verified pimux server at {}", config.server_url);
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            eprintln!(
+                "server is unavailable at startup; agent will keep retrying the websocket connection in the background"
+            );
+        }
+    }
     let live_store = live::LiveSessionStoreHandle::new(
         live::DEFAULT_DETACHED_CAPACITY,
         live::DEFAULT_DETACHED_TTL,
@@ -241,7 +251,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     );
 
     let (tx, mut rx) = unbounded_channel();
-    let (live_updates_tx, mut live_updates_rx) = unbounded_channel::<SessionMessagesResponse>();
+    let (live_updates_tx, mut live_updates_rx) = unbounded_channel::<live::LiveUpdate>();
     let _watcher = create_watcher(&session_root, tx)?;
     let _live_updates_tx_guard = match live::start_listener(
         live_store.clone(),
@@ -270,6 +280,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
         &pi_agent_dir,
         &summary_config,
         &host,
+        &live_store,
         &mut summary_cache,
         &mut last_report,
         false,
@@ -326,9 +337,12 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                 }
             }
             live_update = live_updates_rx.recv() => {
-                if let Some(snapshot) = live_update {
+                if let Some(live_update) = live_update {
                     if connected {
-                        let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate { session: snapshot });
+                        let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
+                            session: live_update.snapshot,
+                            active_session: live_update.active_session,
+                        });
                     }
                 }
             }
@@ -342,6 +356,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                     &pi_agent_dir,
                     &summary_config,
                     &host,
+                    &live_store,
                     &mut summary_cache,
                     &mut last_report,
                     connected,
@@ -369,6 +384,7 @@ async fn send_current_state(
         pi_agent_dir,
         summary_config,
         host,
+        live_store,
         summary_cache,
         last_report,
         true,
@@ -377,7 +393,13 @@ async fn send_current_state(
     .await?;
 
     for snapshot in live_store.all_snapshots().await.into_values() {
-        let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate { session: snapshot });
+        let active_session = live_store
+            .listed_session_for_session(&snapshot.session_id)
+            .await;
+        let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
+            session: snapshot,
+            active_session,
+        });
     }
 
     Ok(())
@@ -387,6 +409,7 @@ async fn refresh_host_snapshot(
     pi_agent_dir: &Path,
     summary_config: &summarizer::Config,
     host: &HostIdentity,
+    live_store: &live::LiveSessionStoreHandle,
     summary_cache: &mut summarizer::SummaryCache,
     last_report: &mut Option<ReportPayload>,
     force_send: bool,
@@ -395,6 +418,8 @@ async fn refresh_host_snapshot(
     let discovered_sessions = discovery::discover_sessions(pi_agent_dir)?;
     let active_sessions =
         summarizer::apply_summaries(discovered_sessions, summary_config, summary_cache).await;
+    let active_sessions =
+        merge_live_sessions(active_sessions, live_store.all_listed_sessions().await);
     let report = ReportPayload {
         host: host.clone(),
         active_sessions,
@@ -415,12 +440,35 @@ async fn refresh_host_snapshot(
     Ok(())
 }
 
+fn merge_live_sessions(
+    sessions: Vec<crate::session::ActiveSession>,
+    live_sessions: Vec<crate::session::ActiveSession>,
+) -> Vec<crate::session::ActiveSession> {
+    use std::collections::HashMap;
+
+    let mut sessions_by_id = sessions
+        .into_iter()
+        .map(|session| (session.id.clone(), session))
+        .collect::<HashMap<_, _>>();
+
+    for live_session in live_sessions {
+        match sessions_by_id.get(&live_session.id) {
+            Some(existing) if existing.updated_at > live_session.updated_at => {}
+            _ => {
+                sessions_by_id.insert(live_session.id.clone(), live_session);
+            }
+        }
+    }
+
+    sessions_by_id.into_values().collect()
+}
+
 async fn handle_server_message(
     message: ServerToAgentMessage,
     pi_agent_dir: &Path,
     host: &HostIdentity,
     live_store: &live::LiveSessionStoreHandle,
-    live_updates_tx: &tokio::sync::mpsc::UnboundedSender<SessionMessagesResponse>,
+    live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
     channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
 ) -> Result<(), BoxError> {
     match message {
@@ -445,6 +493,18 @@ async fn handle_server_message(
             let result =
                 handle_send_message(&session_id, body, pi_agent_dir, live_store, live_updates_tx)
                     .await;
+
+            if matches!(result.as_ref(), Ok(SendMessageDispatch::HeadlessRpc))
+                && let Some(snapshot) = live_store.snapshot_for_session(&session_id).await
+            {
+                // Push the latest transcript snapshot before the send acknowledgement so
+                // the server cache is updated before the iOS app follows up with GET /messages.
+                let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
+                    session: snapshot,
+                    active_session: None,
+                });
+            }
+
             let _ = channel_tx.send(AgentToServerMessage::SendMessageResult {
                 request_id,
                 error: result.err(),
@@ -522,13 +582,24 @@ async fn build_fetch_fulfillment(
     }
 }
 
+enum SendMessageDispatch {
+    LiveExtension,
+    HeadlessRpc,
+}
+
 async fn handle_send_message(
     session_id: &str,
     body: String,
     pi_agent_dir: &Path,
     live_store: &live::LiveSessionStoreHandle,
-    live_updates_tx: &tokio::sync::mpsc::UnboundedSender<SessionMessagesResponse>,
-) -> Result<(), String> {
+    live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
+) -> Result<SendMessageDispatch, String> {
+    match live_store.send_user_message(session_id, &body).await {
+        Ok(()) => return Ok(SendMessageDispatch::LiveExtension),
+        Err(live::SendUserMessageError::Unavailable) => {}
+        Err(error) => return Err(error.to_string()),
+    }
+
     let discovered_sessions =
         discovery::discover_sessions(pi_agent_dir).map_err(|error| error.to_string())?;
     let Some(discovered_session) = discovered_sessions
@@ -546,6 +617,7 @@ async fn handle_send_message(
         live_updates_tx.clone(),
     )
     .await
+    .map(|_| SendMessageDispatch::HeadlessRpc)
 }
 
 fn build_server_url(server_url: &str, path: &str) -> Result<Url, BoxError> {
@@ -756,6 +828,7 @@ mod tests {
             last_assistant_message_at: updated_at - ChronoDuration::minutes(3),
             cwd: "/tmp/project".to_string(),
             model: "anthropic/claude-sonnet-4-5".to_string(),
+            context_usage: None,
         }
     }
 }

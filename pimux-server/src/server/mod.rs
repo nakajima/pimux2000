@@ -18,7 +18,7 @@ use axum::{
     },
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{delete, get},
 };
 use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -184,6 +184,14 @@ struct SendMessageRequest {
     body: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertHostRequest {
+    location: String,
+    #[serde(default)]
+    auth: crate::host::HostAuth,
+}
+
 pub async fn start() -> Result<(), BoxError> {
     let app = app(AppState::with_persistent_hosts()?);
     let port = port_from_env()?;
@@ -224,7 +232,8 @@ fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
-        .route("/hosts", get(hosts))
+        .route("/hosts", get(hosts).post(add_host))
+        .route("/hosts/{location}", delete(delete_host))
         .route("/sessions", get(sessions))
         .route(
             "/sessions/{id}/messages",
@@ -270,6 +279,73 @@ async fn hosts(State(state): State<AppState>) -> Json<Vec<HostSessions>> {
 
     response.sort_by(|left, right| left.location.cmp(&right.location));
     Json(response)
+}
+
+async fn add_host(
+    State(state): State<AppState>,
+    Json(request): Json<UpsertHostRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let location = request.location.trim().to_string();
+    if location.is_empty() {
+        return Err(bad_request("host location must not be empty".to_string()));
+    }
+
+    {
+        let mut hosts = state.hosts.write().await;
+        let record = hosts.entry(location.clone()).or_insert_with(|| HostRecord {
+            host: HostIdentity {
+                location: location.clone(),
+                auth: request.auth,
+            },
+            sessions: Vec::new(),
+            connected: false,
+            last_seen_at: None,
+        });
+        record.host = HostIdentity {
+            location,
+            auth: request.auth,
+        };
+    }
+
+    persist_hosts(&state).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn delete_host(
+    State(state): State<AppState>,
+    Path(location): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let location = location.trim().to_string();
+    if location.is_empty() {
+        return Err(bad_request("host location must not be empty".to_string()));
+    }
+
+    let removed_session_ids = {
+        let mut hosts = state.hosts.write().await;
+        let Some(existing) = hosts.get(&location) else {
+            return Err(not_found(format!("host {location} is not known to the server")));
+        };
+        if existing.connected {
+            return Err(conflict(format!(
+                "host {location} is currently connected and cannot be deleted"
+            )));
+        }
+
+        hosts.remove(&location)
+            .into_iter()
+            .flat_map(|record| record.sessions.into_iter().map(|session| session.id))
+            .collect::<Vec<_>>()
+    };
+
+    if !removed_session_ids.is_empty() {
+        let mut transcripts = state.transcripts.write().await;
+        for session_id in removed_session_ids {
+            transcripts.remove(&session_id);
+        }
+    }
+
+    persist_hosts(&state).await;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn sessions(
@@ -525,7 +601,10 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         };
                         update_host_snapshot(&state, host, sessions).await;
                     }
-                    AgentToServerMessage::LiveSessionUpdate { session } => {
+                    AgentToServerMessage::LiveSessionUpdate {
+                        session,
+                        active_session,
+                    } => {
                         let Some(host) = current_host.as_ref() else {
                             eprintln!("received live session update before hello");
                             continue;
@@ -538,6 +617,9 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                                 session,
                             )
                         };
+                        if let Some(active_session) = active_session {
+                            upsert_live_host_session(&state, host, active_session).await;
+                        }
                         if let Some(session) = changed {
                             broadcast_session_snapshot(&state, session).await;
                         }
@@ -646,6 +728,37 @@ async fn update_host_snapshot(state: &AppState, host: HostIdentity, sessions: Ve
     for session_id in session_ids {
         broadcast_session_state(state, &session_id, true, false, Some(now)).await;
     }
+}
+
+async fn upsert_live_host_session(state: &AppState, host: &HostIdentity, session: ActiveSession) {
+    let now = Utc::now();
+    {
+        let mut hosts = state.hosts.write().await;
+        let record = hosts
+            .entry(host.location.clone())
+            .or_insert_with(|| HostRecord {
+                host: host.clone(),
+                sessions: Vec::new(),
+                connected: true,
+                last_seen_at: Some(now),
+            });
+
+        record.host = host.clone();
+        record.connected = true;
+        record.last_seen_at = Some(now);
+
+        if let Some(existing) = record
+            .sessions
+            .iter_mut()
+            .find(|existing| existing.id == session.id)
+        {
+            *existing = session;
+        } else {
+            record.sessions.push(session);
+        }
+    }
+
+    persist_hosts(state).await;
 }
 
 async fn disconnect_agent(state: &AppState, host_location: &str, connection_id: u64) {
@@ -788,16 +901,10 @@ async fn current_session_subscription_state(
     session_id: &str,
 ) -> Option<SessionSubscriptionEvent> {
     let hosts = state.hosts.read().await;
-    hosts.values().find_map(|record| {
-        record
-            .sessions
-            .iter()
-            .any(|session| session.id == session_id)
-            .then(|| SessionSubscriptionEvent::SessionState {
-                connected: record.connected,
-                missing: !record.connected,
-                last_seen_at: record.last_seen_at.clone(),
-            })
+    preferred_listed_session(&hosts, session_id).map(|session| SessionSubscriptionEvent::SessionState {
+        connected: session.host_connected,
+        missing: session.host_missing,
+        last_seen_at: session.host_last_seen_at,
     })
 }
 
@@ -953,21 +1060,68 @@ async fn fail_inflight_for_host(state: &AppState, host_location: &str) {
 
 async fn listed_sessions(state: &AppState) -> Vec<ListedSession> {
     let hosts = state.hosts.read().await;
-    let mut sessions = Vec::new();
+    let mut sessions_by_id = HashMap::new();
 
     for record in hosts.values() {
         for session in &record.sessions {
-            sessions.push(ListedSession::new(
-                record.host.location.clone(),
-                record.connected,
-                !record.connected,
-                record.last_seen_at.clone(),
-                session.clone(),
-            ));
+            let candidate = listed_session(record, session);
+            match sessions_by_id.get(&candidate.session.id) {
+                Some(existing) if !should_prefer_listed_session(&candidate, existing) => {}
+                _ => {
+                    sessions_by_id.insert(candidate.session.id.clone(), candidate);
+                }
+            }
         }
     }
 
-    sessions
+    sessions_by_id.into_values().collect()
+}
+
+fn listed_session(record: &HostRecord, session: &ActiveSession) -> ListedSession {
+    ListedSession::new(
+        record.host.location.clone(),
+        record.connected,
+        !record.connected,
+        record.last_seen_at.clone(),
+        session.clone(),
+    )
+}
+
+fn preferred_listed_session(
+    hosts: &HashMap<String, HostRecord>,
+    session_id: &str,
+) -> Option<ListedSession> {
+    let mut preferred = None;
+
+    for record in hosts.values() {
+        let Some(session) = record.sessions.iter().find(|session| session.id == session_id) else {
+            continue;
+        };
+
+        let candidate = listed_session(record, session);
+        match preferred.as_ref() {
+            Some(existing) if !should_prefer_listed_session(&candidate, existing) => {}
+            _ => preferred = Some(candidate),
+        }
+    }
+
+    preferred
+}
+
+fn should_prefer_listed_session(candidate: &ListedSession, existing: &ListedSession) -> bool {
+    if candidate.host_connected != existing.host_connected {
+        return candidate.host_connected;
+    }
+
+    if candidate.session.updated_at != existing.session.updated_at {
+        return candidate.session.updated_at > existing.session.updated_at;
+    }
+
+    if candidate.host_last_seen_at != existing.host_last_seen_at {
+        return candidate.host_last_seen_at > existing.host_last_seen_at;
+    }
+
+    candidate.host_location < existing.host_location
 }
 
 async fn cached_transcript(state: &AppState, session_id: &str) -> Option<CachedTranscript> {
@@ -976,13 +1130,7 @@ async fn cached_transcript(state: &AppState, session_id: &str) -> Option<CachedT
 
 async fn host_for_session(state: &AppState, session_id: &str) -> Option<String> {
     let hosts = state.hosts.read().await;
-    hosts.values().find_map(|record| {
-        record
-            .sessions
-            .iter()
-            .any(|session| session.id == session_id)
-            .then(|| record.host.location.clone())
-    })
+    preferred_listed_session(&hosts, session_id).map(|session| session.host_location)
 }
 
 async fn cancel_fetch(state: &AppState, request_id: &str) {
@@ -1157,6 +1305,10 @@ fn bad_request(error: String) -> (StatusCode, Json<ErrorResponse>) {
 
 fn bad_gateway(error: String) -> (StatusCode, Json<ErrorResponse>) {
     (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error }))
+}
+
+fn conflict(error: String) -> (StatusCode, Json<ErrorResponse>) {
+    (StatusCode::CONFLICT, Json(ErrorResponse { error }))
 }
 
 fn gateway_timeout(error: String) -> (StatusCode, Json<ErrorResponse>) {
@@ -1521,6 +1673,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adds_missing_host_to_persisted_registry() {
+        let path = unique_test_path("expected-hosts.json");
+        let state = AppState::new(HashMap::new(), Some(path.clone()));
+        let app = app(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                Method::POST,
+                "/hosts",
+                &UpsertHostRequest {
+                    location: "dev@mac".to_string(),
+                    auth: HostAuth::Pk,
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = app
+            .oneshot(empty_request(Method::GET, "/hosts"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let hosts: Vec<HostSessions> = json_response(response).await;
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].location, "dev@mac");
+        assert_eq!(hosts[0].auth, HostAuth::Pk);
+        assert!(!hosts[0].connected);
+        assert!(hosts[0].missing);
+        assert!(hosts[0].sessions.is_empty());
+
+        let persisted = load_host_registry(&path).unwrap();
+        let record = persisted.get("dev@mac").unwrap();
+        assert_eq!(record.host.auth, HostAuth::Pk);
+        assert!(record.sessions.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = path.parent().map(std::fs::remove_dir_all);
+    }
+
+    #[tokio::test]
+    async fn deletes_missing_host_from_persisted_registry() {
+        let path = unique_test_path("expected-hosts.json");
+        let host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+        let mut initial_hosts = HashMap::new();
+        initial_hosts.insert(
+            host.location.clone(),
+            HostRecord {
+                host: host.clone(),
+                sessions: vec![sample_active_session("session-1")],
+                connected: false,
+                last_seen_at: Some(timestamp(5_000)),
+            },
+        );
+        persist_host_registry(&path, &initial_hosts).unwrap();
+
+        let state = AppState::new(initial_hosts, Some(path.clone()));
+        let app = app(state);
+        let response = app
+            .oneshot(empty_request(Method::DELETE, "/hosts/dev@mac"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let persisted = load_host_registry(&path).unwrap();
+        assert!(persisted.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = path.parent().map(std::fs::remove_dir_all);
+    }
+
+    #[tokio::test]
+    async fn rejects_deleting_connected_host() {
+        let state = AppState::default();
+        update_host_snapshot(
+            &state,
+            HostIdentity {
+                location: "dev@mac".to_string(),
+                auth: HostAuth::None,
+            },
+            vec![sample_active_session("session-1")],
+        )
+        .await;
+
+        let app = app(state);
+        let response = app
+            .oneshot(empty_request(Method::DELETE, "/hosts/dev@mac"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
     async fn returns_recent_sessions_by_default() {
         let state = AppState::default();
         update_host_snapshot(
@@ -1552,6 +1802,58 @@ mod tests {
         let sessions: Vec<ListedSession> = json_response(response).await;
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session.id, "recent-session");
+    }
+
+    #[tokio::test]
+    async fn deduplicates_sessions_by_id_preferring_connected_host() {
+        let state = AppState::default();
+        let connected_updated_at = Utc::now() - ChronoDuration::hours(2);
+        let missing_updated_at = Utc::now() - ChronoDuration::hours(1);
+        let connected_host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+        let missing_host = HostIdentity {
+            location: "tester@host".to_string(),
+            auth: HostAuth::None,
+        };
+        let connected_session = sample_active_session_with_updated("session-1", connected_updated_at);
+        let missing_session = sample_active_session_with_updated("session-1", missing_updated_at);
+
+        {
+            let mut hosts = state.hosts.write().await;
+            hosts.insert(
+                missing_host.location.clone(),
+                HostRecord {
+                    host: missing_host,
+                    sessions: vec![missing_session],
+                    connected: false,
+                    last_seen_at: Some(Utc::now() - ChronoDuration::minutes(30)),
+                },
+            );
+            hosts.insert(
+                connected_host.location.clone(),
+                HostRecord {
+                    host: connected_host,
+                    sessions: vec![connected_session],
+                    connected: true,
+                    last_seen_at: Some(Utc::now() - ChronoDuration::minutes(5)),
+                },
+            );
+        }
+
+        let app = app(state);
+        let response = app
+            .oneshot(empty_request(Method::GET, "/sessions"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let sessions: Vec<ListedSession> = json_response(response).await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session.id, "session-1");
+        assert_eq!(sessions[0].host_location, "dev@mac");
+        assert!(sessions[0].host_connected);
     }
 
     #[tokio::test]
@@ -1838,6 +2140,7 @@ mod tests {
             last_assistant_message_at: timestamp(2_000),
             cwd: "/tmp/project".to_string(),
             model: "anthropic/claude-sonnet-4-5".to_string(),
+            context_usage: None,
         }
     }
 

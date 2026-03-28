@@ -43,7 +43,7 @@ struct ServerConnectionSheet: View {
 
 				if let errorMessage {
 					Section {
-						Text(errorMessage)
+						Text(verbatim: errorMessage)
 							.foregroundStyle(.red)
 					}
 				}

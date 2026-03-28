@@ -2,7 +2,20 @@ import Foundation
 
 struct PimuxHostSessions: Decodable, Equatable {
 	let location: String
+	let connected: Bool
+	let missing: Bool
+	let lastSeenAt: Date?
 	let sessions: [PimuxActiveSession]
+}
+
+struct PimuxSessionContextUsage: Decodable, Equatable {
+	let usedTokens: Int?
+	let maxTokens: Int?
+
+	init(usedTokens: Int? = nil, maxTokens: Int? = nil) {
+		self.usedTokens = usedTokens
+		self.maxTokens = maxTokens
+	}
 }
 
 struct PimuxActiveSession: Decodable, Equatable {
@@ -14,10 +27,34 @@ struct PimuxActiveSession: Decodable, Equatable {
 	let lastAssistantMessageAt: Date
 	let cwd: String
 	let model: String
+	let contextUsage: PimuxSessionContextUsage?
+
+	init(
+		id: String,
+		summary: String,
+		createdAt: Date,
+		updatedAt: Date,
+		lastUserMessageAt: Date,
+		lastAssistantMessageAt: Date,
+		cwd: String,
+		model: String,
+		contextUsage: PimuxSessionContextUsage? = nil
+	) {
+		self.id = id
+		self.summary = summary
+		self.createdAt = createdAt
+		self.updatedAt = updatedAt
+		self.lastUserMessageAt = lastUserMessageAt
+		self.lastAssistantMessageAt = lastAssistantMessageAt
+		self.cwd = cwd
+		self.model = model
+		self.contextUsage = contextUsage
+	}
 }
 
 struct PimuxListedSession: Decodable, Equatable {
 	let hostLocation: String
+	let hostConnected: Bool
 	let id: String
 	let summary: String
 	let createdAt: Date
@@ -26,6 +63,33 @@ struct PimuxListedSession: Decodable, Equatable {
 	let lastAssistantMessageAt: Date
 	let cwd: String
 	let model: String
+	let contextUsage: PimuxSessionContextUsage?
+
+	init(
+		hostLocation: String,
+		hostConnected: Bool,
+		id: String,
+		summary: String,
+		createdAt: Date,
+		updatedAt: Date,
+		lastUserMessageAt: Date,
+		lastAssistantMessageAt: Date,
+		cwd: String,
+		model: String,
+		contextUsage: PimuxSessionContextUsage? = nil
+	) {
+		self.hostLocation = hostLocation
+		self.hostConnected = hostConnected
+		self.id = id
+		self.summary = summary
+		self.createdAt = createdAt
+		self.updatedAt = updatedAt
+		self.lastUserMessageAt = lastUserMessageAt
+		self.lastAssistantMessageAt = lastAssistantMessageAt
+		self.cwd = cwd
+		self.model = model
+		self.contextUsage = contextUsage
+	}
 }
 
 struct PimuxSessionMessagesResponse: Decodable, Equatable {
@@ -143,6 +207,10 @@ private struct PimuxSendMessageRequest: Encodable {
 	let body: String
 }
 
+private struct PimuxAddHostRequest: Encodable {
+	let location: String
+}
+
 struct PimuxServerClient {
 	private let baseURL: URL
 	private let session: URLSession
@@ -161,6 +229,32 @@ struct PimuxServerClient {
 
 	func listHosts() async throws -> [PimuxHostSessions] {
 		try await requestJSON([PimuxHostSessions].self, path: "/hosts")
+	}
+
+	func addHost(location: String) async throws {
+		let requestData: Data
+		do {
+			requestData = try JSONEncoder().encode(PimuxAddHostRequest(location: location))
+		} catch {
+			throw PimuxServerError.invalidResponse("Couldn’t encode the host request.")
+		}
+
+		_ = try await performRequest(
+			path: "/hosts",
+			queryItems: [],
+			method: "POST",
+			bodyData: requestData,
+			contentType: "application/json"
+		)
+	}
+
+	func deleteHost(location: String) async throws {
+		let encodedLocation = Self.percentEncodedPathComponent(location)
+		_ = try await performRequest(
+			path: "/hosts/\(encodedLocation)",
+			queryItems: [],
+			method: "DELETE"
+		)
 	}
 
 	func listSessions() async throws -> [PimuxListedSession] {
@@ -232,6 +326,10 @@ struct PimuxServerClient {
 		configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
 		configuration.urlCache = nil
 		return URLSession(configuration: configuration)
+	}
+
+	private static func percentEncodedPathComponent(_ value: String) -> String {
+		value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? value
 	}
 
 	private static func normalizedBaseURL(from rawValue: String) throws -> URL {

@@ -14,6 +14,7 @@ struct PiSessionReadStatusTests {
 
 		let remoteSession = PimuxListedSession(
 			hostLocation: "nakajima@macstudio",
+			hostConnected: false,
 			id: "session-1",
 			summary: "Read status",
 			createdAt: createdAt,
@@ -47,6 +48,7 @@ struct PiSessionReadStatusTests {
 
 		let initialRemoteSession = PimuxListedSession(
 			hostLocation: "nakajima@macstudio",
+			hostConnected: false,
 			id: "session-1",
 			summary: "Read status",
 			createdAt: createdAt,
@@ -59,6 +61,7 @@ struct PiSessionReadStatusTests {
 
 		let updatedRemoteSession = PimuxListedSession(
 			hostLocation: "nakajima@macstudio",
+			hostConnected: false,
 			id: "session-1",
 			summary: "Read status",
 			createdAt: createdAt,
@@ -84,6 +87,36 @@ struct PiSessionReadStatusTests {
 		#expect(session?.lastReadMessageAt == firstAssistantMessageAt)
 		#expect(session?.lastMessageAt == secondAssistantMessageAt)
 		#expect(session?.isUnread == true)
+	}
+
+	@Test
+	func storesSessionContextUsageFromServerPayload() throws {
+		let database = AppDatabase.preview()
+		let createdAt = Date(timeIntervalSince1970: 2_500)
+		let remoteSession = PimuxListedSession(
+			hostLocation: "nakajima@macstudio",
+			hostConnected: true,
+			id: "session-1",
+			summary: "Read status",
+			createdAt: createdAt,
+			updatedAt: createdAt.addingTimeInterval(180),
+			lastUserMessageAt: createdAt.addingTimeInterval(60),
+			lastAssistantMessageAt: createdAt.addingTimeInterval(120),
+			cwd: "/Users/nakajima/apps/pimux2000",
+			model: "anthropic/claude-sonnet",
+			contextUsage: PimuxSessionContextUsage(usedTokens: 48_676, maxTokens: 1_000_000)
+		)
+
+		try database.dbQueue.write { db in
+			try PiSessionSync.store(remoteHosts: [], remoteSessions: [remoteSession], in: db)
+		}
+
+		let session = try database.dbQueue.read { db in
+			try PiSession.fetchOne(db)
+		}
+
+		#expect(session?.contextTokensUsed == 48_676)
+		#expect(session?.contextTokensMax == 1_000_000)
 	}
 
 	@Test

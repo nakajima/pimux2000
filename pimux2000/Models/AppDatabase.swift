@@ -96,6 +96,25 @@ struct AppDatabase {
 			try db.execute(sql: "UPDATE piSessions SET lastReadMessageAt = lastMessageAt")
 		}
 
+		migrator.registerMigration("addPiSessionHostConnected") { db in
+			let columnNames = try Self.columnNames(in: "piSessions", db: db)
+			if columnNames.contains("hostConnected") {
+				try db.execute(sql: "ALTER TABLE piSessions RENAME COLUMN hostConnected TO isCliActive")
+			} else if !columnNames.contains("isCliActive") {
+				try db.execute(sql: "ALTER TABLE piSessions ADD COLUMN isCliActive BOOLEAN NOT NULL DEFAULT 0")
+			}
+		}
+
+		migrator.registerMigration("addPiSessionContextUsage") { db in
+			let columnNames = try Self.columnNames(in: "piSessions", db: db)
+			if !columnNames.contains("contextTokensUsed") {
+				try db.execute(sql: "ALTER TABLE piSessions ADD COLUMN contextTokensUsed INTEGER")
+			}
+			if !columnNames.contains("contextTokensMax") {
+				try db.execute(sql: "ALTER TABLE piSessions ADD COLUMN contextTokensMax INTEGER")
+			}
+		}
+
 		return migrator
 	}
 
@@ -122,6 +141,18 @@ struct AppDatabase {
 				updatedAt: now
 			)
 			try configuration.insert(db)
+		}
+	}
+
+	func updateSessionActivity(sessionID: String, active: Bool, attached: Bool) throws {
+		try dbQueue.write { db in
+			guard var session = try PiSession
+				.filter(Column("sessionID") == sessionID)
+				.fetchOne(db) else { return }
+			let isLive = active && attached
+			guard session.isCliActive != isLive else { return }
+			session.isCliActive = isLive
+			try session.update(db)
 		}
 	}
 

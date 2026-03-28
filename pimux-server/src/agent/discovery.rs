@@ -1,9 +1,11 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     env,
     fs::{self, File},
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
+    process::Command,
+    sync::OnceLock,
     time::UNIX_EPOCH,
 };
 
@@ -12,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
 
-use crate::session::ActiveSession;
+use crate::session::{ActiveSession, SessionContextUsage};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -34,6 +36,7 @@ pub struct DiscoveredSession {
     pub last_assistant_message_at: DateTime<Utc>,
     pub cwd: String,
     pub model: String,
+    pub context_usage: Option<SessionContextUsage>,
 }
 
 impl DiscoveredSession {
@@ -52,6 +55,7 @@ impl DiscoveredSession {
             last_assistant_message_at: self.last_assistant_message_at,
             cwd: self.cwd,
             model: self.model,
+            context_usage: self.context_usage,
         }
     }
 }
@@ -128,6 +132,7 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
     let mut first_user_summary: Option<String> = None;
     let mut last_user_message_at: Option<DateTime<Utc>> = None;
     let mut last_assistant_message_at: Option<DateTime<Utc>> = None;
+    let mut last_assistant_usage_total_tokens: Option<u64> = None;
     let mut model: Option<String> = None;
     let mut transcript_entries = SummaryTranscriptCollector::default();
 
@@ -177,6 +182,8 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
                     Some("assistant") => {
                         last_assistant_message_at =
                             parse_message_timestamp(&entry, message).or(last_assistant_message_at);
+                        last_assistant_usage_total_tokens = extract_usage_total_tokens(message)
+                            .or(last_assistant_usage_total_tokens);
 
                         if let (Some(provider), Some(model_name)) = (
                             message.get("provider").and_then(Value::as_str),
@@ -212,6 +219,17 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
         .map(DateTime::<Utc>::from)
         .unwrap_or(header.created_at);
     let summary_input = transcript_entries.into_summary_input();
+    let model = model.unwrap_or_else(|| "unknown".to_string());
+    let context_usage = match (
+        last_assistant_usage_total_tokens,
+        model_context_window_tokens(&model),
+    ) {
+        (None, None) => None,
+        (used_tokens, max_tokens) => Some(SessionContextUsage {
+            used_tokens,
+            max_tokens,
+        }),
+    };
 
     Ok(DiscoveredSession {
         session_file: path.to_path_buf(),
@@ -225,7 +243,8 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
         last_user_message_at: last_user_message_at.unwrap_or(header.created_at),
         last_assistant_message_at: last_assistant_message_at.unwrap_or(header.created_at),
         cwd: header.cwd,
-        model: model.unwrap_or_else(|| "unknown".to_string()),
+        model,
+        context_usage,
     })
 }
 
@@ -294,6 +313,90 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|timestamp| timestamp.with_timezone(&Utc))
+}
+
+fn extract_usage_total_tokens(message: &Value) -> Option<u64> {
+    let usage = message.get("usage")?;
+    usage.get("totalTokens").and_then(positive_u64).or_else(|| {
+        let input = usage.get("input").and_then(positive_u64).unwrap_or(0);
+        let output = usage.get("output").and_then(positive_u64).unwrap_or(0);
+        let cache_read = usage.get("cacheRead").and_then(positive_u64).unwrap_or(0);
+        let cache_write = usage.get("cacheWrite").and_then(positive_u64).unwrap_or(0);
+        let total = input + output + cache_read + cache_write;
+        (total > 0).then_some(total)
+    })
+}
+
+fn positive_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
+}
+
+fn model_context_window_tokens(model: &str) -> Option<u64> {
+    static CONTEXT_WINDOWS: OnceLock<HashMap<String, u64>> = OnceLock::new();
+
+    CONTEXT_WINDOWS
+        .get_or_init(|| match load_model_context_windows() {
+            Ok(context_windows) => context_windows,
+            Err(error) => {
+                eprintln!("warning: failed to load pi model context windows: {error}");
+                HashMap::new()
+            }
+        })
+        .get(model)
+        .copied()
+}
+
+fn load_model_context_windows() -> Result<HashMap<String, u64>, BoxError> {
+    let output = Command::new("pi").arg("--list-models").output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            format!("pi --list-models exited with status {}", output.status)
+        } else {
+            format!("pi --list-models failed: {stderr}")
+        };
+        return Err(message.into());
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(parse_model_context_windows(&stdout))
+}
+
+fn parse_model_context_windows(output: &str) -> HashMap<String, u64> {
+    let mut context_windows = HashMap::new();
+
+    for line in output.lines() {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        if columns.len() < 3 || columns[0] == "provider" {
+            continue;
+        }
+
+        let Some(context_window) = parse_token_count(columns[2]) else {
+            continue;
+        };
+
+        context_windows.insert(format!("{}/{}", columns[0], columns[1]), context_window);
+    }
+
+    context_windows
+}
+
+fn parse_token_count(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let (number, multiplier) = match value.chars().last()? {
+        'K' | 'k' => (&value[..value.len() - 1], 1_000_f64),
+        'M' | 'm' => (&value[..value.len() - 1], 1_000_000_f64),
+        _ => (value, 1_f64),
+    };
+
+    let parsed = number.parse::<f64>().ok()?;
+    Some((parsed * multiplier).round() as u64)
 }
 
 fn extract_summary(content: Option<&Value>) -> Option<String> {
@@ -454,6 +557,57 @@ mod tests {
         assert_eq!(
             summary_input,
             ["Entry 0", "Entry 1", "Entry 2"].join("\n\n")
+        );
+    }
+
+    #[test]
+    fn extract_usage_total_tokens_prefers_explicit_total() {
+        let message = json!({
+            "usage": {
+                "input": 10,
+                "output": 20,
+                "cacheRead": 30,
+                "cacheWrite": 40,
+                "totalTokens": 1234
+            }
+        });
+
+        assert_eq!(extract_usage_total_tokens(&message), Some(1234));
+    }
+
+    #[test]
+    fn extract_usage_total_tokens_falls_back_to_usage_sum() {
+        let message = json!({
+            "usage": {
+                "input": 10,
+                "output": 20,
+                "cacheRead": 30,
+                "cacheWrite": 40
+            }
+        });
+
+        assert_eq!(extract_usage_total_tokens(&message), Some(100));
+    }
+
+    #[test]
+    fn parse_model_context_windows_reads_token_suffixes() {
+        let output = [
+            "provider      model              context  max-out  thinking  images",
+            "anthropic     claude-opus-4-6    1M       128K     yes       yes",
+            "openai-codex  gpt-5.4            272K     128K     yes       yes",
+            "anthropic     claude-haiku-4-5   200K     64K      yes       yes",
+        ]
+        .join("\n");
+
+        let context_windows = parse_model_context_windows(&output);
+        assert_eq!(
+            context_windows.get("anthropic/claude-opus-4-6"),
+            Some(&1_000_000)
+        );
+        assert_eq!(context_windows.get("openai-codex/gpt-5.4"), Some(&272_000));
+        assert_eq!(
+            context_windows.get("anthropic/claude-haiku-4-5"),
+            Some(&200_000)
         );
     }
 }

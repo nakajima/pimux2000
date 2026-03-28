@@ -25,6 +25,9 @@ struct PiSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiab
 	var lastMessageAt: Date?
 	var lastMessageRole: String?
 	var lastReadMessageAt: Date? = nil
+	var isCliActive: Bool = false
+	var contextTokensUsed: Int? = nil
+	var contextTokensMax: Int? = nil
 	var startedAt: Date
 	var lastSeenAt: Date
 

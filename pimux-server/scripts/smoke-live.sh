@@ -39,7 +39,6 @@ sleep 1
 
 echo "[smoke] starting agent"
 PATH=/usr/bin:/bin ./target/debug/pimux-server agent run "http://127.0.0.1:$PORT" \
-  --location tester@host \
   --pi-agent-dir "$TMPDIR_ROOT" \
   --summary-model dummy >"$AGENT_LOG" 2>&1 &
 AGENT_PID=$!

@@ -13,6 +13,7 @@ pub enum AgentToServerMessage {
     },
     LiveSessionUpdate {
         session: SessionMessagesResponse,
+        active_session: Option<ActiveSession>,
     },
     FetchTranscriptResult {
         request_id: String,

@@ -1,10 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { createConnection } from "node:net";
+import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+const LIVE_PROTOCOL_VERSION = 1;
 const PARTIAL_UPDATE_THROTTLE_MS = 150;
-const SOCKET_WRITE_TIMEOUT_MS = 1_000;
+const SOCKET_RECONNECT_DELAY_MS = 500;
 
 type PimuxRole =
 	| "user"
@@ -31,57 +32,231 @@ interface PimuxMessage {
 	blocks?: PimuxMessageBlock[];
 }
 
-type LiveSessionEvent =
-	| { type: "sessionAttached"; sessionId: string }
-	| { type: "sessionSnapshot"; sessionId: string; messages: PimuxMessage[] }
-	| { type: "sessionAppend"; sessionId: string; messages: PimuxMessage[] }
+interface PimuxSessionMetadata {
+	createdAt: string;
+	cwd: string;
+	summary: string;
+	model: string;
+}
+
+type BridgeToAgentMessage =
+	| { type: "hello"; protocolVersion: number }
+	| { type: "sessionAttached"; sessionId: string; metadata: PimuxSessionMetadata }
+	| { type: "sessionSnapshot"; sessionId: string; messages: PimuxMessage[]; metadata: PimuxSessionMetadata }
+	| { type: "sessionAppend"; sessionId: string; messages: PimuxMessage[]; metadata: PimuxSessionMetadata }
 	| { type: "assistantPartial"; sessionId: string; message: PimuxMessage }
-	| { type: "sessionDetached"; sessionId: string };
+	| { type: "sessionDetached"; sessionId: string }
+	| { type: "sendUserMessageResult"; requestId: string; sessionId: string; error?: string };
+
+type AgentToBridgeMessage = {
+	type: "sendUserMessage";
+	requestId: string;
+	sessionId: string;
+	body: string;
+};
 
 interface PendingPartial {
 	message: PimuxMessage;
 	timer: ReturnType<typeof setTimeout>;
 }
 
-class SocketEventSender {
+interface BridgeStateSnapshot {
+	currentSessionId?: string;
+	latestSnapshotMessages: PimuxMessage[];
+	latestMetadata?: PimuxSessionMetadata;
+}
+
+class LiveBridgeClient {
 	private readonly socketPath: string;
-	private queue: Promise<void> = Promise.resolve();
+	private readonly onCommand: (command: AgentToBridgeMessage) => void;
+	private readonly getStateSnapshot: () => BridgeStateSnapshot;
+	private socket?: Socket;
+	private connecting = false;
+	private connected = false;
+	private reconnectTimer?: ReturnType<typeof setTimeout>;
+	private pendingPayloads: string[] = [];
+	private incomingBuffer = "";
 
-	constructor(socketPath: string) {
+	constructor(
+		socketPath: string,
+		onCommand: (command: AgentToBridgeMessage) => void,
+		getStateSnapshot: () => BridgeStateSnapshot
+	) {
 		this.socketPath = socketPath;
+		this.onCommand = onCommand;
+		this.getStateSnapshot = getStateSnapshot;
+		this.ensureConnected();
 	}
 
-	send(event: LiveSessionEvent): Promise<void> {
-		this.queue = this.queue.then(() => this.writeEvent(event)).catch(() => {});
-		return this.queue;
+	send(message: BridgeToAgentMessage) {
+		const payload = `${JSON.stringify(message)}\n`;
+		if (this.connected && this.socket && !this.socket.destroyed) {
+			this.socket.write(payload);
+			return;
+		}
+
+		this.pendingPayloads.push(payload);
+		this.ensureConnected();
 	}
 
-	private writeEvent(event: LiveSessionEvent): Promise<void> {
-		return new Promise((resolve) => {
-			const socket = createConnection(this.socketPath);
-			let settled = false;
+	private ensureConnected() {
+		if (this.connected || this.connecting) return;
+		this.connecting = true;
 
-			const finish = () => {
-				if (settled) return;
-				settled = true;
-				socket.destroy();
-				resolve();
-			};
+		const socket = createConnection(this.socketPath);
+		this.socket = socket;
 
-			socket.on("connect", () => {
-				socket.end(`${JSON.stringify(event)}\n`);
-			});
-			socket.on("close", finish);
-			socket.on("error", finish);
-			setTimeout(finish, SOCKET_WRITE_TIMEOUT_MS);
+		socket.on("connect", () => {
+			this.connecting = false;
+			this.connected = true;
+			this.incomingBuffer = "";
+			this.writeNow({ type: "hello", protocolVersion: LIVE_PROTOCOL_VERSION });
+			this.flushPendingPayloads();
+			this.resyncCurrentSession();
 		});
+
+		socket.on("data", (chunk) => {
+			this.incomingBuffer += chunk.toString("utf8");
+			this.drainIncomingBuffer();
+		});
+
+		socket.on("error", () => {
+			this.markDisconnected();
+		});
+
+		socket.on("close", () => {
+			this.markDisconnected();
+			this.scheduleReconnect();
+		});
+	}
+
+	private writeNow(message: BridgeToAgentMessage) {
+		if (!this.connected || !this.socket || this.socket.destroyed) {
+			this.pendingPayloads.push(`${JSON.stringify(message)}\n`);
+			this.ensureConnected();
+			return;
+		}
+
+		this.socket.write(`${JSON.stringify(message)}\n`);
+	}
+
+	private flushPendingPayloads() {
+		if (!this.connected || !this.socket || this.socket.destroyed) return;
+		while (this.pendingPayloads.length > 0) {
+			const payload = this.pendingPayloads.shift();
+			if (!payload) continue;
+			this.socket.write(payload);
+		}
+	}
+
+	private resyncCurrentSession() {
+		const state = this.getStateSnapshot();
+		if (!state.currentSessionId || !state.latestMetadata) return;
+		this.writeNow({
+			type: "sessionAttached",
+			sessionId: state.currentSessionId,
+			metadata: state.latestMetadata,
+		});
+		this.writeNow({
+			type: "sessionSnapshot",
+			sessionId: state.currentSessionId,
+			messages: state.latestSnapshotMessages,
+			metadata: state.latestMetadata,
+		});
+	}
+
+	private drainIncomingBuffer() {
+		while (true) {
+			const newlineIndex = this.incomingBuffer.indexOf("\n");
+			if (newlineIndex === -1) return;
+
+			let line = this.incomingBuffer.slice(0, newlineIndex);
+			this.incomingBuffer = this.incomingBuffer.slice(newlineIndex + 1);
+			if (line.endsWith("\r")) line = line.slice(0, -1);
+			line = line.trim();
+			if (!line) continue;
+
+			try {
+				const command = JSON.parse(line) as AgentToBridgeMessage;
+				if (command.type !== "sendUserMessage") continue;
+				this.onCommand(command);
+			} catch {
+				// Ignore malformed agent-side commands.
+			}
+		}
+	}
+
+	private markDisconnected() {
+		this.connected = false;
+		this.connecting = false;
+		this.socket = undefined;
+	}
+
+	private scheduleReconnect() {
+		if (this.reconnectTimer) return;
+		this.reconnectTimer = setTimeout(() => {
+			this.reconnectTimer = undefined;
+			this.ensureConnected();
+		}, SOCKET_RECONNECT_DELAY_MS);
 	}
 }
 
 export default function (pi: ExtensionAPI) {
-	const sender = new SocketEventSender(resolveSocketPath());
-	let currentSessionId: string | undefined;
+	const state: {
+		currentSessionId?: string;
+		latestSnapshotMessages: PimuxMessage[];
+		latestMetadata?: PimuxSessionMetadata;
+		isAgentBusy: boolean;
+	} = {
+		currentSessionId: undefined,
+		latestSnapshotMessages: [],
+		latestMetadata: undefined,
+		isAgentBusy: false,
+	};
+
 	const pendingPartials = new Map<string, PendingPartial>();
+	let bridge!: LiveBridgeClient;
+
+	function bridgeStateSnapshot(): BridgeStateSnapshot {
+		return {
+			currentSessionId: state.currentSessionId,
+			latestSnapshotMessages: state.latestSnapshotMessages,
+			latestMetadata: state.latestMetadata,
+		};
+	}
+
+	function respondToSendRequest(requestId: string, sessionId: string, error?: string) {
+		bridge.send({ type: "sendUserMessageResult", requestId, sessionId, error });
+	}
+
+	function handleBridgeCommand(command: AgentToBridgeMessage) {
+		if (command.type !== "sendUserMessage") return;
+
+		if (!state.currentSessionId || command.sessionId !== state.currentSessionId) {
+			respondToSendRequest(
+				command.requestId,
+				command.sessionId,
+				`session ${command.sessionId} is not currently attached in this pi runtime`
+			);
+			return;
+		}
+
+		const body = command.body.trim();
+		if (!body) {
+			respondToSendRequest(command.requestId, command.sessionId, "message body must not be empty");
+			return;
+		}
+
+		if (state.isAgentBusy) {
+			pi.sendUserMessage(body, { deliverAs: "followUp" });
+		} else {
+			pi.sendUserMessage(body);
+		}
+
+		respondToSendRequest(command.requestId, command.sessionId);
+	}
+
+	bridge = new LiveBridgeClient(resolveSocketPath(), handleBridgeCommand, bridgeStateSnapshot);
 
 	pi.on("session_start", async (_event, ctx) => {
 		await attachCurrentSession(ctx);
@@ -96,20 +271,32 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		currentSessionId = ctx.sessionManager.getSessionId();
-		await publishSnapshot(ctx);
+		publishSnapshot(ctx);
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
-		currentSessionId = ctx.sessionManager.getSessionId();
-		await publishSnapshot(ctx);
+		publishSnapshot(ctx);
+	});
+
+	pi.on("model_select", async (_event, ctx) => {
+		if (state.currentSessionId === ctx.sessionManager.getSessionId()) {
+			publishSnapshot(ctx);
+		}
+	});
+
+	pi.on("agent_start", async () => {
+		state.isAgentBusy = true;
+	});
+
+	pi.on("agent_end", async () => {
+		state.isAgentBusy = false;
 	});
 
 	pi.on("message_update", async (event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (!sessionId) return;
 
-		currentSessionId = sessionId;
+		state.currentSessionId = sessionId;
 		const message = agentMessageToPimuxMessage(event.message);
 		if (!message || message.role !== "assistant") return;
 
@@ -120,7 +307,7 @@ export default function (pi: ExtensionAPI) {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (!sessionId) return;
 
-		currentSessionId = sessionId;
+		state.currentSessionId = sessionId;
 		const message = agentMessageToPimuxMessage(event.message);
 		if (!message) return;
 
@@ -128,10 +315,13 @@ export default function (pi: ExtensionAPI) {
 			cancelPendingPartial(sessionId);
 		}
 
-		await sender.send({
+		state.latestSnapshotMessages = [...state.latestSnapshotMessages, message];
+		state.latestMetadata = buildSessionMetadata(ctx, state.latestSnapshotMessages);
+		bridge.send({
 			type: "sessionAppend",
 			sessionId,
 			messages: [message],
+			metadata: state.latestMetadata,
 		});
 	});
 
@@ -140,9 +330,11 @@ export default function (pi: ExtensionAPI) {
 			cancelPendingPartial(sessionId);
 		}
 
-		if (currentSessionId) {
-			await sender.send({ type: "sessionDetached", sessionId: currentSessionId });
-			currentSessionId = undefined;
+		if (state.currentSessionId) {
+			bridge.send({ type: "sessionDetached", sessionId: state.currentSessionId });
+			state.currentSessionId = undefined;
+			state.latestSnapshotMessages = [];
+			state.latestMetadata = undefined;
 		}
 	});
 
@@ -157,7 +349,7 @@ export default function (pi: ExtensionAPI) {
 			const latest = pendingPartials.get(sessionId);
 			if (!latest) return;
 			pendingPartials.delete(sessionId);
-			void sender.send({
+			bridge.send({
 				type: "assistantPartial",
 				sessionId,
 				message: latest.message,
@@ -178,27 +370,66 @@ export default function (pi: ExtensionAPI) {
 		const nextSessionId = ctx.sessionManager.getSessionId();
 		if (!nextSessionId) return;
 
-		if (currentSessionId && currentSessionId !== nextSessionId) {
-			cancelPendingPartial(currentSessionId);
-			await sender.send({ type: "sessionDetached", sessionId: currentSessionId });
+		if (state.currentSessionId && state.currentSessionId !== nextSessionId) {
+			cancelPendingPartial(state.currentSessionId);
+			bridge.send({ type: "sessionDetached", sessionId: state.currentSessionId });
 		}
 
-		currentSessionId = nextSessionId;
-		await sender.send({ type: "sessionAttached", sessionId: nextSessionId });
-		await publishSnapshot(ctx);
+		state.currentSessionId = nextSessionId;
+		state.latestSnapshotMessages = buildSnapshotMessages(ctx);
+		state.latestMetadata = buildSessionMetadata(ctx, state.latestSnapshotMessages);
+		bridge.send({
+			type: "sessionAttached",
+			sessionId: nextSessionId,
+			metadata: state.latestMetadata,
+		});
+		bridge.send({
+			type: "sessionSnapshot",
+			sessionId: nextSessionId,
+			messages: state.latestSnapshotMessages,
+			metadata: state.latestMetadata,
+		});
 	}
 
-	async function publishSnapshot(ctx: ExtensionContext) {
+	function publishSnapshot(ctx: ExtensionContext) {
 		const sessionId = ctx.sessionManager.getSessionId();
 		if (!sessionId) return;
 
+		state.currentSessionId = sessionId;
+		state.latestSnapshotMessages = buildSnapshotMessages(ctx);
+		state.latestMetadata = buildSessionMetadata(ctx, state.latestSnapshotMessages);
 		cancelPendingPartial(sessionId);
-		await sender.send({
+		bridge.send({
 			type: "sessionSnapshot",
 			sessionId,
-			messages: buildSnapshotMessages(ctx),
+			messages: state.latestSnapshotMessages,
+			metadata: state.latestMetadata,
 		});
 	}
+}
+
+function buildSessionMetadata(ctx: ExtensionContext, messages: PimuxMessage[]): PimuxSessionMetadata {
+	const header = ctx.sessionManager.getHeader();
+	const sessionId = ctx.sessionManager.getSessionId();
+	const namedSummary = normalizeDisplayText(ctx.sessionManager.getSessionName());
+	const fallbackSummary = summarizeMessages(messages) || sessionId;
+	const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown";
+
+	return {
+		createdAt: toIsoString(header?.timestamp ?? messages[0]?.created_at ?? new Date().toISOString()),
+		cwd: ctx.sessionManager.getCwd(),
+		summary: namedSummary || fallbackSummary,
+		model,
+	};
+}
+
+function summarizeMessages(messages: PimuxMessage[]): string | undefined {
+	const firstUser = messages.find((message) => message.role === "user");
+	const source = firstUser?.body || messages.find((message) => message.body)?.body;
+	if (!source) return undefined;
+	const collapsed = collapseWhitespace(source);
+	if (!collapsed) return undefined;
+	return truncateChars(collapsed, 120);
 }
 
 function buildSnapshotMessages(ctx: ExtensionContext): PimuxMessage[] {
@@ -430,6 +661,12 @@ function normalizeDisplayText(value: unknown): string {
 function collapseWhitespace(value: unknown): string {
 	if (typeof value !== "string") return "";
 	return value.split(/\s+/).filter(Boolean).join(" ");
+}
+
+function truncateChars(value: string, maxChars: number): string {
+	const chars = Array.from(value);
+	if (chars.length <= maxChars) return value;
+	return `${chars.slice(0, maxChars).join("")}…`;
 }
 
 function resolveSocketPath(): string {

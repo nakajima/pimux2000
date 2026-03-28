@@ -2,16 +2,24 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc::UnboundedSender};
+use tokio::sync::{
+    Mutex,
+    mpsc::{self, UnboundedSender},
+    oneshot,
+};
 
 use crate::{
     message::{Message, Role, truncate_text},
+    session::ActiveSession,
     transcript::{
         SessionActivity, SessionMessagesResponse, TranscriptFreshness, TranscriptFreshnessState,
         TranscriptSource,
@@ -23,6 +31,23 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub const DEFAULT_DETACHED_CAPACITY: usize = 3;
 pub const DEFAULT_DETACHED_TTL: Duration = Duration::from_secs(180);
 const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
+const LIVE_PROTOCOL_VERSION: u32 = 1;
+const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveSessionMetadata {
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub cwd: String,
+    pub summary: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveUpdate {
+    pub snapshot: SessionMessagesResponse,
+    pub active_session: Option<ActiveSession>,
+}
 
 #[derive(Clone)]
 pub struct LiveSessionStoreHandle {
@@ -56,6 +81,96 @@ impl LiveSessionStoreHandle {
         store.purge_expired();
         store.all_snapshots()
     }
+
+    pub async fn listed_session_for_session(&self, session_id: &str) -> Option<ActiveSession> {
+        let mut store = self.inner.lock().await;
+        store.purge_expired();
+        store.listed_session_for(session_id)
+    }
+
+    pub async fn all_listed_sessions(&self) -> Vec<ActiveSession> {
+        let mut store = self.inner.lock().await;
+        store.purge_expired();
+        store.all_listed_sessions()
+    }
+
+    async fn register_command_connection(
+        &self,
+        connection_id: u64,
+        sender: UnboundedSender<LiveAgentCommand>,
+    ) {
+        let mut store = self.inner.lock().await;
+        store.register_command_connection(connection_id, sender);
+    }
+
+    async fn bind_command_connection_to_session(
+        &self,
+        connection_id: u64,
+        session_id: String,
+    ) -> Option<SessionMessagesResponse> {
+        let mut store = self.inner.lock().await;
+        store.purge_expired();
+        store.bind_command_connection_to_session(connection_id, session_id)
+    }
+
+    async fn unbind_command_connection_from_session(&self, connection_id: u64, session_id: &str) {
+        let mut store = self.inner.lock().await;
+        store.unbind_command_connection_from_session(connection_id, session_id);
+    }
+
+    async fn fulfill_send_user_message(
+        &self,
+        connection_id: u64,
+        request_id: &str,
+        error: Option<String>,
+    ) {
+        let mut store = self.inner.lock().await;
+        store.fulfill_send_user_message(connection_id, request_id, error);
+    }
+
+    async fn disconnect_command_connection(
+        &self,
+        connection_id: u64,
+    ) -> Option<SessionMessagesResponse> {
+        let mut store = self.inner.lock().await;
+        store.purge_expired();
+        store.disconnect_command_connection(connection_id)
+    }
+
+    pub async fn send_user_message(
+        &self,
+        session_id: &str,
+        body: &str,
+    ) -> Result<(), SendUserMessageError> {
+        let (sender, request_id, receiver) = {
+            let mut store = self.inner.lock().await;
+            store.purge_expired();
+            store.prepare_send_user_message(session_id)?
+        };
+
+        if sender
+            .send(LiveAgentCommand::SendUserMessage {
+                request_id: request_id.clone(),
+                session_id: session_id.to_string(),
+                body: body.to_string(),
+            })
+            .is_err()
+        {
+            let mut store = self.inner.lock().await;
+            store.cancel_send_user_message(&request_id);
+            return Err(SendUserMessageError::Unavailable);
+        }
+
+        match tokio::time::timeout(SEND_USER_MESSAGE_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(SendUserMessageError::Disconnected),
+            Err(_) => {
+                let mut store = self.inner.lock().await;
+                store.cancel_send_user_message(&request_id);
+                Err(SendUserMessageError::TimedOut)
+            }
+        }
+    }
 }
 
 pub fn socket_path(pi_agent_dir: &Path) -> PathBuf {
@@ -65,19 +180,69 @@ pub fn socket_path(pi_agent_dir: &Path) -> PathBuf {
 pub async fn start_listener(
     store: LiveSessionStoreHandle,
     socket_path: PathBuf,
-    updates: UnboundedSender<SessionMessagesResponse>,
+    updates: UnboundedSender<LiveUpdate>,
 ) -> Result<(), BoxError> {
     start_listener_impl(store, socket_path, updates).await
+}
+
+async fn maybe_request_extension_reload(
+    store: &LiveSessionStoreHandle,
+    supports_commands: bool,
+    session_id: &str,
+) {
+    let should_attempt_reload = {
+        let mut guard = store.inner.lock().await;
+        if !guard
+            .warned_missing_metadata_sessions
+            .insert(session_id.to_string())
+        {
+            return;
+        }
+
+        supports_commands
+    };
+
+    if !should_attempt_reload {
+        eprintln!(
+            "live extension warning for session {}: received live payloads without session metadata from an older pimux-live extension, but that runtime does not support inbound commands. Run /reload in pi or restart the pi session to load the updated extension.",
+            session_id
+        );
+        return;
+    }
+
+    eprintln!(
+        "live extension warning for session {}: received live payloads without session metadata from an older pimux-live extension; auto-requesting /reload in the attached pi session to load the updated extension.",
+        session_id
+    );
+
+    let store = store.clone();
+    let session_id = session_id.to_string();
+    tokio::spawn(async move {
+        match store.send_user_message(&session_id, "/reload").await {
+            Ok(()) => {
+                eprintln!(
+                    "requested /reload in attached pi session {} to load the updated pimux-live extension",
+                    session_id
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "failed to auto-request /reload for attached pi session {}: {}",
+                    session_id, error
+                );
+            }
+        }
+    });
 }
 
 #[cfg(unix)]
 async fn start_listener_impl(
     store: LiveSessionStoreHandle,
     socket_path: PathBuf,
-    updates: UnboundedSender<SessionMessagesResponse>,
+    updates: UnboundedSender<LiveUpdate>,
 ) -> Result<(), BoxError> {
     use tokio::{
-        io::{AsyncBufReadExt, BufReader},
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
         net::UnixListener,
     };
 
@@ -90,6 +255,7 @@ async fn start_listener_impl(
     }
 
     let listener = UnixListener::bind(&socket_path)?;
+    let next_connection_id = Arc::new(AtomicU64::new(1));
 
     tokio::spawn(async move {
         loop {
@@ -101,10 +267,31 @@ async fn start_listener_impl(
                 }
             };
 
+            let connection_id = next_connection_id.fetch_add(1, Ordering::Relaxed);
+            let (command_tx, mut command_rx) = mpsc::unbounded_channel::<LiveAgentCommand>();
+            let (reader, mut writer) = tokio::io::split(stream);
             let store = store.clone();
             let updates = updates.clone();
+            let writer_task = tokio::spawn(async move {
+                while let Some(command) = command_rx.recv().await {
+                    let Ok(payload) = serde_json::to_string(&command) else {
+                        break;
+                    };
+                    if writer.write_all(payload.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    if writer.write_all(b"\n").await.is_err() {
+                        break;
+                    }
+                    if writer.flush().await.is_err() {
+                        break;
+                    }
+                }
+            });
+
             tokio::spawn(async move {
-                let reader = BufReader::new(stream);
+                let mut supports_commands = false;
+                let reader = BufReader::new(reader);
                 let mut lines = reader.lines();
 
                 loop {
@@ -115,22 +302,199 @@ async fn start_listener_impl(
                                 continue;
                             }
 
-                            let event = match serde_json::from_str::<LiveSessionEvent>(line) {
-                                Ok(event) => event,
+                            let message = match serde_json::from_str::<LiveSessionIpcMessage>(line)
+                            {
+                                Ok(message) => message,
                                 Err(error) => {
-                                    eprintln!("invalid live ipc event: {error}");
+                                    eprintln!("invalid live ipc message: {error}");
                                     continue;
                                 }
                             };
 
-                            let snapshot = {
-                                let mut store = store.inner.lock().await;
-                                store.purge_expired();
-                                store.apply_event(event)
-                            };
+                            match message {
+                                LiveSessionIpcMessage::Hello { protocol_version } => {
+                                    if protocol_version != LIVE_PROTOCOL_VERSION {
+                                        eprintln!(
+                                            "live ipc protocol mismatch for connection {connection_id}: extension reported version {protocol_version}, agent expects {LIVE_PROTOCOL_VERSION}"
+                                        );
+                                        continue;
+                                    }
 
-                            if let Some(snapshot) = snapshot {
-                                let _ = updates.send(snapshot);
+                                    supports_commands = true;
+                                    store
+                                        .register_command_connection(
+                                            connection_id,
+                                            command_tx.clone(),
+                                        )
+                                        .await;
+                                }
+                                LiveSessionIpcMessage::SendUserMessageResult {
+                                    request_id,
+                                    session_id: _,
+                                    error,
+                                } => {
+                                    store
+                                        .fulfill_send_user_message(
+                                            connection_id,
+                                            &request_id,
+                                            error,
+                                        )
+                                        .await;
+                                }
+                                LiveSessionIpcMessage::SessionAttached {
+                                    session_id,
+                                    metadata,
+                                } => {
+                                    if supports_commands
+                                        && let Some(snapshot) = store
+                                            .bind_command_connection_to_session(
+                                                connection_id,
+                                                session_id.clone(),
+                                            )
+                                            .await
+                                    {
+                                        let active_session = store
+                                            .listed_session_for_session(&snapshot.session_id)
+                                            .await;
+                                        let _ = updates.send(LiveUpdate {
+                                            snapshot,
+                                            active_session,
+                                        });
+                                    }
+
+                                    let missing_metadata = metadata.is_none();
+                                    let snapshot = {
+                                        let mut guard = store.inner.lock().await;
+                                        guard.purge_expired();
+                                        if let Some(metadata) = metadata {
+                                            guard.upsert_session_metadata(&session_id, metadata);
+                                        }
+                                        guard.apply_event(LiveSessionEvent::SessionAttached {
+                                            session_id: session_id.clone(),
+                                        })
+                                    };
+
+                                    if missing_metadata {
+                                        maybe_request_extension_reload(
+                                            &store,
+                                            supports_commands,
+                                            &session_id,
+                                        )
+                                        .await;
+                                    }
+
+                                    if let Some(snapshot) = snapshot {
+                                        let active_session = store
+                                            .listed_session_for_session(&snapshot.session_id)
+                                            .await;
+                                        let _ = updates.send(LiveUpdate {
+                                            snapshot,
+                                            active_session,
+                                        });
+                                    }
+                                }
+                                LiveSessionIpcMessage::SessionSnapshot {
+                                    session_id,
+                                    messages,
+                                    metadata,
+                                } => {
+                                    let snapshot = {
+                                        let mut guard = store.inner.lock().await;
+                                        guard.purge_expired();
+                                        if let Some(metadata) = metadata {
+                                            guard.upsert_session_metadata(&session_id, metadata);
+                                        }
+                                        guard.apply_event(LiveSessionEvent::SessionSnapshot {
+                                            session_id,
+                                            messages,
+                                        })
+                                    };
+
+                                    if let Some(snapshot) = snapshot {
+                                        let active_session = store
+                                            .listed_session_for_session(&snapshot.session_id)
+                                            .await;
+                                        let _ = updates.send(LiveUpdate {
+                                            snapshot,
+                                            active_session,
+                                        });
+                                    }
+                                }
+                                LiveSessionIpcMessage::SessionAppend {
+                                    session_id,
+                                    messages,
+                                    metadata,
+                                } => {
+                                    let snapshot = {
+                                        let mut guard = store.inner.lock().await;
+                                        guard.purge_expired();
+                                        if let Some(metadata) = metadata {
+                                            guard.upsert_session_metadata(&session_id, metadata);
+                                        }
+                                        guard.apply_event(LiveSessionEvent::SessionAppend {
+                                            session_id,
+                                            messages,
+                                        })
+                                    };
+
+                                    if let Some(snapshot) = snapshot {
+                                        let active_session = store
+                                            .listed_session_for_session(&snapshot.session_id)
+                                            .await;
+                                        let _ = updates.send(LiveUpdate {
+                                            snapshot,
+                                            active_session,
+                                        });
+                                    }
+                                }
+                                LiveSessionIpcMessage::AssistantPartial {
+                                    session_id,
+                                    message,
+                                } => {
+                                    let snapshot = {
+                                        let mut guard = store.inner.lock().await;
+                                        guard.purge_expired();
+                                        guard.apply_event(LiveSessionEvent::AssistantPartial {
+                                            session_id,
+                                            message,
+                                        })
+                                    };
+
+                                    if let Some(snapshot) = snapshot {
+                                        let _ = updates.send(LiveUpdate {
+                                            snapshot,
+                                            active_session: None,
+                                        });
+                                    }
+                                }
+                                LiveSessionIpcMessage::SessionDetached { session_id } => {
+                                    if supports_commands {
+                                        store
+                                            .unbind_command_connection_from_session(
+                                                connection_id,
+                                                &session_id,
+                                            )
+                                            .await;
+                                    }
+
+                                    let snapshot = {
+                                        let mut guard = store.inner.lock().await;
+                                        guard.purge_expired();
+                                        guard.apply_event(LiveSessionEvent::SessionDetached {
+                                            session_id,
+                                        })
+                                    };
+
+                                    if let Some(snapshot) = snapshot {
+                                        let active_session = store
+                                            .listed_session_for_session(&snapshot.session_id)
+                                            .await;
+                                        let _ = updates.send(LiveUpdate {
+                                            snapshot,
+                                            active_session,
+                                        });
+                                    }
+                                }
                             }
                         }
                         Ok(None) => break,
@@ -139,6 +503,19 @@ async fn start_listener_impl(
                             break;
                         }
                     }
+                }
+
+                writer_task.abort();
+
+                if supports_commands
+                    && let Some(snapshot) = store.disconnect_command_connection(connection_id).await
+                {
+                    let active_session =
+                        store.listed_session_for_session(&snapshot.session_id).await;
+                    let _ = updates.send(LiveUpdate {
+                        snapshot,
+                        active_session,
+                    });
                 }
             });
         }
@@ -151,9 +528,89 @@ async fn start_listener_impl(
 async fn start_listener_impl(
     _store: LiveSessionStoreHandle,
     _socket_path: PathBuf,
-    _updates: UnboundedSender<SessionMessagesResponse>,
+    _updates: UnboundedSender<LiveUpdate>,
 ) -> Result<(), BoxError> {
     Err("live session IPC via Unix sockets is only supported on unix hosts".into())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendUserMessageError {
+    Unavailable,
+    Disconnected,
+    TimedOut,
+    Rejected(String),
+}
+
+impl std::fmt::Display for SendUserMessageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => write!(
+                f,
+                "no live attached pimux extension is available for this session"
+            ),
+            Self::Disconnected => write!(f, "live session command connection disconnected"),
+            Self::TimedOut => write!(
+                f,
+                "timed out waiting for live session command acknowledgement"
+            ),
+            Self::Rejected(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum LiveSessionIpcMessage {
+    Hello {
+        protocol_version: u32,
+    },
+    SessionAttached {
+        session_id: String,
+        #[serde(default)]
+        metadata: Option<LiveSessionMetadata>,
+    },
+    SessionSnapshot {
+        session_id: String,
+        messages: Vec<Message>,
+        #[serde(default)]
+        metadata: Option<LiveSessionMetadata>,
+    },
+    SessionAppend {
+        session_id: String,
+        messages: Vec<Message>,
+        #[serde(default)]
+        metadata: Option<LiveSessionMetadata>,
+    },
+    AssistantPartial {
+        session_id: String,
+        message: Message,
+    },
+    SessionDetached {
+        session_id: String,
+    },
+    SendUserMessageResult {
+        request_id: String,
+        session_id: String,
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum LiveAgentCommand {
+    SendUserMessage {
+        request_id: String,
+        session_id: String,
+        body: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,6 +645,11 @@ struct LiveSessionStore {
     recent_detached_sessions: HashMap<String, DetachedSessionState>,
     detached_order: VecDeque<String>,
     warned_legacy_sessions: HashSet<String>,
+    warned_missing_metadata_sessions: HashSet<String>,
+    command_connections: HashMap<u64, LiveCommandConnection>,
+    command_session_connections: HashMap<String, u64>,
+    inflight_send_user_messages: HashMap<String, InflightSendUserMessage>,
+    next_send_request_id: u64,
     detached_capacity: usize,
     detached_ttl: Duration,
 }
@@ -199,6 +661,11 @@ impl LiveSessionStore {
             recent_detached_sessions: HashMap::new(),
             detached_order: VecDeque::new(),
             warned_legacy_sessions: HashSet::new(),
+            warned_missing_metadata_sessions: HashSet::new(),
+            command_connections: HashMap::new(),
+            command_session_connections: HashMap::new(),
+            inflight_send_user_messages: HashMap::new(),
+            next_send_request_id: 1,
             detached_capacity,
             detached_ttl,
         }
@@ -208,11 +675,16 @@ impl LiveSessionStore {
         match event {
             LiveSessionEvent::SessionAttached { session_id } => {
                 self.warned_legacy_sessions.remove(&session_id);
+                self.warned_missing_metadata_sessions.remove(&session_id);
+                if self.active_sessions.contains_key(&session_id) {
+                    return None;
+                }
+
                 let state =
                     if let Some(detached) = self.recent_detached_sessions.remove(&session_id) {
                         self.detached_order
                             .retain(|existing| existing != &session_id);
-                        LiveSessionState::from_response(detached.response)
+                        LiveSessionState::from_response(detached.response, detached.metadata)
                     } else {
                         LiveSessionState::new(session_id.clone())
                     };
@@ -281,8 +753,9 @@ impl LiveSessionStore {
                 }
 
                 state.last_update_at = state.latest_message_timestamp();
+                let metadata = state.metadata.clone();
                 let response = state.as_response(false, false);
-                self.insert_detached(response.clone());
+                self.insert_detached(response.clone(), metadata);
                 Some(response)
             }
         }
@@ -334,7 +807,217 @@ impl LiveSessionStore {
         snapshots
     }
 
-    fn insert_detached(&mut self, response: SessionMessagesResponse) {
+    fn upsert_session_metadata(&mut self, session_id: &str, metadata: LiveSessionMetadata) {
+        if let Some(state) = self.active_sessions.get_mut(session_id) {
+            state.last_update_at = metadata.created_at;
+            state.metadata = Some(metadata);
+            return;
+        }
+
+        if let Some(state) = self.recent_detached_sessions.get_mut(session_id) {
+            state.metadata = Some(metadata);
+            return;
+        }
+
+        let mut state = LiveSessionState::new(session_id.to_string());
+        state.last_update_at = metadata.created_at;
+        state.metadata = Some(metadata);
+        self.active_sessions.insert(session_id.to_string(), state);
+    }
+
+    fn listed_session_for(&self, session_id: &str) -> Option<ActiveSession> {
+        self.active_sessions
+            .get(session_id)
+            .and_then(LiveSessionState::as_active_session)
+            .or_else(|| {
+                self.recent_detached_sessions
+                    .get(session_id)
+                    .and_then(DetachedSessionState::as_active_session)
+            })
+    }
+
+    fn all_listed_sessions(&self) -> Vec<ActiveSession> {
+        let mut sessions = self
+            .active_sessions
+            .values()
+            .filter_map(LiveSessionState::as_active_session)
+            .collect::<Vec<_>>();
+
+        for state in self.recent_detached_sessions.values() {
+            if let Some(session) = state.as_active_session()
+                && !sessions.iter().any(|existing| existing.id == session.id)
+            {
+                sessions.push(session);
+            }
+        }
+
+        sessions
+    }
+
+    fn register_command_connection(
+        &mut self,
+        connection_id: u64,
+        sender: UnboundedSender<LiveAgentCommand>,
+    ) {
+        self.command_connections.insert(
+            connection_id,
+            LiveCommandConnection {
+                sender,
+                current_session_id: None,
+            },
+        );
+    }
+
+    fn bind_command_connection_to_session(
+        &mut self,
+        connection_id: u64,
+        session_id: String,
+    ) -> Option<SessionMessagesResponse> {
+        let Some(connection) = self.command_connections.get_mut(&connection_id) else {
+            return None;
+        };
+
+        let previous_session_id = connection.current_session_id.replace(session_id.clone());
+        self.command_session_connections
+            .insert(session_id.clone(), connection_id);
+
+        if let Some(previous_session_id) = previous_session_id
+            && previous_session_id != session_id
+        {
+            if self
+                .command_session_connections
+                .get(&previous_session_id)
+                .copied()
+                == Some(connection_id)
+            {
+                self.command_session_connections
+                    .remove(&previous_session_id);
+            }
+            return self.apply_event(LiveSessionEvent::SessionDetached {
+                session_id: previous_session_id,
+            });
+        }
+
+        None
+    }
+
+    fn unbind_command_connection_from_session(&mut self, connection_id: u64, session_id: &str) {
+        let Some(connection) = self.command_connections.get_mut(&connection_id) else {
+            return;
+        };
+
+        if connection.current_session_id.as_deref() == Some(session_id) {
+            connection.current_session_id = None;
+        }
+
+        if self.command_session_connections.get(session_id).copied() == Some(connection_id) {
+            self.command_session_connections.remove(session_id);
+        }
+    }
+
+    fn prepare_send_user_message(
+        &mut self,
+        session_id: &str,
+    ) -> Result<
+        (
+            UnboundedSender<LiveAgentCommand>,
+            String,
+            oneshot::Receiver<Result<(), SendUserMessageError>>,
+        ),
+        SendUserMessageError,
+    > {
+        let Some(connection_id) = self.command_session_connections.get(session_id).copied() else {
+            return Err(SendUserMessageError::Unavailable);
+        };
+        let Some(connection) = self.command_connections.get(&connection_id) else {
+            self.command_session_connections.remove(session_id);
+            return Err(SendUserMessageError::Unavailable);
+        };
+
+        let request_id = format!("live-send-{}", self.next_send_request_id);
+        self.next_send_request_id += 1;
+
+        let (sender, receiver) = oneshot::channel();
+        self.inflight_send_user_messages.insert(
+            request_id.clone(),
+            InflightSendUserMessage {
+                connection_id,
+                sender,
+            },
+        );
+
+        Ok((connection.sender.clone(), request_id, receiver))
+    }
+
+    fn fulfill_send_user_message(
+        &mut self,
+        connection_id: u64,
+        request_id: &str,
+        error: Option<String>,
+    ) {
+        let Some(inflight) = self.inflight_send_user_messages.remove(request_id) else {
+            return;
+        };
+
+        if inflight.connection_id != connection_id {
+            return;
+        }
+
+        let result = match error {
+            Some(error) => Err(SendUserMessageError::Rejected(error)),
+            None => Ok(()),
+        };
+        let _ = inflight.sender.send(result);
+    }
+
+    fn cancel_send_user_message(&mut self, request_id: &str) {
+        self.inflight_send_user_messages.remove(request_id);
+    }
+
+    fn disconnect_command_connection(
+        &mut self,
+        connection_id: u64,
+    ) -> Option<SessionMessagesResponse> {
+        let connection = self.command_connections.remove(&connection_id)?;
+
+        self.fail_inflight_send_user_messages_for_connection(
+            connection_id,
+            SendUserMessageError::Disconnected,
+        );
+
+        let session_id = connection.current_session_id?;
+        if self.command_session_connections.get(&session_id).copied() == Some(connection_id) {
+            self.command_session_connections.remove(&session_id);
+        }
+
+        self.apply_event(LiveSessionEvent::SessionDetached { session_id })
+    }
+
+    fn fail_inflight_send_user_messages_for_connection(
+        &mut self,
+        connection_id: u64,
+        error: SendUserMessageError,
+    ) {
+        let request_ids = self
+            .inflight_send_user_messages
+            .iter()
+            .filter_map(|(request_id, inflight)| {
+                (inflight.connection_id == connection_id).then_some(request_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for request_id in request_ids {
+            if let Some(inflight) = self.inflight_send_user_messages.remove(&request_id) {
+                let _ = inflight.sender.send(Err(error.clone()));
+            }
+        }
+    }
+
+    fn insert_detached(
+        &mut self,
+        response: SessionMessagesResponse,
+        metadata: Option<LiveSessionMetadata>,
+    ) {
         let session_id = response.session_id.clone();
         self.detached_order
             .retain(|existing| existing != &session_id);
@@ -344,6 +1027,7 @@ impl LiveSessionStore {
             DetachedSessionState {
                 response,
                 expires_at: Instant::now() + self.detached_ttl,
+                metadata,
             },
         );
         self.enforce_detached_capacity();
@@ -381,6 +1065,7 @@ struct LiveSessionState {
     messages: Vec<Message>,
     in_progress_assistant: Option<Message>,
     last_update_at: chrono::DateTime<chrono::Utc>,
+    metadata: Option<LiveSessionMetadata>,
 }
 
 impl LiveSessionState {
@@ -390,10 +1075,14 @@ impl LiveSessionState {
             messages: Vec::new(),
             in_progress_assistant: None,
             last_update_at: Utc::now(),
+            metadata: None,
         }
     }
 
-    fn from_response(response: SessionMessagesResponse) -> Self {
+    fn from_response(
+        response: SessionMessagesResponse,
+        metadata: Option<LiveSessionMetadata>,
+    ) -> Self {
         let last_update_at = response
             .messages
             .last()
@@ -405,6 +1094,7 @@ impl LiveSessionState {
             messages: response.messages,
             in_progress_assistant: None,
             last_update_at,
+            metadata,
         }
     }
 
@@ -413,7 +1103,46 @@ impl LiveSessionState {
             .as_ref()
             .map(|message| message.created_at)
             .or_else(|| self.messages.last().map(|message| message.created_at))
-            .unwrap_or(self.last_update_at)
+            .unwrap_or_else(|| {
+                self.metadata
+                    .as_ref()
+                    .map(|metadata| metadata.created_at)
+                    .unwrap_or(self.last_update_at)
+            })
+    }
+
+    fn last_user_message_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User)
+            .map(|message| message.created_at)
+            .unwrap_or_else(|| {
+                self.metadata
+                    .as_ref()
+                    .map(|metadata| metadata.created_at)
+                    .unwrap_or(self.last_update_at)
+            })
+    }
+
+    fn last_assistant_message_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.in_progress_assistant
+            .as_ref()
+            .filter(|message| message.role == Role::Assistant)
+            .map(|message| message.created_at)
+            .or_else(|| {
+                self.messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == Role::Assistant)
+                    .map(|message| message.created_at)
+            })
+            .unwrap_or_else(|| {
+                self.metadata
+                    .as_ref()
+                    .map(|metadata| metadata.created_at)
+                    .unwrap_or(self.last_update_at)
+            })
     }
 
     fn as_response(&self, active: bool, attached: bool) -> SessionMessagesResponse {
@@ -434,11 +1163,77 @@ impl LiveSessionState {
             warnings: Vec::new(),
         }
     }
+
+    fn as_active_session(&self) -> Option<ActiveSession> {
+        let metadata = self.metadata.as_ref()?;
+        Some(ActiveSession {
+            id: self.session_id.clone(),
+            summary: metadata.summary.clone(),
+            created_at: metadata.created_at,
+            updated_at: self.latest_message_timestamp(),
+            last_user_message_at: self.last_user_message_at(),
+            last_assistant_message_at: self.last_assistant_message_at(),
+            cwd: metadata.cwd.clone(),
+            model: metadata.model.clone(),
+            context_usage: None,
+        })
+    }
 }
 
 struct DetachedSessionState {
     response: SessionMessagesResponse,
     expires_at: Instant,
+    metadata: Option<LiveSessionMetadata>,
+}
+
+impl DetachedSessionState {
+    fn as_active_session(&self) -> Option<ActiveSession> {
+        let metadata = self.metadata.as_ref()?;
+        let last_message_at = self
+            .response
+            .messages
+            .last()
+            .map(|message| message.created_at)
+            .unwrap_or(metadata.created_at);
+        let last_user_message_at = self
+            .response
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User)
+            .map(|message| message.created_at)
+            .unwrap_or(metadata.created_at);
+        let last_assistant_message_at = self
+            .response
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Assistant)
+            .map(|message| message.created_at)
+            .unwrap_or(metadata.created_at);
+
+        Some(ActiveSession {
+            id: self.response.session_id.clone(),
+            summary: metadata.summary.clone(),
+            created_at: metadata.created_at,
+            updated_at: last_message_at,
+            last_user_message_at,
+            last_assistant_message_at,
+            cwd: metadata.cwd.clone(),
+            model: metadata.model.clone(),
+            context_usage: None,
+        })
+    }
+}
+
+struct LiveCommandConnection {
+    sender: UnboundedSender<LiveAgentCommand>,
+    current_session_id: Option<String>,
+}
+
+struct InflightSendUserMessage {
+    connection_id: u64,
+    sender: oneshot::Sender<Result<(), SendUserMessageError>>,
 }
 
 fn sanitize_message(mut message: Message) -> Message {
@@ -453,4 +1248,141 @@ fn sanitize_message(mut message: Message) -> Message {
     }
 
     message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::MessageContentBlock;
+
+    fn sample_message(role: Role, text: &str) -> Message {
+        Message::from_blocks(
+            Utc::now(),
+            role,
+            vec![MessageContentBlock::text(text).unwrap()],
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn send_user_message_dispatches_to_attached_command_connection() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+
+        handle.register_command_connection(1, command_tx).await;
+        handle
+            .bind_command_connection_to_session(1, "session-1".to_string())
+            .await;
+
+        let sender_handle = handle.clone();
+        let send_task = tokio::spawn(async move {
+            sender_handle
+                .send_user_message("session-1", "hello live")
+                .await
+        });
+
+        let command = command_rx.recv().await.unwrap();
+        let LiveAgentCommand::SendUserMessage {
+            request_id,
+            session_id,
+            body,
+        } = command;
+        assert_eq!(request_id, "live-send-1");
+        assert_eq!(session_id, "session-1");
+        assert_eq!(body, "hello live");
+
+        handle.fulfill_send_user_message(1, &request_id, None).await;
+
+        assert_eq!(send_task.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn send_user_message_requires_command_capable_connection() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+        assert_eq!(
+            handle.send_user_message("session-1", "hello").await,
+            Err(SendUserMessageError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnecting_command_connection_detaches_live_session() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+
+        handle.register_command_connection(1, command_tx).await;
+        handle
+            .apply_event(LiveSessionEvent::SessionAttached {
+                session_id: "session-1".to_string(),
+            })
+            .await;
+        handle
+            .apply_event(LiveSessionEvent::SessionSnapshot {
+                session_id: "session-1".to_string(),
+                messages: vec![sample_message(Role::User, "hello")],
+            })
+            .await;
+        handle
+            .bind_command_connection_to_session(1, "session-1".to_string())
+            .await;
+
+        let detached = handle.disconnect_command_connection(1).await.unwrap();
+        assert_eq!(detached.session_id, "session-1");
+        assert!(!detached.activity.active);
+        assert!(!detached.activity.attached);
+    }
+
+    #[tokio::test]
+    async fn listed_session_uses_live_metadata_for_new_session() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+        let created_at = Utc::now();
+        let session_id = "session-1".to_string();
+
+        handle
+            .apply_event(LiveSessionEvent::SessionAttached {
+                session_id: session_id.clone(),
+            })
+            .await;
+
+        {
+            let mut store = handle.inner.lock().await;
+            store.upsert_session_metadata(
+                &session_id,
+                LiveSessionMetadata {
+                    created_at,
+                    cwd: "/tmp/project".to_string(),
+                    summary: "Brand new session".to_string(),
+                    model: "anthropic/claude-sonnet-4-5".to_string(),
+                },
+            );
+        }
+
+        let listed = handle
+            .listed_session_for_session(&session_id)
+            .await
+            .unwrap();
+        assert_eq!(listed.summary, "Brand new session");
+        assert_eq!(listed.created_at, created_at);
+        assert_eq!(listed.updated_at, created_at);
+        assert_eq!(listed.cwd, "/tmp/project");
+    }
+
+    #[test]
+    fn legacy_session_attached_without_metadata_still_deserializes() {
+        let message = serde_json::from_str::<LiveSessionIpcMessage>(
+            r#"{"type":"sessionAttached","sessionId":"session-1"}"#,
+        )
+        .unwrap();
+
+        match message {
+            LiveSessionIpcMessage::SessionAttached {
+                session_id,
+                metadata,
+            } => {
+                assert_eq!(session_id, "session-1");
+                assert_eq!(metadata, None);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
 }

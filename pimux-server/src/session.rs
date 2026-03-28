@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionContextUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ActiveSession {
     pub id: String,
     pub summary: String,
@@ -12,6 +21,8 @@ pub struct ActiveSession {
     pub last_assistant_message_at: DateTime<Utc>,
     pub cwd: String,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<SessionContextUsage>,
 }
 
 impl ActiveSession {

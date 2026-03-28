@@ -22,7 +22,11 @@ struct MessageComposerView: View {
 
 			VStack(alignment: .leading, spacing: 8) {
 				if let errorMessage, !errorMessage.isEmpty {
-					Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+					Label {
+						Text(verbatim: errorMessage)
+					} icon: {
+						Image(systemName: "exclamationmark.triangle.fill")
+					}
 						.font(.caption)
 						.foregroundStyle(.red)
 				}

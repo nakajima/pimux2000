@@ -284,12 +284,16 @@ struct PiSessionView: View {
 			transcriptWarnings = sessionResponse.warnings
 			transcriptFreshness = sessionResponse.freshness
 			transcriptActivity = sessionResponse.activity
+			persistActivity(sessionResponse.activity)
 			liveStreamState = .live
 			loadError = nil
 		case .sessionState(let sequence, let connected, _, _):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
 			liveStreamState = connected ? .live : .reconnecting
+			if !connected {
+				persistActivity(PimuxSessionActivity(active: false, attached: false))
+			}
 		case .keepalive(let sequence, _):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
@@ -317,7 +321,7 @@ struct PiSessionView: View {
 			ContentUnavailableView {
 				Label("Couldn’t Load Messages", systemImage: "exclamationmark.triangle")
 			} description: {
-				Text(loadError)
+				Text(verbatim: loadError)
 			} actions: {
 				Button("Retry") {
 					Task { await loadMessages() }
@@ -400,11 +404,20 @@ struct PiSessionView: View {
 			transcriptWarnings = response.warnings
 			transcriptFreshness = response.freshness
 			transcriptActivity = response.activity
+			persistActivity(response.activity)
 			loadError = nil
 		} catch {
 			loadError = error.localizedDescription
 			print("Error loading messages for \(session.sessionID): \(error)")
 		}
+	}
+
+	private func persistActivity(_ activity: PimuxSessionActivity) {
+		try? appDatabase?.updateSessionActivity(
+			sessionID: session.sessionID,
+			active: activity.active,
+			attached: activity.attached
+		)
 	}
 
 	private func reconcilePendingMessages(using confirmedMessages: [PimuxTranscriptMessage]) {
@@ -471,12 +484,16 @@ private struct TranscriptStatusView: View {
 	let text: String
 
 	var body: some View {
-		Label(text, systemImage: "dot.radiowaves.left.and.right")
-			.font(.caption)
-			.foregroundStyle(.secondary)
-			.padding(.horizontal, 10)
-			.padding(.vertical, 8)
-			.background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+		Label {
+			Text(verbatim: text)
+		} icon: {
+			Image(systemName: "dot.radiowaves.left.and.right")
+		}
+		.font(.caption)
+		.foregroundStyle(.secondary)
+		.padding(.horizontal, 10)
+		.padding(.vertical, 8)
+		.background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
 	}
 }
 
@@ -484,12 +501,16 @@ private struct TranscriptWarningView: View {
 	let text: String
 
 	var body: some View {
-		Label(text, systemImage: "exclamationmark.triangle.fill")
-			.font(.caption)
-			.foregroundStyle(.yellow)
-			.padding(.horizontal, 10)
-			.padding(.vertical, 8)
-			.background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+		Label {
+			Text(verbatim: text)
+		} icon: {
+			Image(systemName: "exclamationmark.triangle.fill")
+		}
+		.font(.caption)
+		.foregroundStyle(.yellow)
+		.padding(.horizontal, 10)
+		.padding(.vertical, 8)
+		.background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
 	}
 }
 
@@ -526,13 +547,13 @@ struct MessageView: View {
 		VStack(alignment: .leading, spacing: 6) {
 			HStack(spacing: 6) {
 				Image(systemName: roleIcon)
-				Text(roleLabel)
+				Text(verbatim: roleLabel)
 					.font(.caption)
 					.fontWeight(.semibold)
 					.textCase(.uppercase)
 
 				if let toolName = message.toolName {
-					Text("· \(toolName)")
+					Text(verbatim: "· \(toolName)")
 						.font(.caption)
 						.foregroundStyle(.secondary)
 				}
@@ -612,7 +633,7 @@ struct ContentBlockView: View {
 
 		case "thinking":
 			if let text = block.text, !text.isEmpty {
-				Text(text)
+				Text(verbatim: text)
 					.font(chatFont(style: .callout))
 					.italic()
 					.foregroundStyle(.secondary)
@@ -620,7 +641,11 @@ struct ContentBlockView: View {
 			}
 
 		case "toolCall":
-			Label(block.toolCallName ?? "unknown tool", systemImage: "terminal.fill")
+			Label {
+				Text(verbatim: block.toolCallName ?? "unknown tool")
+			} icon: {
+				Image(systemName: "terminal.fill")
+			}
 				.font(chatFont(style: .callout))
 				.foregroundStyle(.teal)
 				.padding(.vertical, 4)
@@ -634,7 +659,7 @@ struct ContentBlockView: View {
 
 		default:
 			if let text = block.text, !text.isEmpty {
-				Text(text)
+				Text(verbatim: text)
 					.font(chatFont(style: .body))
 					.foregroundStyle(.secondary)
 			}

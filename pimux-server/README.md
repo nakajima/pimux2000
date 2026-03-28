@@ -36,9 +36,11 @@ pimux agent run http://location-of-server
 
 If you omit the scheme, `http://` is assumed, so `pimux agent run localhost:3000` also works.
 On startup, the agent:
-- verifies that the server is reachable and responds like a pimux server
+- checks whether the server is reachable and responds like a pimux server
+- if the server is unavailable at startup, stays running and keeps retrying the server websocket connection in the background
 - reconciles `~/.pi/agent/extensions/pimux-live.ts` with the bundled extension and updates it if needed
 - logs when it had to install/update the on-disk extension
+- auto-requests `/reload` for an attached live pi session if it detects that session is still using an older command-capable `pimux-live.ts` runtime that is missing newer live payload fields
 - warns if a running pi session is still sending **legacy body-only live payloads**, which usually means that pi session loaded an older extension before the update
 
 For normal background use, install the agent as a per-user service:
@@ -137,7 +139,7 @@ Response:
 
 ```json
 {
-  "version": "0.1.1"
+  "version": "0.2.0"
 }
 ```
 
@@ -164,7 +166,11 @@ Response shape:
         "lastUserMessageAt": "2026-03-27T20:10:00.000Z",
         "lastAssistantMessageAt": "2026-03-27T20:10:02.000Z",
         "cwd": "/Users/nakajima/apps/pimux2000/pimux-server",
-        "model": "anthropic/claude-sonnet-4-5"
+        "model": "anthropic/claude-sonnet-4-5",
+        "contextUsage": {
+          "usedTokens": 48676,
+          "maxTokens": 200000
+        }
       }
     ]
   }
@@ -198,6 +204,44 @@ Each session object has:
 - `lastAssistantMessageAt: string`
 - `cwd: string` — working directory for the session
 - `model: string` — model name last associated with the session
+- `contextUsage?: { usedTokens?: number, maxTokens?: number }` — best-effort last known context usage and model window for the session
+
+### POST /hosts
+
+Adds or updates a host in the server’s expected-host registry.
+
+Request shape:
+
+```json
+{
+  "location": "nakajima@macstudio",
+  "auth": "none"
+}
+```
+
+Notes:
+- `auth` is optional and defaults to `"none"`
+- newly added hosts start as `connected: false`, `missing: true`, with an empty `sessions` list until an agent reports in
+- this is the endpoint the iOS app should use when adding a host so server-side persistence stays in sync
+
+Status codes:
+- `204 No Content` — host saved
+- `400 Bad Request` — invalid request body or empty location
+
+### DELETE /hosts/{location}
+
+Deletes a host from the server’s expected-host registry.
+
+Notes:
+- `{location}` is the host location string as a URL path component
+- deleting a host also removes its persisted session snapshot from the server
+- currently connected hosts cannot be deleted; disconnect them first
+- this is the endpoint the iOS app should use when deleting a host so server-side persistence stays in sync
+
+Status codes:
+- `204 No Content` — host deleted
+- `404 Not Found` — host is unknown
+- `409 Conflict` — host is currently connected
 
 ### GET /sessions
 
@@ -226,7 +270,11 @@ Response shape:
     "lastUserMessageAt": "2026-03-27T20:10:00.000Z",
     "lastAssistantMessageAt": "2026-03-27T20:10:02.000Z",
     "cwd": "/Users/nakajima/apps/pimux2000/pimux-server",
-    "model": "anthropic/claude-sonnet-4-5"
+    "model": "anthropic/claude-sonnet-4-5",
+    "contextUsage": {
+      "usedTokens": 48676,
+      "maxTokens": 200000
+    }
   }
 ]
 ```
@@ -235,6 +283,7 @@ Notes:
 - results are sorted newest-first by `updatedAt`
 - `date=YYYY-MM-DD` means the local day from local midnight to the next local midnight in the server timezone
 - `hostConnected`, `hostMissing`, and `hostLastSeenAt` mirror the owning host status so the app can gray out stale sessions from missing hosts
+- `contextUsage` is best-effort metadata derived from the last known assistant usage payload plus the local model registry’s context window for the session model
 - invalid `date` values return `400 Bad Request`
 
 ### POST /sessions/{id}/messages
@@ -252,8 +301,11 @@ Request shape:
 Current behavior:
 1. the server finds the owning host for the session
 2. it sends a `sendMessage` request to that host's connected agent over the persistent agent WebSocket
-3. it waits for host confirmation that the message was accepted for delivery into the session
-4. the app should then keep polling `GET /sessions/{id}/messages` to observe the message and the assistant response
+3. the host agent chooses the best delivery path:
+   - if the session is currently attached in a live `pi` process with the `pimux-live.ts` extension loaded, it asks that live extension to call `pi.sendUserMessage()` inside the already-running session
+   - otherwise it falls back to a headless `pi --mode rpc --session ...` runner against the persisted session file
+4. it waits for host confirmation that the message was accepted for delivery into the session
+5. the app should then keep polling `GET /sessions/{id}/messages` to observe the message and the assistant response
 
 Status codes:
 - `204 No Content` — host confirmed the message was accepted
@@ -493,6 +545,7 @@ The server listens on port `3000` by default.
 You can still override that with the `PORT` environment variable.
 
 The server also persists its expected-host registry so hosts can be reported as missing after disconnects or server restarts.
+The iOS app can manage that registry via `POST /hosts` and `DELETE /hosts/{location}`.
 Default host-registry path:
 - macOS: `~/Library/Application Support/pimux/expected-hosts.json`
 - Linux: `${XDG_STATE_HOME:-~/.local/state}/pimux/expected-hosts.json`
@@ -581,6 +634,7 @@ Notes:
 - reinstalling updates the service definition and reloads/restarts it
 - `agent install` also installs the bundled live extension so live updates work without a second command in the common case
 - `agent run` now also keeps the on-disk bundled live extension up to date at startup
+- if an attached live pi session is command-capable but still sends older metadata-less live payloads, the agent now auto-requests `/reload` in that session once so it can load the updated extension without a manual restart
 - if the agent logs a warning about **body-only live payloads**, the file on disk has been updated but one or more already-running pi sessions may still have older extension code loaded
 - on Linux, a `systemd --user` service may require user-session/linger setup depending on how that host is managed; this first implementation is per-user only
 
