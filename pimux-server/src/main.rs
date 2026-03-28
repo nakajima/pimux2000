@@ -10,6 +10,7 @@ mod message;
 mod report;
 mod server;
 mod session;
+mod transcript;
 
 #[derive(Debug, Parser)]
 #[command(name = "pimux")]
@@ -49,6 +50,15 @@ enum Commands {
         #[arg(long, env = "PIMUX_SUMMARY_MODEL", default_value = agent::DEFAULT_SUMMARY_MODEL)]
         summary_model: String,
     },
+    /// Install the pimux live extension into pi's auto-discovered extensions directory
+    InstallExtension {
+        /// Override pi's agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)
+        #[arg(long, env = "PI_CODING_AGENT_DIR")]
+        pi_agent_dir: Option<PathBuf>,
+        /// Overwrite an existing extension file if its contents differ
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -82,6 +92,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 summary_model,
             })
             .await?
+        }
+        Commands::InstallExtension {
+            pi_agent_dir,
+            force,
+        } => {
+            let path = agent::install_extension(pi_agent_dir, force)?;
+            println!("installed pimux live extension to {}", path.display());
         }
     }
 
