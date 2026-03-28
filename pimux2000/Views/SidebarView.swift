@@ -141,7 +141,7 @@ struct SidebarView: View {
 
 	private func addHost(location: String) async throws {
 		guard let serverConfiguration else {
-			throw PimuxServerError.serverError("No pimux server configured.")
+			throw PimuxServerError.serverError("No pimux server configured.", statusCode: 0)
 		}
 
 		let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
@@ -159,11 +159,19 @@ struct SidebarView: View {
 		do {
 			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
 			try await client.deleteHost(location: host.location)
-			let syncer = PiSessionSync(dbContext: dbContext)
-			await syncer.sync()
+		} catch let error as PimuxServerError {
+			// If the server says the host is unknown, treat it as already gone.
+			if !error.isNotFound {
+				hostMutationErrorMessage = error.localizedDescription
+				return
+			}
 		} catch {
 			hostMutationErrorMessage = error.localizedDescription
+			return
 		}
+
+		let syncer = PiSessionSync(dbContext: dbContext)
+		await syncer.sync()
 	}
 }
 

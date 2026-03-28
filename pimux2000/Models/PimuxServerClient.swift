@@ -285,7 +285,10 @@ struct PimuxServerClient {
 
 		guard (200..<300).contains(httpResponse.statusCode) else {
 			let data = try await collectData(from: bytes)
-			throw PimuxServerError.serverError(Self.errorMessage(from: data, statusCode: httpResponse.statusCode))
+			throw PimuxServerError.serverError(
+				Self.errorMessage(from: data, statusCode: httpResponse.statusCode),
+				statusCode: httpResponse.statusCode
+			)
 		}
 
 		for try await line in bytes.lines {
@@ -407,7 +410,10 @@ struct PimuxServerClient {
 		}
 
 		guard (200..<300).contains(httpResponse.statusCode) else {
-			throw PimuxServerError.serverError(Self.errorMessage(from: data, statusCode: httpResponse.statusCode))
+			throw PimuxServerError.serverError(
+				Self.errorMessage(from: data, statusCode: httpResponse.statusCode),
+				statusCode: httpResponse.statusCode
+			)
 		}
 
 		return (data, httpResponse)
@@ -501,12 +507,19 @@ private struct PimuxErrorResponse: Decodable {
 enum PimuxServerError: LocalizedError {
 	case invalidServerURL(String)
 	case invalidResponse(String)
-	case serverError(String)
+	case serverError(String, statusCode: Int)
 
 	var errorDescription: String? {
 		switch self {
-		case .invalidServerURL(let message), .invalidResponse(let message), .serverError(let message):
+		case .invalidServerURL(let message), .invalidResponse(let message), .serverError(let message, _):
 			message
 		}
+	}
+
+	var isNotFound: Bool {
+		if case .serverError(_, let statusCode) = self {
+			return statusCode == 404
+		}
+		return false
 	}
 }

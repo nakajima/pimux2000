@@ -452,6 +452,8 @@ async fn summarize_via_pi(
     command
         .arg("-p")
         .arg("--no-session")
+        .arg("--no-extensions")
+        .arg("--no-skills")
         .arg("--thinking")
         .arg("off")
         .arg("--model")
@@ -523,7 +525,7 @@ fn summary_command_preview(
 ) -> String {
     let working_dir = summary_working_dir(discovered_session, config);
     format!(
-        "( cd {} && PI_SKIP_VERSION_CHECK=1 PI_CODING_AGENT_DIR={} pi -p --no-session --thinking off --model {} {} )",
+        "( cd {} && PI_SKIP_VERSION_CHECK=1 PI_CODING_AGENT_DIR={} pi -p --no-session --no-extensions --no-skills --thinking off --model {} {} )",
         shell_escape(&working_dir.display().to_string()),
         shell_escape(&config.pi_agent_dir.display().to_string()),
         shell_escape(&config.model),

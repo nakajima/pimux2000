@@ -66,13 +66,17 @@ interface BridgeStateSnapshot {
 	latestMetadata?: PimuxSessionMetadata;
 }
 
+const MAX_PENDING_PAYLOADS = 256;
+
 class LiveBridgeClient {
 	private readonly socketPath: string;
 	private readonly onCommand: (command: AgentToBridgeMessage) => void;
 	private readonly getStateSnapshot: () => BridgeStateSnapshot;
 	private socket?: Socket;
+	private activeSocketId = 0;
 	private connecting = false;
 	private connected = false;
+	private closed = false;
 	private reconnectTimer?: ReturnType<typeof setTimeout>;
 	private pendingPayloads: string[] = [];
 	private incomingBuffer = "";
@@ -89,24 +93,45 @@ class LiveBridgeClient {
 	}
 
 	send(message: BridgeToAgentMessage) {
+		if (this.closed) return;
+
 		const payload = `${JSON.stringify(message)}\n`;
 		if (this.connected && this.socket && !this.socket.destroyed) {
 			this.socket.write(payload);
 			return;
 		}
 
-		this.pendingPayloads.push(payload);
+		if (this.pendingPayloads.length < MAX_PENDING_PAYLOADS) {
+			this.pendingPayloads.push(payload);
+		}
 		this.ensureConnected();
 	}
 
+	close() {
+		this.closed = true;
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = undefined;
+		}
+		if (this.socket && !this.socket.destroyed) {
+			this.socket.destroy();
+		}
+		this.socket = undefined;
+		this.connected = false;
+		this.connecting = false;
+		this.pendingPayloads = [];
+	}
+
 	private ensureConnected() {
-		if (this.connected || this.connecting) return;
+		if (this.closed || this.connected || this.connecting) return;
 		this.connecting = true;
 
+		const socketId = ++this.activeSocketId;
 		const socket = createConnection(this.socketPath);
 		this.socket = socket;
 
 		socket.on("connect", () => {
+			if (socketId !== this.activeSocketId) return;
 			this.connecting = false;
 			this.connected = true;
 			this.incomingBuffer = "";
@@ -116,23 +141,30 @@ class LiveBridgeClient {
 		});
 
 		socket.on("data", (chunk) => {
+			if (socketId !== this.activeSocketId) return;
 			this.incomingBuffer += chunk.toString("utf8");
 			this.drainIncomingBuffer();
 		});
 
 		socket.on("error", () => {
-			this.markDisconnected();
+			// close always fires after error; reconnect is handled there.
 		});
 
 		socket.on("close", () => {
-			this.markDisconnected();
+			if (socketId !== this.activeSocketId) return;
+			this.connected = false;
+			this.connecting = false;
+			this.socket = undefined;
 			this.scheduleReconnect();
 		});
 	}
 
 	private writeNow(message: BridgeToAgentMessage) {
+		if (this.closed) return;
 		if (!this.connected || !this.socket || this.socket.destroyed) {
-			this.pendingPayloads.push(`${JSON.stringify(message)}\n`);
+			if (this.pendingPayloads.length < MAX_PENDING_PAYLOADS) {
+				this.pendingPayloads.push(`${JSON.stringify(message)}\n`);
+			}
 			this.ensureConnected();
 			return;
 		}
@@ -186,17 +218,12 @@ class LiveBridgeClient {
 		}
 	}
 
-	private markDisconnected() {
-		this.connected = false;
-		this.connecting = false;
-		this.socket = undefined;
-	}
-
 	private scheduleReconnect() {
+		if (this.closed) return;
 		if (this.reconnectTimer) return;
 		this.reconnectTimer = setTimeout(() => {
 			this.reconnectTimer = undefined;
-			this.ensureConnected();
+			if (!this.closed) this.ensureConnected();
 		}, SOCKET_RECONNECT_DELAY_MS);
 	}
 }
@@ -294,9 +321,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_update", async (event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
-		if (!sessionId) return;
+		if (!sessionId || sessionId !== state.currentSessionId) return;
 
-		state.currentSessionId = sessionId;
 		const message = agentMessageToPimuxMessage(event.message);
 		if (!message || message.role !== "assistant") return;
 
@@ -305,9 +331,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("message_end", async (event, ctx) => {
 		const sessionId = ctx.sessionManager.getSessionId();
-		if (!sessionId) return;
+		if (!sessionId || sessionId !== state.currentSessionId) return;
 
-		state.currentSessionId = sessionId;
 		const message = agentMessageToPimuxMessage(event.message);
 		if (!message) return;
 
@@ -336,6 +361,8 @@ export default function (pi: ExtensionAPI) {
 			state.latestSnapshotMessages = [];
 			state.latestMetadata = undefined;
 		}
+
+		bridge.close();
 	});
 
 	function schedulePartial(sessionId: string, message: PimuxMessage) {
