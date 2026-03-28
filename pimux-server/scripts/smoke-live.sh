@@ -38,7 +38,7 @@ SERVER_PID=$!
 sleep 1
 
 echo "[smoke] starting agent"
-PATH=/usr/bin:/bin ./target/debug/pimux-server agent "http://127.0.0.1:$PORT" \
+PATH=/usr/bin:/bin ./target/debug/pimux-server agent run "http://127.0.0.1:$PORT" \
   --location tester@host \
   --pi-agent-dir "$TMPDIR_ROOT" \
   --summary-model dummy >"$AGENT_LOG" 2>&1 &
@@ -83,6 +83,32 @@ assert payload["freshness"]["source"] == "extension", payload
 assert payload["activity"]["active"] is True, payload
 assert payload["activity"]["attached"] is True, payload
 assert payload["messages"][-1]["body"] == "typing live", payload
+PY
+
+echo "[smoke] checking live stream snapshot"
+STREAM_EVENT="$(python3 - <<'PY' "$PORT"
+import sys, urllib.request
+port = sys.argv[1]
+req = urllib.request.Request(
+    f'http://127.0.0.1:{port}/sessions/live-session/stream',
+    headers={'Accept': 'application/x-ndjson'},
+)
+with urllib.request.urlopen(req, timeout=5) as resp:
+    while True:
+        line = resp.readline().decode().strip()
+        if line:
+            print(line)
+            break
+PY
+)"
+echo "$STREAM_EVENT"
+python3 - <<'PY' "$STREAM_EVENT"
+import json, sys
+payload = json.loads(sys.argv[1])
+assert payload["type"] == "snapshot", payload
+session = payload["session"]
+assert session["activity"]["active"] is True, payload
+assert session["messages"][-1]["body"] == "typing live", payload
 PY
 
 echo "[smoke] sending final assistant"

@@ -3,7 +3,7 @@ import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const PARTIAL_UPDATE_THROTTLE_MS = 300;
+const PARTIAL_UPDATE_THROTTLE_MS = 150;
 const SOCKET_WRITE_TIMEOUT_MS = 1_000;
 
 type PimuxRole =
@@ -16,10 +16,19 @@ type PimuxRole =
 	| "compactionSummary"
 	| "other";
 
+type PimuxMessageBlockType = "text" | "thinking" | "toolCall" | "other";
+
+interface PimuxMessageBlock {
+	type: PimuxMessageBlockType;
+	text?: string;
+	toolCallName?: string;
+}
+
 interface PimuxMessage {
 	created_at: string;
 	role: PimuxRole;
 	body: string;
+	blocks?: PimuxMessageBlock[];
 }
 
 type LiveSessionEvent =
@@ -204,31 +213,19 @@ function entryToPimuxMessage(entry: any): PimuxMessage | undefined {
 		case "message":
 			return agentMessageToPimuxMessage(entry.message, entry.timestamp);
 		case "custom_message": {
-			const body = flattenContent(entry.content, false);
-			if (!body) return undefined;
-			return {
-				created_at: toIsoString(entry.timestamp),
-				role: "custom",
-				body,
-			};
+			const text = flattenTextContent(entry.content);
+			if (!text) return undefined;
+			return pimuxMessageFromText(toIsoString(entry.timestamp), "custom", text);
 		}
 		case "branch_summary": {
-			const body = collapseWhitespace(entry.summary);
-			if (!body) return undefined;
-			return {
-				created_at: toIsoString(entry.timestamp),
-				role: "branchSummary",
-				body,
-			};
+			const text = collapseWhitespace(entry.summary);
+			if (!text) return undefined;
+			return pimuxMessageFromText(toIsoString(entry.timestamp), "branchSummary", text);
 		}
 		case "compaction": {
-			const body = collapseWhitespace(entry.summary);
-			if (!body) return undefined;
-			return {
-				created_at: toIsoString(entry.timestamp),
-				role: "compactionSummary",
-				body,
-			};
+			const text = collapseWhitespace(entry.summary);
+			if (!text) return undefined;
+			return pimuxMessageFromText(toIsoString(entry.timestamp), "compactionSummary", text);
 		}
 		default:
 			return undefined;
@@ -239,118 +236,166 @@ function agentMessageToPimuxMessage(message: any, fallbackTimestamp?: string): P
 	if (!message?.role) return undefined;
 
 	switch (message.role) {
-		case "user": {
-			const body = flattenContent(message.content, false);
-			if (!body) return undefined;
-			return {
-				created_at: timestampToIso(message.timestamp, fallbackTimestamp),
-				role: "user",
-				body,
-			};
-		}
-		case "assistant": {
-			const body = flattenContent(message.content, true);
-			if (!body) return undefined;
-			return {
-				created_at: timestampToIso(message.timestamp, fallbackTimestamp),
-				role: "assistant",
-				body,
-			};
-		}
-		case "toolResult": {
-			const body = flattenContent(message.content, false);
-			if (!body) return undefined;
-			return {
-				created_at: timestampToIso(message.timestamp, fallbackTimestamp),
-				role: "toolResult",
-				body,
-			};
-		}
+		case "user":
+			return pimuxMessageFromBlocks(
+				timestampToIso(message.timestamp, fallbackTimestamp),
+				"user",
+				contentToBlocks(message.content, false)
+			);
+		case "assistant":
+			return pimuxMessageFromBlocks(
+				timestampToIso(message.timestamp, fallbackTimestamp),
+				"assistant",
+				contentToBlocks(message.content, true)
+			);
+		case "toolResult":
+			return pimuxMessageFromBlocks(
+				timestampToIso(message.timestamp, fallbackTimestamp),
+				"toolResult",
+				contentToBlocks(message.content, false)
+			);
 		case "bashExecution": {
-			const body = flattenBashExecution(message);
-			if (!body) return undefined;
-			return {
-				created_at: timestampToIso(message.timestamp, fallbackTimestamp),
-				role: "bashExecution",
-				body,
-			};
+			const text = flattenBashExecution(message);
+			if (!text) return undefined;
+			return pimuxMessageFromText(timestampToIso(message.timestamp, fallbackTimestamp), "bashExecution", text);
 		}
 		case "custom": {
-			const body = flattenContent(message.content, false);
-			if (!body) return undefined;
-			return {
-				created_at: timestampToIso(message.timestamp, fallbackTimestamp),
-				role: "custom",
-				body,
-			};
+			const text = flattenTextContent(message.content);
+			if (!text) return undefined;
+			return pimuxMessageFromText(timestampToIso(message.timestamp, fallbackTimestamp), "custom", text);
 		}
 		case "branchSummary": {
-			const body = collapseWhitespace(message.summary);
-			if (!body) return undefined;
-			return {
-				created_at: timestampToIso(message.timestamp, fallbackTimestamp),
-				role: "branchSummary",
-				body,
-			};
+			const text = collapseWhitespace(message.summary);
+			if (!text) return undefined;
+			return pimuxMessageFromText(timestampToIso(message.timestamp, fallbackTimestamp), "branchSummary", text);
 		}
 		case "compactionSummary": {
-			const body = collapseWhitespace(message.summary);
-			if (!body) return undefined;
-			return {
-				created_at: timestampToIso(message.timestamp, fallbackTimestamp),
-				role: "compactionSummary",
-				body,
-			};
+			const text = collapseWhitespace(message.summary);
+			if (!text) return undefined;
+			return pimuxMessageFromText(timestampToIso(message.timestamp, fallbackTimestamp), "compactionSummary", text);
 		}
 		default: {
-			const body = flattenContent(message.content, false) ?? collapseWhitespace(message.summary) ?? "";
-			if (!body) return undefined;
-			return {
-				created_at: timestampToIso(message.timestamp, fallbackTimestamp),
-				role: "other",
-				body,
-			};
+			const text = flattenTextContent(message.content) ?? collapseWhitespace(message.summary) ?? "";
+			if (!text) return undefined;
+			return pimuxMessageFromText(timestampToIso(message.timestamp, fallbackTimestamp), "other", text);
 		}
 	}
 }
 
-function flattenContent(content: any, includeToolCalls: boolean): string | undefined {
+function pimuxMessageFromText(created_at: string, role: PimuxRole, text: string): PimuxMessage | undefined {
+	const normalized = normalizeDisplayText(text);
+	if (!normalized) return undefined;
+	return {
+		created_at,
+		role,
+		body: normalized,
+		blocks: [{ type: "text", text: normalized }],
+	};
+}
+
+function pimuxMessageFromBlocks(created_at: string, role: PimuxRole, blocks: PimuxMessageBlock[]): PimuxMessage | undefined {
+	const normalizedBlocks = blocks
+		.map(normalizeBlock)
+		.filter((block): block is PimuxMessageBlock => Boolean(block));
+	if (normalizedBlocks.length === 0) return undefined;
+
+	return {
+		created_at,
+		role,
+		body: bodyFromBlocks(role, normalizedBlocks),
+		blocks: normalizedBlocks,
+	};
+}
+
+function normalizeBlock(block: PimuxMessageBlock | undefined): PimuxMessageBlock | undefined {
+	if (!block) return undefined;
+
+	switch (block.type) {
+		case "text":
+		case "thinking":
+		case "other": {
+			const text = normalizeDisplayText(block.text);
+			if (!text) return undefined;
+			return { type: block.type, text };
+		}
+		case "toolCall": {
+			const toolCallName = collapseWhitespace(block.toolCallName);
+			if (!toolCallName) return undefined;
+			return { type: "toolCall", toolCallName };
+		}
+		default:
+			return undefined;
+	}
+}
+
+function bodyFromBlocks(role: PimuxRole, blocks: PimuxMessageBlock[]): string {
+	return blocks
+		.flatMap((block) => {
+			if (block.type === "text" && block.text) return [block.text];
+			if (role === "assistant" && block.type === "toolCall" && block.toolCallName) {
+				return [`Tool call: ${block.toolCallName}`];
+			}
+			return [];
+		})
+		.join("\n\n");
+}
+
+function contentToBlocks(content: any, includeToolCalls: boolean): PimuxMessageBlock[] {
 	if (typeof content === "string") {
-		const collapsed = collapseWhitespace(content);
-		return collapsed || undefined;
+		const text = normalizeDisplayText(content);
+		return text ? [{ type: "text", text }] : [];
 	}
 
-	if (!Array.isArray(content)) return undefined;
+	if (!Array.isArray(content)) return [];
 
-	const parts: string[] = [];
-	for (const block of content) {
-		if (block?.type === "text" && typeof block.text === "string") {
-			const text = collapseWhitespace(block.text);
-			if (text) parts.push(text);
-		}
-		if (includeToolCalls && block?.type === "toolCall" && typeof block.name === "string") {
-			parts.push(`Tool call: ${collapseWhitespace(block.name)}`);
-		}
-	}
+	return content
+		.map((block) => {
+			switch (block?.type) {
+				case "text": {
+					const text = normalizeDisplayText(block.text);
+					return text ? ({ type: "text", text } satisfies PimuxMessageBlock) : undefined;
+				}
+				case "thinking": {
+					const text = normalizeDisplayText(block.thinking);
+					return text ? ({ type: "thinking", text } satisfies PimuxMessageBlock) : undefined;
+				}
+				case "toolCall": {
+					if (!includeToolCalls || typeof block.name !== "string") return undefined;
+					const toolCallName = collapseWhitespace(block.name);
+					return toolCallName
+						? ({ type: "toolCall", toolCallName } satisfies PimuxMessageBlock)
+						: undefined;
+				}
+				default:
+					return undefined;
+			}
+		})
+		.filter((block): block is PimuxMessageBlock => Boolean(block));
+}
 
-	const flattened = parts.join("\n\n").trim();
-	return flattened || undefined;
+function flattenTextContent(content: any): string | undefined {
+	const text = contentToBlocks(content, false)
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.filter((text): text is string => Boolean(text))
+		.join("\n\n");
+	return text || undefined;
 }
 
 function flattenBashExecution(message: any): string | undefined {
 	const parts: string[] = [];
 
 	if (typeof message.command === "string") {
-		const command = collapseWhitespace(message.command);
+		const command = normalizeDisplayText(message.command);
 		if (command) parts.push(`$ ${command}`);
 	}
 
 	if (typeof message.output === "string") {
-		const output = message.output.trim();
+		const output = normalizeDisplayText(message.output);
 		if (output) parts.push(output);
 	}
 
-	const body = parts.join("\n\n").trim();
+	const body = parts.join("\n\n");
 	return body || undefined;
 }
 
@@ -374,6 +419,12 @@ function toIsoString(timestamp: unknown): string {
 		return new Date(timestamp).toISOString();
 	}
 	return new Date().toISOString();
+}
+
+function normalizeDisplayText(value: unknown): string {
+	if (typeof value !== "string") return "";
+	const normalized = value.replace(/\r\n?/g, "\n").replace(/^\n+|\n+$/g, "");
+	return normalized.trim().length > 0 ? normalized : "";
 }
 
 function collapseWhitespace(value: unknown): string {

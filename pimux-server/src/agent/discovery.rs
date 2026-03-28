@@ -8,6 +8,7 @@ use std::{
 };
 
 use chrono::{DateTime, TimeZone, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
 
@@ -16,7 +17,7 @@ use crate::session::ActiveSession;
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const MAX_SUMMARY_LEN: usize = 120;
-const MAX_TRANSCRIPT_ENTRIES: usize = 12;
+const MAX_SUMMARY_TRANSCRIPT_EDGE_ENTRIES: usize = 5;
 const MAX_TRANSCRIPT_ENTRY_CHARS: usize = 400;
 
 #[derive(Debug, Clone)]
@@ -28,6 +29,7 @@ pub struct DiscoveredSession {
     pub heuristic_summary: String,
     pub summary_input: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub last_user_message_at: DateTime<Utc>,
     pub last_assistant_message_at: DateTime<Utc>,
     pub cwd: String,
@@ -45,6 +47,7 @@ impl DiscoveredSession {
             id: self.id,
             summary,
             created_at: self.created_at,
+            updated_at: self.updated_at,
             last_user_message_at: self.last_user_message_at,
             last_assistant_message_at: self.last_assistant_message_at,
             cwd: self.cwd,
@@ -53,7 +56,7 @@ impl DiscoveredSession {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionFingerprint {
     pub file_size: u64,
     pub modified_at_millis: u128,
@@ -126,7 +129,7 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
     let mut last_user_message_at: Option<DateTime<Utc>> = None;
     let mut last_assistant_message_at: Option<DateTime<Utc>> = None;
     let mut model: Option<String> = None;
-    let mut transcript_entries = VecDeque::new();
+    let mut transcript_entries = SummaryTranscriptCollector::default();
 
     for line in reader.lines() {
         let line = line?;
@@ -168,7 +171,7 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
                         last_user_message_at =
                             parse_message_timestamp(&entry, message).or(last_user_message_at);
                         if let Some(transcript_entry) = extract_transcript_entry("User", message) {
-                            push_transcript_entry(&mut transcript_entries, transcript_entry);
+                            transcript_entries.push(transcript_entry);
                         }
                     }
                     Some("assistant") => {
@@ -189,7 +192,7 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
                         if let Some(transcript_entry) =
                             extract_transcript_entry("Assistant", message)
                         {
-                            push_transcript_entry(&mut transcript_entries, transcript_entry);
+                            transcript_entries.push(transcript_entry);
                         }
                     }
                     _ => {}
@@ -203,16 +206,12 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
     let heuristic_summary = first_user_summary
         .clone()
         .unwrap_or_else(|| header.id.clone());
-    let summary_input = if transcript_entries.is_empty() {
-        None
-    } else {
-        Some(
-            transcript_entries
-                .into_iter()
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-        )
-    };
+    let updated_at = metadata
+        .modified()
+        .ok()
+        .map(DateTime::<Utc>::from)
+        .unwrap_or(header.created_at);
+    let summary_input = transcript_entries.into_summary_input();
 
     Ok(DiscoveredSession {
         session_file: path.to_path_buf(),
@@ -222,6 +221,7 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
         heuristic_summary,
         summary_input,
         created_at: header.created_at,
+        updated_at,
         last_user_message_at: last_user_message_at.unwrap_or(header.created_at),
         last_assistant_message_at: last_assistant_message_at.unwrap_or(header.created_at),
         cwd: header.cwd,
@@ -302,30 +302,8 @@ fn extract_summary(content: Option<&Value>) -> Option<String> {
 }
 
 fn extract_transcript_entry(role: &str, message: &Value) -> Option<String> {
-    let content = message.get("content");
-    let mut parts = Vec::new();
-
-    if let Some(text) = extract_message_text(content) {
-        if !text.is_empty() {
-            parts.push(text);
-        }
-    }
-
-    if role == "Assistant" {
-        let tool_calls = extract_tool_calls(content);
-        if !tool_calls.is_empty() {
-            parts.push(tool_calls.join(" "));
-        }
-    }
-
-    if parts.is_empty() {
-        return None;
-    }
-
-    let combined = truncate_chars(
-        &collapse_whitespace(&parts.join(" ")),
-        MAX_TRANSCRIPT_ENTRY_CHARS,
-    );
+    let text = extract_message_text(message.get("content"))?;
+    let combined = truncate_chars(&collapse_whitespace(&text), MAX_TRANSCRIPT_ENTRY_CHARS);
     Some(format!("{role}: {combined}"))
 }
 
@@ -352,25 +330,57 @@ fn extract_message_text(content: Option<&Value>) -> Option<String> {
     }
 }
 
-fn extract_tool_calls(content: Option<&Value>) -> Vec<String> {
-    let Some(Value::Array(blocks)) = content else {
-        return Vec::new();
-    };
-
-    blocks
-        .iter()
-        .filter_map(|block| {
-            let name = block.get("name").and_then(Value::as_str)?;
-            (block.get("type").and_then(Value::as_str) == Some("toolCall"))
-                .then(|| format!("Tool call: {name}"))
-        })
-        .collect()
+#[derive(Clone)]
+struct IndexedTranscriptEntry {
+    index: usize,
+    text: String,
 }
 
-fn push_transcript_entry(transcript_entries: &mut VecDeque<String>, entry: String) {
-    transcript_entries.push_back(entry);
-    while transcript_entries.len() > MAX_TRANSCRIPT_ENTRIES {
-        transcript_entries.pop_front();
+#[derive(Default)]
+struct SummaryTranscriptCollector {
+    next_index: usize,
+    first_entries: Vec<IndexedTranscriptEntry>,
+    last_entries: VecDeque<IndexedTranscriptEntry>,
+}
+
+impl SummaryTranscriptCollector {
+    fn push(&mut self, entry: String) {
+        let indexed = IndexedTranscriptEntry {
+            index: self.next_index,
+            text: entry,
+        };
+        self.next_index += 1;
+
+        if self.first_entries.len() < MAX_SUMMARY_TRANSCRIPT_EDGE_ENTRIES {
+            self.first_entries.push(indexed.clone());
+        }
+
+        self.last_entries.push_back(indexed);
+        while self.last_entries.len() > MAX_SUMMARY_TRANSCRIPT_EDGE_ENTRIES {
+            self.last_entries.pop_front();
+        }
+    }
+
+    fn into_summary_input(self) -> Option<String> {
+        if self.next_index == 0 {
+            return None;
+        }
+
+        let mut entries = self.first_entries;
+        for entry in self.last_entries {
+            if entries.iter().any(|existing| existing.index == entry.index) {
+                continue;
+            }
+            entries.push(entry);
+        }
+
+        Some(
+            entries
+                .into_iter()
+                .map(|entry| entry.text)
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
     }
 }
 
@@ -395,4 +405,55 @@ struct SessionHeader {
     id: String,
     created_at: DateTime<Utc>,
     cwd: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn extract_transcript_entry_ignores_tool_calls() {
+        let message = json!({
+            "content": [
+                { "type": "toolCall", "name": "bash" },
+                { "type": "toolCall", "name": "read" }
+            ]
+        });
+
+        assert_eq!(extract_transcript_entry("Assistant", &message), None);
+    }
+
+    #[test]
+    fn summary_transcript_collector_keeps_first_and_last_five_entries() {
+        let mut collector = SummaryTranscriptCollector::default();
+        for index in 0..12 {
+            collector.push(format!("Entry {index}"));
+        }
+
+        let summary_input = collector.into_summary_input().unwrap();
+        assert_eq!(
+            summary_input,
+            [
+                "Entry 0", "Entry 1", "Entry 2", "Entry 3", "Entry 4", "Entry 7", "Entry 8",
+                "Entry 9", "Entry 10", "Entry 11",
+            ]
+            .join("\n\n")
+        );
+    }
+
+    #[test]
+    fn summary_transcript_collector_deduplicates_overlap() {
+        let mut collector = SummaryTranscriptCollector::default();
+        for index in 0..3 {
+            collector.push(format!("Entry {index}"));
+        }
+
+        let summary_input = collector.into_summary_input().unwrap();
+        assert_eq!(
+            summary_input,
+            ["Entry 0", "Entry 1", "Entry 2"].join("\n\n")
+        );
+    }
 }

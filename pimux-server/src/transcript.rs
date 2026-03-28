@@ -46,35 +46,28 @@ pub struct SessionActivity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionMessagesBatchReport {
-    pub host_location: String,
-    pub sessions: Vec<SessionMessagesResponse>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingTranscriptRequest {
-    pub request_id: String,
-    pub session_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingTranscriptRequestsResponse {
-    pub requests: Vec<PendingTranscriptRequest>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TranscriptFetchQuery {
-    pub host_location: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct TranscriptFetchFulfillment {
     pub request_id: String,
     pub host_location: String,
     pub session: Option<SessionMessagesResponse>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SessionStreamEvent {
+    Snapshot {
+        sequence: u64,
+        session: SessionMessagesResponse,
+    },
+    SessionState {
+        sequence: u64,
+        connected: bool,
+        missing: bool,
+        last_seen_at: Option<DateTime<Utc>>,
+    },
+    Keepalive {
+        sequence: u64,
+        timestamp: DateTime<Utc>,
+    },
 }

@@ -10,14 +10,15 @@ struct MessagesRequestTests {
 		let stableSessionID = "session-1"
 
 		try database.dbQueue.write { db in
-			var host = Host(sshTarget: "nakajima@macstudio", createdAt: Date(), updatedAt: Date())
+			var host = Host(id: nil, location: "nakajima@macstudio", createdAt: Date(), updatedAt: Date())
 			try host.insert(db)
 
 			var oldSession = PiSession(
+				id: nil,
 				hostID: host.id!,
 				summary: "Old session row",
 				sessionID: stableSessionID,
-				sessionFile: "/tmp/old.jsonl",
+				sessionFile: nil,
 				model: "anthropic/claude-opus-4-6",
 				lastMessage: nil,
 				lastMessageAt: nil,
@@ -47,10 +48,11 @@ struct MessagesRequestTests {
 			try oldSession.delete(db)
 
 			var newSession = PiSession(
+				id: nil,
 				hostID: host.id!,
 				summary: "New session row",
 				sessionID: stableSessionID,
-				sessionFile: "/tmp/new.jsonl",
+				sessionFile: nil,
 				model: "anthropic/claude-opus-4-6",
 				lastMessage: nil,
 				lastMessageAt: nil,

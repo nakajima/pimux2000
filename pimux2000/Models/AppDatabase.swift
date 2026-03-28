@@ -22,7 +22,7 @@ struct AppDatabase {
 		migrator.registerMigration("createHosts") { db in
 			try db.create(table: "hosts") { t in
 				t.autoIncrementedPrimaryKey("id")
-				t.column("sshTarget", .text).notNull().unique()
+				t.column("location", .text).notNull().unique()
 				t.column("createdAt", .datetime).notNull()
 				t.column("updatedAt", .datetime).notNull()
 			}
@@ -40,6 +40,7 @@ struct AppDatabase {
 				t.column("lastMessage", .text)
 				t.column("lastMessageAt", .datetime)
 				t.column("lastMessageRole", .text)
+				t.column("lastReadMessageAt", .datetime)
 				t.column("startedAt", .datetime).notNull()
 				t.column("lastSeenAt", .datetime).notNull()
 			}
@@ -69,28 +70,70 @@ struct AppDatabase {
 			}
 		}
 
+		migrator.registerMigration("migrateHostsToLocations") { db in
+			let columnNames = try Self.columnNames(in: "hosts", db: db)
+			if columnNames.contains("sshTarget") && !columnNames.contains("location") {
+				try db.execute(sql: "ALTER TABLE hosts ADD COLUMN location TEXT NOT NULL DEFAULT ''")
+				try db.execute(sql: "UPDATE hosts SET location = sshTarget WHERE location = ''")
+				try db.execute(sql: "CREATE UNIQUE INDEX IF NOT EXISTS hosts_on_location ON hosts(location)")
+			}
+		}
+
+		migrator.registerMigration("createServerConfigurations") { db in
+			try db.create(table: "serverConfigurations") { t in
+				t.autoIncrementedPrimaryKey("id")
+				t.column("serverURL", .text).notNull()
+				t.column("createdAt", .datetime).notNull()
+				t.column("updatedAt", .datetime).notNull()
+			}
+		}
+
+		migrator.registerMigration("addPiSessionReadStatus") { db in
+			let columnNames = try Self.columnNames(in: "piSessions", db: db)
+			guard !columnNames.contains("lastReadMessageAt") else { return }
+
+			try db.execute(sql: "ALTER TABLE piSessions ADD COLUMN lastReadMessageAt DATETIME")
+			try db.execute(sql: "UPDATE piSessions SET lastReadMessageAt = lastMessageAt")
+		}
+
 		return migrator
 	}
 
 	// MARK: - Writes
 
-	func addHost(sshTarget: String) throws {
-		let trimmed = sshTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+	func saveServerConfiguration(serverURL rawValue: String) throws {
+		let normalized = try PimuxServerClient.normalizedBaseURLString(from: rawValue)
 		try dbQueue.write { db in
 			let now = Date()
-			if var existing = try Host.filter(Column("sshTarget") == trimmed).fetchOne(db) {
-				existing.updatedAt = now
-				try existing.update(db)
-			} else {
-				var host = Host(id: nil, sshTarget: trimmed, createdAt: now, updatedAt: now)
-				try host.insert(db)
+			let existing = try ServerConfiguration
+				.order(Column("updatedAt").desc)
+				.fetchOne(db)
+
+			if existing?.serverURL != normalized {
+				try Self.clearSyncedData(in: db)
 			}
+
+			_ = try ServerConfiguration.deleteAll(db)
+
+			var configuration = ServerConfiguration(
+				id: nil,
+				serverURL: normalized,
+				createdAt: existing?.createdAt ?? now,
+				updatedAt: now
+			)
+			try configuration.insert(db)
 		}
 	}
 
-	func deleteHosts(ids: [Int64]) throws {
+	func markSessionRead(sessionID: String, through lastReadMessageAt: Date) throws {
 		try dbQueue.write { db in
-			_ = try Host.filter(ids: ids).deleteAll(db)
+			guard var session = try PiSession
+				.filter(Column("sessionID") == sessionID)
+				.fetchOne(db) else { return }
+
+			guard session.lastReadMessageAt.map({ $0 < lastReadMessageAt }) ?? true else { return }
+			session.lastReadMessageAt = lastReadMessageAt
+			try session.update(db)
 		}
 	}
 
@@ -98,6 +141,20 @@ struct AppDatabase {
 
 	static func preview() -> AppDatabase {
 		try! AppDatabase(dbQueue: DatabaseQueue())
+	}
+
+	private static func clearSyncedData(in db: Database) throws {
+		_ = try MessageContentBlock.deleteAll(db)
+		_ = try Message.deleteAll(db)
+		_ = try PiSession.deleteAll(db)
+		_ = try Host.deleteAll(db)
+	}
+
+	nonisolated private static func columnNames(in table: String, db: Database) throws -> Set<String> {
+		Set(
+			try Row.fetchAll(db, sql: "PRAGMA table_info(\(table))")
+				.compactMap { row in row["name"] as String? }
+		)
 	}
 }
 

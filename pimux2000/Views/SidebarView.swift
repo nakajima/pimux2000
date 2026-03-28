@@ -1,8 +1,7 @@
+import Foundation
 import GRDB
 import GRDBQuery
-import Pi
 import SwiftUI
-import Foundation
 
 struct HostsRequest: ValueObservationQueryable {
 	static var defaultValue: [Host] { [] }
@@ -13,47 +12,58 @@ struct HostsRequest: ValueObservationQueryable {
 }
 
 struct SidebarView: View {
-	@Environment(\.appDatabase) private var appDatabase
 	@Environment(\.databaseContext) private var dbContext
 	@Query(PiSessionsRequest()) private var sessions: [SessionInfo]
 	@Query(HostsRequest()) private var hosts: [Host]
+	@Query(CurrentServerConfigurationRequest()) private var serverConfiguration: ServerConfiguration?
 	@Binding var selectedSessionID: String?
-	@State private var isAddingServer = false
+	@State private var isShowingServerSheet = false
 	@State private var isShowingSettings = false
 
 	var body: some View {
 		List(selection: $selectedSessionID) {
-			ForEach(sessions, id: \.session.sessionID) { sessionInfo in
-				VStack(alignment: .leading) {
-					Text(sessionInfo.session.summary)
-					VStack(alignment: .leading) {
-						if let lastMessageAt = sessionInfo.session.lastMessageAt {
-							Text(lastMessageAt.formatted(.dateTime))
+			Section("Recent Sessions") {
+				if sessions.isEmpty {
+					Text("No recent sessions")
+						.foregroundStyle(.secondary)
+				} else {
+					ForEach(sessions, id: \.session.sessionID) { sessionInfo in
+						HStack(alignment: .top, spacing: 12) {
+							VStack(alignment: .leading, spacing: 4) {
+								Text(sessionInfo.session.summary)
+								VStack(alignment: .leading, spacing: 4) {
+									if let lastMessageAt = sessionInfo.session.lastMessageAt {
+										Text(lastMessageAt.formatted(.dateTime))
+									}
+									Text(sessionInfo.host.displayName)
+										.bold()
+								}
+								.font(.caption)
+								.foregroundStyle(.secondary)
+							}
+
+							Spacer(minLength: 0)
+
+							if sessionInfo.session.isUnread && selectedSessionID != sessionInfo.session.sessionID {
+								UnreadSessionBadge()
+							}
 						}
-						Text(sessionInfo.host.displayName)
-							.bold()
+						.tag(sessionInfo.session.sessionID)
+						.contentShape(Rectangle())
+						.onTapGesture {
+							selectedSessionID = sessionInfo.session.sessionID
+						}
 					}
-					.font(.caption)
-					.foregroundStyle(.secondary)
-				}
-				.tag(sessionInfo.session.sessionID)
-				.contentShape(Rectangle())
-				.onTapGesture {
-					selectedSessionID = sessionInfo.session.sessionID
 				}
 			}
 
-			Section {
-				ForEach(hosts) { host in
-					Text(host.displayName)
-						.bold()
+			if !hosts.isEmpty {
+				Section("Hosts") {
+					ForEach(hosts) { host in
+						Text(host.displayName)
+							.bold()
+					}
 				}
-				.onDelete { indexSet in
-					let idsToDelete = indexSet.compactMap { hosts[$0].id }
-					try? appDatabase?.deleteHosts(ids: idsToDelete)
-				}
-			} header: {
-				Text("Servers")
 			}
 		}
 		.refreshable {
@@ -62,8 +72,10 @@ struct SidebarView: View {
 		}
 		.toolbar {
 			ToolbarItem(placement: .primaryAction) {
-				Button { isAddingServer = true } label: {
-					Label("Add Server", systemImage: "plus")
+				Button {
+					isShowingServerSheet = true
+				} label: {
+					Label(serverConfiguration == nil ? "Connect Server" : "Server", systemImage: "server.rack")
 				}
 			}
 			#if os(iOS)
@@ -80,8 +92,8 @@ struct SidebarView: View {
 			}
 			#endif
 		}
-		.sheet(isPresented: $isAddingServer) {
-			AddServerSheet()
+		.sheet(isPresented: $isShowingServerSheet) {
+			ServerConnectionSheet(initialServerURL: serverConfiguration?.serverURL ?? "")
 		}
 		.sheet(isPresented: $isShowingSettings) {
 			NavigationStack {
@@ -96,26 +108,55 @@ struct SidebarView: View {
 	}
 }
 
+private struct UnreadSessionBadge: View {
+	var body: some View {
+		Circle()
+			.fill(.tint)
+			.frame(width: 10, height: 10)
+			.accessibilityLabel("Unread messages")
+	}
+}
+
 #Preview {
 	let db = AppDatabase.preview()
+	try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
 
 	try! db.dbQueue.write { dbConn in
-		var host = Host(sshTarget: "nakajima@mac-studio", createdAt: Date(), updatedAt: Date())
+		let now = Date()
+		var host = Host(id: nil, location: "nakajima@mac-studio", createdAt: now, updatedAt: now)
 		try host.insert(dbConn)
 
-		var session = PiSession(
+		var readSession = PiSession(
+			id: nil,
 			hostID: host.id!,
-			summary: "Debug remote sync",
-			sessionID: "sidebar-preview-session",
-			sessionFile: "/tmp/sidebar-preview.jsonl",
+			summary: "Watch live transcripts",
+			sessionID: "sidebar-preview-session-read",
+			sessionFile: nil,
 			model: "anthropic/claude-sonnet",
-			lastMessage: "Looks good",
-			lastMessageAt: Date(),
+			lastMessage: nil,
+			lastMessageAt: now.addingTimeInterval(-120),
 			lastMessageRole: "assistant",
-			startedAt: Date(),
-			lastSeenAt: Date()
+			lastReadMessageAt: now.addingTimeInterval(-120),
+			startedAt: now.addingTimeInterval(-600),
+			lastSeenAt: now.addingTimeInterval(-120)
 		)
-		try session.insert(dbConn)
+		try readSession.insert(dbConn)
+
+		var unreadSession = PiSession(
+			id: nil,
+			hostID: host.id!,
+			summary: "Ship read badges",
+			sessionID: "sidebar-preview-session-unread",
+			sessionFile: nil,
+			model: "anthropic/claude-sonnet",
+			lastMessage: nil,
+			lastMessageAt: now,
+			lastMessageRole: "assistant",
+			lastReadMessageAt: now.addingTimeInterval(-300),
+			startedAt: now.addingTimeInterval(-1800),
+			lastSeenAt: now
+		)
+		try unreadSession.insert(dbConn)
 	}
 
 	return NavigationStack {

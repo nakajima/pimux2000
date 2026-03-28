@@ -33,6 +33,10 @@ extension Message {
 		case user
 		case assistant
 		case toolResult
+		case bashExecution
+		case custom
+		case branchSummary
+		case compactionSummary
 		case other(String)
 
 		nonisolated init(_ rawString: String) {
@@ -40,6 +44,10 @@ extension Message {
 			case "user": self = .user
 			case "assistant": self = .assistant
 			case "toolResult": self = .toolResult
+			case "bashExecution": self = .bashExecution
+			case "custom": self = .custom
+			case "branchSummary": self = .branchSummary
+			case "compactionSummary": self = .compactionSummary
 			default: self = .other(rawString)
 			}
 		}
@@ -49,6 +57,10 @@ extension Message {
 			case .user: "user"
 			case .assistant: "assistant"
 			case .toolResult: "toolResult"
+			case .bashExecution: "bashExecution"
+			case .custom: "custom"
+			case .branchSummary: "branchSummary"
+			case .compactionSummary: "compactionSummary"
 			case .other(let value): value
 			}
 		}

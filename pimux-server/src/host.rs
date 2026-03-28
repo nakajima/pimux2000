@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
@@ -23,7 +24,12 @@ pub struct HostIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HostSessions {
     pub location: String,
+    pub auth: HostAuth,
+    pub connected: bool,
+    pub missing: bool,
+    pub last_seen_at: Option<DateTime<Utc>>,
     pub sessions: Vec<ActiveSession>,
 }

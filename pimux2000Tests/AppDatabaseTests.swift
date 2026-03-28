@@ -6,66 +6,94 @@ import Testing
 @MainActor
 struct AppDatabaseTests {
 	@Test
-	func addHostTrimsWhitespaceAndDeduplicates() async throws {
+	func saveServerConfigurationTrimsWhitespaceAndNormalizes() async throws {
 		let database = AppDatabase.preview()
 
-		try database.addHost(sshTarget: "  nakajima@arch  ")
-		let firstHosts = try await database.dbQueue.read { db in
-			try Host.fetchAll(db)
+		try database.saveServerConfiguration(serverURL: "  localhost:3000/  ")
+
+		let configurations = try await database.dbQueue.read { db in
+			try ServerConfiguration.fetchAll(db)
 		}
 
-		#expect(firstHosts.count == 1)
-		#expect(firstHosts[0].sshTarget == "nakajima@arch")
-		let initialUpdatedAt = firstHosts[0].updatedAt
+		#expect(configurations.count == 1)
+		#expect(configurations[0].serverURL == "http://localhost:3000")
+	}
+
+	@Test
+	func saveServerConfigurationKeepsSingleRow() async throws {
+		let database = AppDatabase.preview()
+
+		try database.saveServerConfiguration(serverURL: "http://localhost:3000")
+		let firstConfiguration = try await database.dbQueue.read { db in
+			try ServerConfiguration.fetchOne(db)
+		}
+		let initialUpdatedAt = try #require(firstConfiguration?.updatedAt)
 
 		try await Task.sleep(for: .milliseconds(20))
-		try database.addHost(sshTarget: "nakajima@arch")
+		try database.saveServerConfiguration(serverURL: "localhost:3000")
 
-		let secondHosts = try await database.dbQueue.read { db in
-			try Host.fetchAll(db)
+		let configurations = try await database.dbQueue.read { db in
+			try ServerConfiguration.fetchAll(db)
 		}
 
-		#expect(secondHosts.count == 1)
-		#expect(secondHosts[0].updatedAt >= initialUpdatedAt)
+		#expect(configurations.count == 1)
+		#expect(configurations[0].serverURL == "http://localhost:3000")
+		#expect(configurations[0].updatedAt >= initialUpdatedAt)
 	}
 
 	@Test
-	func deleteHostsRemovesRows() async throws {
+	func changingServerConfigurationClearsSyncedData() async throws {
 		let database = AppDatabase.preview()
+		try database.saveServerConfiguration(serverURL: "http://localhost:3000")
 
-		try database.addHost(sshTarget: "nakajima@arch")
-		try database.addHost(sshTarget: "nakajima@pi")
+		try await database.dbQueue.write { db in
+			var host = Host(id: nil, location: "nakajima@arch", createdAt: Date(), updatedAt: Date())
+			try host.insert(db)
 
-		let hosts = try await database.dbQueue.read { db in
-			try Host.fetchAll(db)
+			var session = PiSession(
+				id: nil,
+				hostID: try #require(host.id),
+				summary: "Old session",
+				sessionID: "session-1",
+				sessionFile: nil,
+				model: "anthropic/claude-sonnet",
+				lastMessage: nil,
+				lastMessageAt: Date(),
+				lastMessageRole: "assistant",
+				startedAt: Date(),
+				lastSeenAt: Date()
+			)
+			try session.insert(db)
+
+			var message = Message(piSessionID: try #require(session.id), role: .assistant, toolName: nil, position: 0, createdAt: Date())
+			try message.insert(db)
+
+			var block = MessageContentBlock(messageID: try #require(message.id), type: "text", text: "hello", toolCallName: nil, position: 0)
+			try block.insert(db)
 		}
-		let deletedID = try #require(hosts.first?.id)
 
-		try database.deleteHosts(ids: [deletedID])
+		try database.saveServerConfiguration(serverURL: "http://localhost:4000")
 
-		let remainingHosts = try await database.dbQueue.read { db in
-			try Host.fetchAll(db)
+		let counts = try await database.dbQueue.read { db in
+			(
+				try Host.fetchCount(db),
+				try PiSession.fetchCount(db),
+				try Message.fetchCount(db),
+				try MessageContentBlock.fetchCount(db),
+				try ServerConfiguration.fetchOne(db)
+			)
 		}
 
-		#expect(remainingHosts.count == 1)
-		#expect(remainingHosts[0].sshTarget == "nakajima@pi")
+		#expect(counts.0 == 0)
+		#expect(counts.1 == 0)
+		#expect(counts.2 == 0)
+		#expect(counts.3 == 0)
+		#expect(counts.4?.serverURL == "http://localhost:4000")
 	}
 
 	@Test
-	func hostDerivedServerURL() {
-		let host = Host(sshTarget: "nakajima@arch", createdAt: Date(), updatedAt: Date())
-		#expect(host.serverURL == "ws://arch:7749")
-	}
-
-	@Test
-	func hostDerivedServerURLWithoutUser() {
-		let host = Host(sshTarget: "myserver", createdAt: Date(), updatedAt: Date())
-		#expect(host.serverURL == "ws://myserver:7749")
-	}
-
-	@Test
-	func hostDerivedHealthURL() {
-		let host = Host(sshTarget: "nakajima@arch", createdAt: Date(), updatedAt: Date())
-		#expect(host.healthURL?.absoluteString == "http://arch:7749/health")
+	func hostDisplayNameUsesLocation() {
+		let host = Host(id: nil, location: "nakajima@arch", createdAt: Date(), updatedAt: Date())
+		#expect(host.displayName == "nakajima@arch")
 	}
 }

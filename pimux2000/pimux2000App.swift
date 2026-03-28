@@ -1,10 +1,4 @@
-//
-//  pimux2000App.swift
-//  pimux2000
-//
-//  Created by Pat Nakajima on 3/22/26.
-//
-
+import Foundation
 import GRDB
 import GRDBQuery
 import SwiftUI
@@ -14,9 +8,20 @@ struct pimux2000App: App {
 	let appDatabase: AppDatabase
 
 	init() {
+		let processInfo = ProcessInfo.processInfo
+		let databaseURL = URL.documentsDirectory.appending(path: "db.sqlite")
+
+		if processInfo.arguments.contains("--uitesting-reset-db") {
+			try? FileManager.default.removeItem(at: databaseURL)
+		}
+
 		appDatabase = try! AppDatabase(
-			dbQueue: DatabaseQueue(path: URL.documentsDirectory.appending(path: "db.sqlite").path())
+			dbQueue: DatabaseQueue(path: databaseURL.path())
 		)
+
+		if processInfo.arguments.contains("--uitesting-use-fixtures") {
+			try! UITestFixtures.install(in: appDatabase)
+		}
 	}
 
 	var body: some Scene {

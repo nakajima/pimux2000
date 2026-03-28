@@ -47,15 +47,23 @@ struct MessageMarkdownRendererTests {
 	}
 
 	@Test
-	func collapsesPreviewWhenMessageHasMoreThanTenLines() {
+	func collapsesPreviewForLongToolResults() {
 		let text = (1...11).map { "line \($0)" }.joined(separator: "\n")
 
-		#expect(MessageMarkdownRenderer.shouldCollapsePreview(for: text))
+		#expect(MessageMarkdownRenderer.shouldCollapsePreview(for: text, role: .toolResult))
+	}
+
+	@Test
+	func keepsUserMessagesExpandedEvenWhenLong() {
+		let text = (1...30).map { "line \($0)" }.joined(separator: "\n")
+
+		#expect(!MessageMarkdownRenderer.shouldCollapsePreview(for: text, role: .user))
+		#expect(!MessageMarkdownRenderer.shouldCollapsePreview(for: text, role: .assistant))
 	}
 
 	@Test
 	func keepsShortMessagesExpanded() {
-		#expect(!MessageMarkdownRenderer.shouldCollapsePreview(for: "short message"))
+		#expect(!MessageMarkdownRenderer.shouldCollapsePreview(for: "short message", role: .toolResult))
 	}
 
 	@Test
@@ -63,5 +71,49 @@ struct MessageMarkdownRendererTests {
 		let text = (1...20).map { "line \($0)" }.joined(separator: "\n")
 
 		#expect(MessageMarkdownRenderer.previewText(for: text).count <= 900)
+	}
+
+	@Test
+	func wrapsBashExecutionsInFencedCodeBlocks() {
+		let source = "$ echo hi\nhi"
+
+		let rendered = MessageMarkdownRenderer.markdown(for: source, role: .bashExecution)
+
+		#expect(rendered.hasPrefix("```bash\n"))
+		#expect(rendered.hasSuffix("\n```"))
+	}
+
+	@Test
+	func usesInlineMarkdownForPlainMultilineText() {
+		let text = "first line\nsecond line"
+
+		#expect(MessageMarkdownRenderer.usesInlineMarkdown(for: text, role: .assistant))
+	}
+
+	@Test
+	func preservesPlainMultilineLineBreaksInRenderedMarkdown() {
+		let text = "first line\nsecond line"
+
+		#expect(
+			MessageMarkdownRenderer.markdown(for: text, role: .assistant)
+				== "first line  \nsecond line"
+		)
+	}
+
+	@Test
+	func preservesBlankLinesBetweenParagraphsInRenderedMarkdown() {
+		let text = "first paragraph\n\nsecond paragraph"
+
+		#expect(
+			MessageMarkdownRenderer.markdown(for: text, role: .assistant)
+				== text
+		)
+	}
+
+	@Test
+	func usesBlockMarkdownForLists() {
+		let text = "1. one\n2. two"
+
+		#expect(!MessageMarkdownRenderer.usesInlineMarkdown(for: text, role: .assistant))
 	}
 }

@@ -24,8 +24,15 @@ struct PiSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiab
 	var lastMessage: String?
 	var lastMessageAt: Date?
 	var lastMessageRole: String?
+	var lastReadMessageAt: Date? = nil
 	var startedAt: Date
 	var lastSeenAt: Date
+
+	var isUnread: Bool {
+		guard let lastMessageAt else { return false }
+		guard let lastReadMessageAt else { return true }
+		return lastReadMessageAt < lastMessageAt
+	}
 
 	mutating func didInsert(_ inserted: InsertionSuccess) {
 		id = inserted.rowID

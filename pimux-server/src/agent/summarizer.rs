@@ -1,16 +1,21 @@
-use std::{collections::HashMap, io, path::PathBuf};
-
-use tokio::{
-    process::Command,
-    time::{Duration, timeout},
+use std::{
+    collections::HashMap,
+    env, fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
 };
+
+use serde::{Deserialize, Serialize};
+use tokio::{process::Command, sync::Semaphore, task::JoinSet};
 
 use crate::session::ActiveSession;
 
 use super::discovery::{DiscoveredSession, SessionFingerprint};
 
 pub const DEFAULT_SUMMARY_MODEL: &str = "anthropic/claude-haiku-4-5";
-const SUMMARY_TIMEOUT: Duration = Duration::from_secs(20);
+const SUMMARY_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+const SUMMARY_LLM_CONCURRENCY: usize = 4;
 const MAX_LLM_SUMMARY_LEN: usize = 80;
 
 #[derive(Debug, Clone)]
@@ -21,22 +26,220 @@ pub struct Config {
 
 pub struct SummaryCache {
     entries: HashMap<PathBuf, CachedSummary>,
-    llm_disabled: bool,
+    recent_failures: HashMap<PathBuf, FailedSummaryAttempt>,
+    dirty: bool,
 }
 
 impl Default for SummaryCache {
     fn default() -> Self {
         Self {
             entries: HashMap::new(),
-            llm_disabled: false,
+            recent_failures: HashMap::new(),
+            dirty: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedSummary {
+    fingerprint: SessionFingerprint,
+    summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummarySource {
+    Explicit,
+    Cached,
+    Pi,
+    CachedAfterError,
+    HeuristicAfterError,
+    Heuristic,
+}
+
+impl SummarySource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Cached => "cached",
+            Self::Pi => "llm",
+            Self::CachedAfterError => "cached-after-error",
+            Self::HeuristicAfterError => "heuristic-after-error",
+            Self::Heuristic => "heuristic",
         }
     }
 }
 
 #[derive(Debug, Clone)]
-struct CachedSummary {
+struct FailedSummaryAttempt {
+    fingerprint: SessionFingerprint,
+    retry_after: Instant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PersistedSummaryCache {
+    entries: Vec<PersistedSummaryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedSummaryEntry {
+    session_file: PathBuf,
     fingerprint: SessionFingerprint,
     summary: String,
+}
+
+struct PendingSummaryTask {
+    index: usize,
+    total: usize,
+    discovered_session: DiscoveredSession,
+    summary_input: String,
+}
+
+struct CompletedSummaryTask {
+    index: usize,
+    total: usize,
+    discovered_session: DiscoveredSession,
+    result: Result<String, SummaryError>,
+    elapsed: Duration,
+}
+
+impl SummaryCache {
+    pub fn load(pi_agent_dir: &Path) -> Self {
+        let cache_path = cache_path(pi_agent_dir);
+        let contents = match fs::read_to_string(&cache_path) {
+            Ok(contents) => contents,
+            Err(_) => return Self::default(),
+        };
+
+        let persisted = match serde_json::from_str::<PersistedSummaryCache>(&contents) {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                eprintln!(
+                    "failed to parse summary cache {}: {error}",
+                    cache_path.display()
+                );
+                return Self::default();
+            }
+        };
+
+        let entries = persisted
+            .entries
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.session_file,
+                    CachedSummary {
+                        fingerprint: entry.fingerprint,
+                        summary: entry.summary,
+                    },
+                )
+            })
+            .collect();
+
+        Self {
+            entries,
+            recent_failures: HashMap::new(),
+            dirty: false,
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    fn clear_failure(&mut self, session_file: &Path) {
+        self.recent_failures.remove(session_file);
+    }
+
+    fn record_failure(&mut self, session_file: &Path, fingerprint: SessionFingerprint) {
+        self.recent_failures.insert(
+            session_file.to_path_buf(),
+            FailedSummaryAttempt {
+                fingerprint,
+                retry_after: Instant::now() + SUMMARY_RETRY_BACKOFF,
+            },
+        );
+    }
+
+    fn should_skip_retry(&self, session_file: &Path, fingerprint: &SessionFingerprint) -> bool {
+        self.recent_failures
+            .get(session_file)
+            .map(|failure| {
+                &failure.fingerprint == fingerprint && Instant::now() < failure.retry_after
+            })
+            .unwrap_or(false)
+    }
+
+    fn persisted_summary_for(&self, session_file: &Path) -> Option<String> {
+        self.entries
+            .get(session_file)
+            .map(|entry| entry.summary.clone())
+    }
+
+    fn successful_summary_for(
+        &self,
+        session_file: &Path,
+        fingerprint: &SessionFingerprint,
+    ) -> Option<String> {
+        self.entries
+            .get(session_file)
+            .and_then(|entry| (&entry.fingerprint == fingerprint).then(|| entry.summary.clone()))
+    }
+
+    fn store_success(
+        &mut self,
+        session_file: PathBuf,
+        fingerprint: SessionFingerprint,
+        summary: String,
+    ) {
+        self.entries.insert(
+            session_file.clone(),
+            CachedSummary {
+                fingerprint,
+                summary,
+            },
+        );
+        self.clear_failure(&session_file);
+        self.mark_dirty();
+    }
+
+    fn persist_best_effort(&mut self, pi_agent_dir: &Path) {
+        if !self.dirty {
+            return;
+        }
+
+        if let Err(error) = self.persist(pi_agent_dir) {
+            eprintln!(
+                "failed to persist summary cache {}: {error}",
+                cache_path(pi_agent_dir).display()
+            );
+        }
+    }
+
+    fn persist(
+        &mut self,
+        pi_agent_dir: &Path,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let cache_path = cache_path(pi_agent_dir);
+        if let Some(parent) = cache_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let persisted = PersistedSummaryCache {
+            entries: self
+                .entries
+                .iter()
+                .map(|(session_file, entry)| PersistedSummaryEntry {
+                    session_file: session_file.clone(),
+                    fingerprint: entry.fingerprint.clone(),
+                    summary: entry.summary.clone(),
+                })
+                .collect(),
+        };
+
+        fs::write(&cache_path, serde_json::to_vec_pretty(&persisted)?)?;
+        self.dirty = false;
+        Ok(())
+    }
 }
 
 pub async fn apply_summaries(
@@ -44,64 +247,198 @@ pub async fn apply_summaries(
     config: &Config,
     cache: &mut SummaryCache,
 ) -> Vec<ActiveSession> {
-    let mut sessions = Vec::with_capacity(discovered_sessions.len());
-
-    for discovered_session in discovered_sessions {
-        let summary = resolve_summary(&discovered_session, config, cache).await;
-        sessions.push(discovered_session.into_active_session(summary));
-    }
-
-    sessions
+    apply_summaries_inner(discovered_sessions, config, cache, false).await
 }
 
-async fn resolve_summary(
-    discovered_session: &DiscoveredSession,
+pub async fn apply_summaries_with_stderr_progress(
+    discovered_sessions: Vec<DiscoveredSession>,
     config: &Config,
     cache: &mut SummaryCache,
-) -> String {
-    if let Some(explicit_summary) = discovered_session.explicit_summary.as_deref() {
-        return normalize_existing_summary(explicit_summary)
-            .unwrap_or_else(|| discovered_session.heuristic_summary.clone());
+) -> Vec<ActiveSession> {
+    apply_summaries_inner(discovered_sessions, config, cache, true).await
+}
+
+async fn apply_summaries_inner(
+    discovered_sessions: Vec<DiscoveredSession>,
+    config: &Config,
+    cache: &mut SummaryCache,
+    stderr_progress: bool,
+) -> Vec<ActiveSession> {
+    let total = discovered_sessions.len();
+    if stderr_progress {
+        eprintln!(
+            "resolving summaries for {total} session{} using {}...",
+            if total == 1 { "" } else { "s" },
+            config.model,
+        );
     }
 
-    if let Some(cached_summary) = cache.entries.get(&discovered_session.session_file) {
-        if cached_summary.fingerprint == discovered_session.fingerprint {
-            return cached_summary.summary.clone();
-        }
-    }
+    let mut sessions = vec![None; total];
+    let mut pending_tasks = Vec::new();
 
-    let summary = if cache.llm_disabled {
-        discovered_session.heuristic_summary.clone()
-    } else if let Some(summary_input) = discovered_session.summary_input.as_deref() {
-        match summarize_via_pi(discovered_session, summary_input, config).await {
-            Ok(summary) => summary,
-            Err(SummaryError::PiUnavailable(error) | SummaryError::Configuration(error)) => {
-                cache.llm_disabled = true;
-                eprintln!("disabling llm summaries for this run: {error}");
-                discovered_session.heuristic_summary.clone()
-            }
-            Err(SummaryError::Invocation(error)) => {
+    for (index, discovered_session) in discovered_sessions.into_iter().enumerate() {
+        if let Some((summary, source)) = resolve_summary_without_llm(&discovered_session, cache) {
+            if stderr_progress {
                 eprintln!(
-                    "llm summary failed for session {} ({}): {error}",
-                    discovered_session.id,
-                    discovered_session.session_file.display(),
+                    "[{}/{}] done in 0.0s via {}: {}",
+                    index + 1,
+                    total,
+                    source.label(),
+                    summary,
                 );
-                discovered_session.heuristic_summary.clone()
             }
+            sessions[index] = Some(discovered_session.into_active_session(summary));
+            continue;
         }
-    } else {
-        discovered_session.heuristic_summary.clone()
-    };
 
-    cache.entries.insert(
-        discovered_session.session_file.clone(),
-        CachedSummary {
-            fingerprint: discovered_session.fingerprint.clone(),
-            summary: summary.clone(),
-        },
-    );
+        let summary_input = discovered_session
+            .summary_input
+            .clone()
+            .expect("missing summary input for llm summary task");
 
-    summary
+        if stderr_progress {
+            eprintln!(
+                "[{}/{}] summarizing {} ({})",
+                index + 1,
+                total,
+                discovered_session.id,
+                discovered_session.cwd,
+            );
+        }
+
+        pending_tasks.push(PendingSummaryTask {
+            index,
+            total,
+            discovered_session,
+            summary_input,
+        });
+    }
+
+    if stderr_progress {
+        let immediate = total.saturating_sub(pending_tasks.len());
+        eprintln!(
+            "{} session{} ready immediately; {} require llm summaries (parallelism = {})",
+            immediate,
+            if immediate == 1 { "" } else { "s" },
+            pending_tasks.len(),
+            SUMMARY_LLM_CONCURRENCY.min(pending_tasks.len().max(1)),
+        );
+    }
+
+    let semaphore = Arc::new(Semaphore::new(SUMMARY_LLM_CONCURRENCY.max(1)));
+    let mut join_set = JoinSet::new();
+
+    for task in pending_tasks {
+        let semaphore = semaphore.clone();
+        let config = config.clone();
+        join_set.spawn(async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .expect("summary semaphore was closed unexpectedly");
+            let started_at = Instant::now();
+            let result =
+                summarize_via_pi(&task.discovered_session, &task.summary_input, &config).await;
+            CompletedSummaryTask {
+                index: task.index,
+                total: task.total,
+                discovered_session: task.discovered_session,
+                result,
+                elapsed: started_at.elapsed(),
+            }
+        });
+    }
+
+    while let Some(joined) = join_set.join_next().await {
+        let task = joined.expect("summary task panicked unexpectedly");
+        let (summary, source) = match task.result {
+            Ok(summary) => {
+                cache.store_success(
+                    task.discovered_session.session_file.clone(),
+                    task.discovered_session.fingerprint.clone(),
+                    summary.clone(),
+                );
+                (summary, SummarySource::Pi)
+            }
+            Err(error) => {
+                cache.record_failure(
+                    &task.discovered_session.session_file,
+                    task.discovered_session.fingerprint.clone(),
+                );
+                log_summary_error(&task.discovered_session, &error);
+                match cache.persisted_summary_for(&task.discovered_session.session_file) {
+                    Some(summary) => (summary, SummarySource::CachedAfterError),
+                    None => (
+                        task.discovered_session.heuristic_summary.clone(),
+                        SummarySource::HeuristicAfterError,
+                    ),
+                }
+            }
+        };
+
+        if stderr_progress {
+            eprintln!(
+                "[{}/{}] done in {:.1}s via {}: {}",
+                task.index + 1,
+                task.total,
+                task.elapsed.as_secs_f32(),
+                source.label(),
+                summary,
+            );
+        }
+
+        sessions[task.index] = Some(task.discovered_session.into_active_session(summary));
+    }
+
+    cache.persist_best_effort(&config.pi_agent_dir);
+    sessions
+        .into_iter()
+        .map(|session| session.expect("missing summary result"))
+        .collect()
+}
+
+fn resolve_summary_without_llm(
+    discovered_session: &DiscoveredSession,
+    cache: &SummaryCache,
+) -> Option<(String, SummarySource)> {
+    if let Some(explicit_summary) = discovered_session.explicit_summary.as_deref() {
+        return Some((
+            normalize_existing_summary(explicit_summary)
+                .unwrap_or_else(|| discovered_session.heuristic_summary.clone()),
+            SummarySource::Explicit,
+        ));
+    }
+
+    if let Some(summary) = cache.successful_summary_for(
+        &discovered_session.session_file,
+        &discovered_session.fingerprint,
+    ) {
+        return Some((summary, SummarySource::Cached));
+    }
+
+    if cache.should_skip_retry(
+        &discovered_session.session_file,
+        &discovered_session.fingerprint,
+    ) {
+        return Some(
+            match cache.persisted_summary_for(&discovered_session.session_file) {
+                Some(summary) => (summary, SummarySource::CachedAfterError),
+                None => (
+                    discovered_session.heuristic_summary.clone(),
+                    SummarySource::HeuristicAfterError,
+                ),
+            },
+        );
+    }
+
+    if discovered_session.summary_input.is_none() {
+        return Some((
+            discovered_session.heuristic_summary.clone(),
+            SummarySource::Heuristic,
+        ));
+    }
+
+    None
 }
 
 async fn summarize_via_pi(
@@ -110,6 +447,7 @@ async fn summarize_via_pi(
     config: &Config,
 ) -> Result<String, SummaryError> {
     let prompt = build_summary_prompt(discovered_session, summary_input);
+    trace_summary_prompt(discovered_session, config, &prompt);
     let mut command = Command::new("pi");
     command
         .arg("-p")
@@ -121,13 +459,10 @@ async fn summarize_via_pi(
         .arg(prompt)
         .env("PI_SKIP_VERSION_CHECK", "1")
         .env("PI_CODING_AGENT_DIR", &config.pi_agent_dir)
-        .current_dir(&config.pi_agent_dir)
+        .current_dir(summary_working_dir(discovered_session, config))
         .kill_on_drop(true);
 
-    let output = timeout(SUMMARY_TIMEOUT, command.output())
-        .await
-        .map_err(|_| SummaryError::Invocation("timed out waiting for pi summary".to_string()))
-        .and_then(|result| result.map_err(SummaryError::from_io))?;
+    let output = command.output().await.map_err(SummaryError::from_io)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -147,6 +482,78 @@ async fn summarize_via_pi(
         .ok_or_else(|| SummaryError::Invocation("pi returned an empty summary".to_string()))?;
 
     Ok(summary)
+}
+
+fn log_summary_error(discovered_session: &DiscoveredSession, error: &SummaryError) {
+    eprintln!(
+        "llm summary failed for session {} ({}): {}",
+        discovered_session.id,
+        discovered_session.session_file.display(),
+        error.message(),
+    );
+}
+
+fn trace_summary_prompt(discovered_session: &DiscoveredSession, config: &Config, prompt: &str) {
+    if !trace_logging_enabled() {
+        return;
+    }
+
+    let command_preview = summary_command_preview(discovered_session, config, prompt);
+    eprintln!(
+        concat!(
+            "trace: llm summary prompt for session {} ({}) using {}\n",
+            "----- prompt begin -----\n",
+            "{}\n",
+            "----- prompt end -----\n",
+            "trace: run manually with:\n",
+            "{}"
+        ),
+        discovered_session.id,
+        discovered_session.session_file.display(),
+        config.model,
+        prompt,
+        command_preview,
+    );
+}
+
+fn summary_command_preview(
+    discovered_session: &DiscoveredSession,
+    config: &Config,
+    prompt: &str,
+) -> String {
+    let working_dir = summary_working_dir(discovered_session, config);
+    format!(
+        "( cd {} && PI_SKIP_VERSION_CHECK=1 PI_CODING_AGENT_DIR={} pi -p --no-session --thinking off --model {} {} )",
+        shell_escape(&working_dir.display().to_string()),
+        shell_escape(&config.pi_agent_dir.display().to_string()),
+        shell_escape(&config.model),
+        shell_escape(prompt),
+    )
+}
+
+fn summary_working_dir(discovered_session: &DiscoveredSession, config: &Config) -> PathBuf {
+    let cwd = PathBuf::from(&discovered_session.cwd);
+    if cwd.exists() {
+        cwd
+    } else {
+        config.pi_agent_dir.clone()
+    }
+}
+
+fn shell_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn trace_logging_enabled() -> bool {
+    env::var("RUST_LOG")
+        .ok()
+        .map(|value| {
+            value.split(',').any(|directive| {
+                let directive = directive.trim().to_ascii_lowercase();
+                directive == "trace" || directive.ends_with("=trace")
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn build_summary_prompt(discovered_session: &DiscoveredSession, summary_input: &str) -> String {
@@ -215,6 +622,10 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     format!("{truncated}…")
 }
 
+fn cache_path(pi_agent_dir: &Path) -> PathBuf {
+    pi_agent_dir.join("pimux").join("summary-cache.json")
+}
+
 enum SummaryError {
     PiUnavailable(String),
     Configuration(String),
@@ -222,11 +633,45 @@ enum SummaryError {
 }
 
 impl SummaryError {
+    fn message(&self) -> &str {
+        match self {
+            Self::PiUnavailable(message)
+            | Self::Configuration(message)
+            | Self::Invocation(message) => message,
+        }
+    }
+
     fn from_io(error: io::Error) -> Self {
         if error.kind() == io::ErrorKind::NotFound {
             return Self::PiUnavailable("`pi` was not found in PATH".to_string());
         }
 
         Self::Invocation(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_llm_summary() {
+        assert_eq!(
+            normalize_llm_summary("\n- \"Ship iOS transcript polling.\"\n\n"),
+            Some("Ship iOS transcript polling".to_string())
+        );
+    }
+
+    #[test]
+    fn skips_recent_retry_for_same_fingerprint() {
+        let mut cache = SummaryCache::default();
+        let fingerprint = SessionFingerprint {
+            file_size: 1,
+            modified_at_millis: 2,
+        };
+        let session_file = PathBuf::from("/tmp/session.jsonl");
+        cache.record_failure(&session_file, fingerprint.clone());
+
+        assert!(cache.should_skip_retry(&session_file, &fingerprint));
     }
 }

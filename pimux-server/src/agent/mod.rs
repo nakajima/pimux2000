@@ -1,6 +1,9 @@
+mod connection;
 mod discovery;
 mod extension;
 mod live;
+mod send;
+mod service;
 mod summarizer;
 mod transcript;
 
@@ -13,22 +16,20 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use reqwest::{Client, Url};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, unbounded_channel},
-    time::{Duration, interval, timeout},
+    time::{Duration, timeout},
 };
 
 use crate::{
+    channel::{AgentToServerMessage, ServerToAgentMessage},
     host::{HostAuth, HostIdentity},
-    report::ReportPayload,
-    transcript::{
-        PendingTranscriptRequestsResponse, SessionMessagesBatchReport, SessionMessagesResponse,
-        TranscriptFetchFulfillment, TranscriptFetchQuery,
-    },
+    report::{ReportPayload, VersionResponse},
+    session::{parse_local_date_filter, utc_range_for_local_date},
+    transcript::{SessionMessagesResponse, TranscriptFetchFulfillment},
 };
 
 pub use summarizer::DEFAULT_SUMMARY_MODEL;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
-const FETCH_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct Config {
     pub server_url: String,
@@ -38,36 +39,123 @@ pub struct Config {
     pub summary_model: String,
 }
 
+#[derive(Debug)]
+pub struct NormalizedServerUrl {
+    pub url: String,
+    pub inferred_http: bool,
+}
+
 pub struct ListConfig {
     pub pi_agent_dir: Option<PathBuf>,
     pub summary_model: String,
+    pub date: Option<String>,
 }
 
 pub fn install_extension(pi_agent_dir: Option<PathBuf>, force: bool) -> Result<PathBuf, BoxError> {
     extension::install(pi_agent_dir, force)
 }
 
+pub fn install_service(config: Config) -> Result<service::InstallResult, BoxError> {
+    service::install(config)
+}
+
+pub fn uninstall_service() -> Result<service::UninstallResult, BoxError> {
+    service::uninstall()
+}
+
+pub fn service_status(pi_agent_dir: Option<PathBuf>) -> Result<String, BoxError> {
+    service::status(pi_agent_dir)
+}
+
+pub fn service_logs(lines: usize, follow: bool) -> Result<(), BoxError> {
+    service::logs(lines, follow)
+}
+
+pub fn restart_service_if_installed() -> Result<Option<&'static str>, BoxError> {
+    service::restart_if_installed()
+}
+
+pub fn normalize_server_url(server_url: &str) -> Result<NormalizedServerUrl, BoxError> {
+    let trimmed = server_url.trim();
+    if trimmed.is_empty() {
+        return Err("server URL must not be empty".into());
+    }
+
+    let inferred_http = !trimmed.contains("://");
+    let candidate = if inferred_http {
+        format!("http://{trimmed}")
+    } else {
+        trimmed.to_string()
+    };
+
+    let parsed = Url::parse(&candidate).map_err(|error| {
+        format!("invalid server URL `{trimmed}`: {error}. Example: http://localhost:3000")
+    })?;
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!(
+            "unsupported server URL scheme `{}` in `{trimmed}`; use http:// or https://",
+            parsed.scheme()
+        )
+        .into());
+    }
+
+    Ok(NormalizedServerUrl {
+        url: candidate,
+        inferred_http,
+    })
+}
+
 pub async fn list(config: ListConfig) -> Result<(), BoxError> {
     let pi_agent_dir = discovery::resolve_pi_agent_dir(config.pi_agent_dir)?;
+    eprintln!("discovering sessions in {}...", pi_agent_dir.display());
+
     let summary_config = summarizer::Config {
         model: config.summary_model,
         pi_agent_dir: pi_agent_dir.clone(),
     };
-    let mut summary_cache = summarizer::SummaryCache::default();
+    let mut summary_cache = summarizer::SummaryCache::load(&pi_agent_dir);
     let discovered_sessions = discovery::discover_sessions(&pi_agent_dir)?;
-    let sessions =
-        summarizer::apply_summaries(discovered_sessions, &summary_config, &mut summary_cache).await;
+    eprintln!(
+        "discovered {} sessions before filtering",
+        discovered_sessions.len()
+    );
 
-    println!("id\tcreated_at\tlast_activity\tmodel\tcwd\tsummary");
+    let filter_label = config.date.clone();
+    let discovered_sessions = filter_discovered_sessions_by_date(discovered_sessions, config.date)?;
+    if let Some(date) = filter_label {
+        eprintln!(
+            "filtered to {} session{} for local date {}",
+            discovered_sessions.len(),
+            if discovered_sessions.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            date,
+        );
+    }
+
+    let sessions = summarizer::apply_summaries_with_stderr_progress(
+        discovered_sessions,
+        &summary_config,
+        &mut summary_cache,
+    )
+    .await;
+
+    eprintln!(
+        "rendering {} session{}",
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" }
+    );
+    println!("id\tupdated_at\tcreated_at\tlast_activity\tmodel\tcwd\tsummary");
     for session in sessions {
-        let last_activity = session
-            .last_user_message_at
-            .max(session.last_assistant_message_at);
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             session.id,
+            session.updated_at.to_rfc3339(),
             session.created_at.to_rfc3339(),
-            last_activity.to_rfc3339(),
+            session.last_activity_at().to_rfc3339(),
             session.model,
             session.cwd,
             session.summary,
@@ -75,6 +163,23 @@ pub async fn list(config: ListConfig) -> Result<(), BoxError> {
     }
 
     Ok(())
+}
+
+fn filter_discovered_sessions_by_date(
+    sessions: Vec<discovery::DiscoveredSession>,
+    date: Option<String>,
+) -> Result<Vec<discovery::DiscoveredSession>, BoxError> {
+    let Some(date) = date else {
+        return Ok(sessions);
+    };
+
+    let date = parse_local_date_filter(&date)?;
+    let (start, end) = utc_range_for_local_date(date)?;
+
+    Ok(sessions
+        .into_iter()
+        .filter(|session| session.updated_at >= start && session.updated_at < end)
+        .collect())
 }
 
 pub async fn start(config: Config) -> Result<(), BoxError> {
@@ -91,23 +196,47 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
         },
         auth: config.auth,
     };
-    let report_url = build_server_url(&config.server_url, "/report")?;
-    let transcript_report_url = build_server_url(&config.server_url, "/agent/session-messages")?;
-    let pending_fetch_url =
-        build_server_url(&config.server_url, "/agent/session-messages/pending")?;
-    let fetch_response_url =
-        build_server_url(&config.server_url, "/agent/session-messages/fetch-response")?;
+    let health_url = build_server_url(&config.server_url, "/health")?;
+    let version_url = build_server_url(&config.server_url, "/version")?;
+    let websocket_url = build_websocket_url(&config.server_url, "/agent/connect")?;
     let client = Client::new();
+    ensure_server_reachable(&client, &config.server_url, &health_url, &version_url).await?;
     let live_store = live::LiveSessionStoreHandle::new(
         live::DEFAULT_DETACHED_CAPACITY,
         live::DEFAULT_DETACHED_TTL,
     );
     let live_socket_path = live::socket_path(&pi_agent_dir);
 
+    match extension::ensure_current(&pi_agent_dir) {
+        Ok(result) => match result.status {
+            extension::SyncStatus::AlreadyCurrent => {
+                println!(
+                    "pimux live extension is current at {}",
+                    result.path.display()
+                );
+            }
+            extension::SyncStatus::Installed => {
+                println!(
+                    "installed bundled pimux live extension to {}",
+                    result.path.display()
+                );
+            }
+            extension::SyncStatus::Updated => {
+                eprintln!(
+                    "updated bundled pimux live extension at {}; newly started pi sessions will pick it up, but already-running pi sessions may still be using older loaded extension code",
+                    result.path.display()
+                );
+            }
+        },
+        Err(error) => {
+            eprintln!("failed to sync bundled pimux live extension at startup: {error}");
+        }
+    }
+
     println!(
-        "agent watching {} and reporting to {} as {}",
+        "agent watching {} and connecting to {} as {}",
         session_root.display(),
-        report_url,
+        websocket_url,
         host.location
     );
 
@@ -127,42 +256,28 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
         }
         Err(error) => {
             eprintln!("live ipc disabled: {error}");
-            Some(live_updates_tx)
+            Some(live_updates_tx.clone())
         }
     };
-    let mut last_report = None;
-    let mut last_transcript_report = None;
-    let mut summary_cache = summarizer::SummaryCache::default();
-    let mut fetch_poll = interval(FETCH_POLL_INTERVAL);
 
-    if let Err(error) = publish_if_changed(
-        &client,
-        &report_url,
-        &transcript_report_url,
+    let (connection_events_tx, mut connection_events_rx) = unbounded_channel();
+    let channel_tx = connection::start(websocket_url.clone(), host.clone(), connection_events_tx);
+    let mut connected = false;
+    let mut last_report: Option<ReportPayload> = None;
+    let mut summary_cache = summarizer::SummaryCache::load(&pi_agent_dir);
+
+    if let Err(error) = refresh_host_snapshot(
         &pi_agent_dir,
         &summary_config,
         &host,
-        &live_store,
         &mut summary_cache,
         &mut last_report,
-        &mut last_transcript_report,
+        false,
+        &channel_tx,
     )
     .await
     {
-        eprintln!("initial report failed: {error}");
-    }
-
-    if let Err(error) = handle_pending_fetches(
-        &client,
-        &pending_fetch_url,
-        &fetch_response_url,
-        &pi_agent_dir,
-        &host,
-        &live_store,
-    )
-    .await
-    {
-        eprintln!("initial fetch poll failed: {error}");
+        eprintln!("initial snapshot build failed: {error}");
     }
 
     loop {
@@ -171,27 +286,49 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                 println!("agent shutting down");
                 break;
             }
-            _ = fetch_poll.tick() => {
-                if let Err(error) = handle_pending_fetches(
-                    &client,
-                    &pending_fetch_url,
-                    &fetch_response_url,
-                    &pi_agent_dir,
-                    &host,
-                    &live_store,
-                ).await {
-                    eprintln!("fetch poll failed: {error}");
+            connection_event = connection_events_rx.recv() => {
+                let Some(connection_event) = connection_event else {
+                    break;
+                };
+
+                match connection_event {
+                    connection::Event::Connected => {
+                        connected = true;
+                        println!("connected to server websocket");
+                        if let Err(error) = send_current_state(
+                            &pi_agent_dir,
+                            &summary_config,
+                            &host,
+                            &live_store,
+                            &mut summary_cache,
+                            &mut last_report,
+                            &channel_tx,
+                        ).await {
+                            eprintln!("failed to publish current state after connect: {error}");
+                        }
+                    }
+                    connection::Event::Disconnected => {
+                        connected = false;
+                        eprintln!("server websocket disconnected; waiting to reconnect...");
+                    }
+                    connection::Event::Message(message) => {
+                        if let Err(error) = handle_server_message(
+                            message,
+                            &pi_agent_dir,
+                            &host,
+                            &live_store,
+                            &live_updates_tx,
+                            &channel_tx,
+                        ).await {
+                            eprintln!("failed to handle server message: {error}");
+                        }
+                    }
                 }
             }
             live_update = live_updates_rx.recv() => {
                 if let Some(snapshot) = live_update {
-                    if let Err(error) = publish_live_snapshot(
-                        &client,
-                        &transcript_report_url,
-                        &host,
-                        snapshot,
-                    ).await {
-                        eprintln!("live snapshot push failed: {error}");
+                    if connected {
+                        let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate { session: snapshot });
                     }
                 }
             }
@@ -201,19 +338,16 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                 }
 
                 debounce_changes(&mut rx).await;
-                if let Err(error) = publish_if_changed(
-                    &client,
-                    &report_url,
-                    &transcript_report_url,
+                if let Err(error) = refresh_host_snapshot(
                     &pi_agent_dir,
                     &summary_config,
                     &host,
-                    &live_store,
                     &mut summary_cache,
                     &mut last_report,
-                    &mut last_transcript_report,
+                    connected,
+                    &channel_tx,
                 ).await {
-                    eprintln!("report failed: {error}");
+                    eprintln!("failed to refresh host snapshot: {error}");
                 }
             }
         }
@@ -222,155 +356,196 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     Ok(())
 }
 
-async fn publish_if_changed(
-    client: &Client,
-    report_url: &Url,
-    transcript_report_url: &Url,
+async fn send_current_state(
     pi_agent_dir: &Path,
     summary_config: &summarizer::Config,
     host: &HostIdentity,
     live_store: &live::LiveSessionStoreHandle,
     summary_cache: &mut summarizer::SummaryCache,
     last_report: &mut Option<ReportPayload>,
-    last_transcript_report: &mut Option<SessionMessagesBatchReport>,
+    channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
+) -> Result<(), BoxError> {
+    refresh_host_snapshot(
+        pi_agent_dir,
+        summary_config,
+        host,
+        summary_cache,
+        last_report,
+        true,
+        channel_tx,
+    )
+    .await?;
+
+    for snapshot in live_store.all_snapshots().await.into_values() {
+        let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate { session: snapshot });
+    }
+
+    Ok(())
+}
+
+async fn refresh_host_snapshot(
+    pi_agent_dir: &Path,
+    summary_config: &summarizer::Config,
+    host: &HostIdentity,
+    summary_cache: &mut summarizer::SummaryCache,
+    last_report: &mut Option<ReportPayload>,
+    force_send: bool,
+    channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
 ) -> Result<(), BoxError> {
     let discovered_sessions = discovery::discover_sessions(pi_agent_dir)?;
     let active_sessions =
-        summarizer::apply_summaries(discovered_sessions.clone(), summary_config, summary_cache)
-            .await;
+        summarizer::apply_summaries(discovered_sessions, summary_config, summary_cache).await;
     let report = ReportPayload {
         host: host.clone(),
         active_sessions,
     };
 
-    if last_report.as_ref() != Some(&report) {
-        send_json(client, report_url, &report).await?;
-        println!("reported {} sessions", report.active_sessions.len());
-        *last_report = Some(report);
+    let changed = last_report.as_ref() != Some(&report);
+    if changed {
+        *last_report = Some(report.clone());
     }
 
-    let live_overrides = live_store.all_snapshots().await;
-    let transcript_report = transcript::build_recent_transcript_report(
-        &host.location,
-        &discovered_sessions,
-        &live_overrides,
-    )?;
-    if last_transcript_report.as_ref() != Some(&transcript_report) {
-        send_json(client, transcript_report_url, &transcript_report).await?;
-        println!(
-            "reported {} cached transcript snapshots",
-            transcript_report.sessions.len()
-        );
-        *last_transcript_report = Some(transcript_report);
+    if changed || force_send {
+        let _ = channel_tx.send(AgentToServerMessage::HostSnapshot {
+            sessions: report.active_sessions.clone(),
+        });
+        println!("reported {} sessions", report.active_sessions.len());
     }
 
     Ok(())
 }
 
-async fn publish_live_snapshot(
-    client: &Client,
-    transcript_report_url: &Url,
-    host: &HostIdentity,
-    snapshot: SessionMessagesResponse,
-) -> Result<(), BoxError> {
-    let report = SessionMessagesBatchReport {
-        host_location: host.location.clone(),
-        sessions: vec![snapshot],
-    };
-    send_json(client, transcript_report_url, &report).await
-}
-
-async fn handle_pending_fetches(
-    client: &Client,
-    pending_fetch_url: &Url,
-    fetch_response_url: &Url,
+async fn handle_server_message(
+    message: ServerToAgentMessage,
     pi_agent_dir: &Path,
     host: &HostIdentity,
     live_store: &live::LiveSessionStoreHandle,
+    live_updates_tx: &tokio::sync::mpsc::UnboundedSender<SessionMessagesResponse>,
+    channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
 ) -> Result<(), BoxError> {
-    let response = client
-        .get(pending_fetch_url.clone())
-        .query(&TranscriptFetchQuery {
-            host_location: host.location.clone(),
-        })
-        .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("server returned {status}: {body}").into());
-    }
-
-    let pending = response.json::<PendingTranscriptRequestsResponse>().await?;
-    if pending.requests.is_empty() {
-        return Ok(());
-    }
-
-    let discovered_sessions = discovery::discover_sessions(pi_agent_dir)?;
-    for request in pending.requests {
-        let fulfillment =
-            if let Some(session) = live_store.snapshot_for_session(&request.session_id).await {
-                TranscriptFetchFulfillment {
-                    request_id: request.request_id,
-                    host_location: host.location.clone(),
-                    session: Some(session),
-                    error: None,
-                }
-            } else {
-                match discovered_sessions
-                    .iter()
-                    .find(|session| session.id == request.session_id)
-                {
-                    Some(discovered_session) => {
-                        match transcript::build_persisted_snapshot(discovered_session) {
-                            Ok(session) => TranscriptFetchFulfillment {
-                                request_id: request.request_id,
-                                host_location: host.location.clone(),
-                                session: Some(session),
-                                error: None,
-                            },
-                            Err(error) => TranscriptFetchFulfillment {
-                                request_id: request.request_id,
-                                host_location: host.location.clone(),
-                                session: None,
-                                error: Some(format!(
-                                    "failed to reconstruct transcript for session {}: {error}",
-                                    request.session_id
-                                )),
-                            },
-                        }
-                    }
-                    None => TranscriptFetchFulfillment {
-                        request_id: request.request_id,
-                        host_location: host.location.clone(),
-                        session: None,
-                        error: Some(format!(
-                            "session {} was not found on host {}",
-                            request.session_id, host.location
-                        )),
-                    },
-                }
-            };
-
-        send_json(client, fetch_response_url, &fulfillment).await?;
+    match message {
+        ServerToAgentMessage::FetchTranscript {
+            request_id,
+            session_id,
+        } => {
+            let fulfillment =
+                build_fetch_fulfillment(request_id, session_id, pi_agent_dir, host, live_store)
+                    .await;
+            let _ = channel_tx.send(AgentToServerMessage::FetchTranscriptResult {
+                request_id: fulfillment.request_id,
+                session: fulfillment.session,
+                error: fulfillment.error,
+            });
+        }
+        ServerToAgentMessage::SendMessage {
+            request_id,
+            session_id,
+            body,
+        } => {
+            let result =
+                handle_send_message(&session_id, body, pi_agent_dir, live_store, live_updates_tx)
+                    .await;
+            let _ = channel_tx.send(AgentToServerMessage::SendMessageResult {
+                request_id,
+                error: result.err(),
+            });
+        }
+        ServerToAgentMessage::Ping => {
+            let _ = channel_tx.send(AgentToServerMessage::Pong);
+        }
+        ServerToAgentMessage::Pong => {}
     }
 
     Ok(())
 }
 
-async fn send_json<T>(client: &Client, url: &Url, payload: &T) -> Result<(), BoxError>
-where
-    T: serde::Serialize + ?Sized,
-{
-    let response = client.post(url.clone()).json(payload).send().await?;
-    if response.status().is_success() {
-        return Ok(());
+async fn build_fetch_fulfillment(
+    request_id: String,
+    session_id: String,
+    pi_agent_dir: &Path,
+    host: &HostIdentity,
+    live_store: &live::LiveSessionStoreHandle,
+) -> TranscriptFetchFulfillment {
+    if let Some(session) = live_store.snapshot_for_session(&session_id).await {
+        return TranscriptFetchFulfillment {
+            request_id,
+            host_location: host.location.clone(),
+            session: Some(session),
+            error: None,
+        };
     }
 
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    Err(format!("server returned {status}: {body}").into())
+    let discovered_sessions = match discovery::discover_sessions(pi_agent_dir) {
+        Ok(discovered_sessions) => discovered_sessions,
+        Err(error) => {
+            return TranscriptFetchFulfillment {
+                request_id,
+                host_location: host.location.clone(),
+                session: None,
+                error: Some(format!("failed to discover sessions: {error}")),
+            };
+        }
+    };
+
+    match discovered_sessions
+        .iter()
+        .find(|session| session.id == session_id)
+    {
+        Some(discovered_session) => {
+            match transcript::build_persisted_snapshot(discovered_session) {
+                Ok(session) => TranscriptFetchFulfillment {
+                    request_id,
+                    host_location: host.location.clone(),
+                    session: Some(session),
+                    error: None,
+                },
+                Err(error) => TranscriptFetchFulfillment {
+                    request_id,
+                    host_location: host.location.clone(),
+                    session: None,
+                    error: Some(format!(
+                        "failed to reconstruct transcript for session {}: {error}",
+                        session_id
+                    )),
+                },
+            }
+        }
+        None => TranscriptFetchFulfillment {
+            request_id,
+            host_location: host.location.clone(),
+            session: None,
+            error: Some(format!(
+                "session {} was not found on host {}",
+                session_id, host.location
+            )),
+        },
+    }
+}
+
+async fn handle_send_message(
+    session_id: &str,
+    body: String,
+    pi_agent_dir: &Path,
+    live_store: &live::LiveSessionStoreHandle,
+    live_updates_tx: &tokio::sync::mpsc::UnboundedSender<SessionMessagesResponse>,
+) -> Result<(), String> {
+    let discovered_sessions =
+        discovery::discover_sessions(pi_agent_dir).map_err(|error| error.to_string())?;
+    let Some(discovered_session) = discovered_sessions
+        .into_iter()
+        .find(|session| session.id == session_id)
+    else {
+        return Err(format!("session {} was not found", session_id));
+    };
+
+    send::send_message_to_session(
+        discovered_session,
+        body,
+        pi_agent_dir.to_path_buf(),
+        live_store.clone(),
+        live_updates_tx.clone(),
+    )
+    .await
 }
 
 fn build_server_url(server_url: &str, path: &str) -> Result<Url, BoxError> {
@@ -379,6 +554,89 @@ fn build_server_url(server_url: &str, path: &str) -> Result<Url, BoxError> {
         server_url.trim_end_matches('/'),
         path
     ))?)
+}
+
+fn build_websocket_url(server_url: &str, path: &str) -> Result<String, BoxError> {
+    let mut url = Url::parse(server_url)?;
+    match url.scheme() {
+        "http" => url
+            .set_scheme("ws")
+            .map_err(|_| "failed to set ws scheme")?,
+        "https" => url
+            .set_scheme("wss")
+            .map_err(|_| "failed to set wss scheme")?,
+        scheme => {
+            return Err(format!(
+                "unsupported server URL scheme `{scheme}`; use http:// or https://"
+            )
+            .into());
+        }
+    }
+    url.set_path(path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url.to_string())
+}
+
+async fn ensure_server_reachable(
+    client: &Client,
+    server_url: &str,
+    health_url: &Url,
+    version_url: &Url,
+) -> Result<(), BoxError> {
+    let response = client
+        .get(health_url.clone())
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "server {server_url} is not reachable at {}: {error}",
+                health_url
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "server {server_url} responded to {} with {status}: {body}",
+            health_url
+        )
+        .into());
+    }
+
+    let response = client
+        .get(version_url.clone())
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "server {server_url} is reachable but {} failed: {error}",
+                version_url
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "server {server_url} is reachable but responded to {} with {status}: {body}",
+            version_url
+        )
+        .into());
+    }
+
+    response
+        .json::<VersionResponse>()
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "server {server_url} is reachable but {} did not return a valid pimux version response: {error}",
+                version_url
+            )
+            .into()
+        })
 }
 
 fn detect_host_location() -> Result<String, BoxError> {
@@ -430,6 +688,74 @@ async fn debounce_changes(rx: &mut UnboundedReceiver<()>) {
         match timeout(Duration::from_millis(250), rx.recv()).await {
             Ok(Some(_)) => continue,
             Ok(None) | Err(_) => break,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration as ChronoDuration, Local, Utc};
+
+    use super::*;
+
+    #[test]
+    fn normalizes_server_url_by_assuming_http() {
+        let normalized = normalize_server_url("localhost:3000").unwrap();
+        assert_eq!(normalized.url, "http://localhost:3000");
+        assert!(normalized.inferred_http);
+    }
+
+    #[test]
+    fn rejects_unsupported_server_url_scheme() {
+        let error = normalize_server_url("ftp://localhost:3000").unwrap_err();
+        assert!(error.to_string().contains("unsupported server URL scheme"));
+    }
+
+    #[test]
+    fn builds_websocket_url_from_http_server() {
+        let url = build_websocket_url("http://localhost:3000", "/agent/connect").unwrap();
+        assert_eq!(url, "ws://localhost:3000/agent/connect");
+    }
+
+    #[test]
+    fn filters_discovered_sessions_by_local_date() {
+        let today = Local::now().date_naive();
+        let (start, _) = utc_range_for_local_date(today).unwrap();
+        let sessions = vec![
+            sample_discovered_session("today", start + ChronoDuration::hours(12)),
+            sample_discovered_session("previous", start - ChronoDuration::hours(12)),
+        ];
+
+        let filtered = filter_discovered_sessions_by_date(
+            sessions,
+            Some(today.format("%Y-%m-%d").to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "today");
+    }
+
+    fn sample_discovered_session(
+        id: &str,
+        updated_at: chrono::DateTime<Utc>,
+    ) -> discovery::DiscoveredSession {
+        discovery::DiscoveredSession {
+            session_file: PathBuf::from(format!("/tmp/{id}.jsonl")),
+            fingerprint: discovery::SessionFingerprint {
+                file_size: 1,
+                modified_at_millis: 1,
+            },
+            id: id.to_string(),
+            explicit_summary: None,
+            heuristic_summary: format!("Summary {id}"),
+            summary_input: Some(format!("User: {id}")),
+            created_at: updated_at - ChronoDuration::minutes(5),
+            updated_at,
+            last_user_message_at: updated_at - ChronoDuration::minutes(4),
+            last_assistant_message_at: updated_at - ChronoDuration::minutes(3),
+            cwd: "/tmp/project".to_string(),
+            model: "anthropic/claude-sonnet-4-5".to_string(),
         }
     }
 }

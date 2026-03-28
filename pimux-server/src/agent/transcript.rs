@@ -8,10 +8,13 @@ use chrono::{DateTime, TimeZone, Utc};
 use serde_json::Value;
 
 use crate::{
-    message::{Message, Role},
+    message::{
+        Message, MessageContentBlock, MessageContentBlockKind, Role, collapse_whitespace,
+        normalized_display_text, truncate_text,
+    },
     transcript::{
-        SessionActivity, SessionMessagesBatchReport, SessionMessagesResponse, TranscriptFreshness,
-        TranscriptFreshnessState, TranscriptSource,
+        SessionActivity, SessionMessagesResponse, TranscriptFreshness, TranscriptFreshnessState,
+        TranscriptSource,
     },
 };
 
@@ -19,38 +22,8 @@ use super::discovery::DiscoveredSession;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-const MAX_CACHED_TRANSCRIPTS: usize = 12;
 const MAX_MESSAGE_BODY_CHARS: usize = 8_000;
 const PERSISTED_WARNING: &str = "This transcript was reconstructed from persisted session state and may not include in-memory live updates.";
-
-pub fn build_recent_transcript_report(
-    host_location: &str,
-    discovered_sessions: &[DiscoveredSession],
-    live_overrides: &HashMap<String, SessionMessagesResponse>,
-) -> Result<SessionMessagesBatchReport, BoxError> {
-    let mut sessions = Vec::new();
-
-    for discovered_session in discovered_sessions.iter().take(MAX_CACHED_TRANSCRIPTS) {
-        if let Some(snapshot) = live_overrides.get(&discovered_session.id) {
-            sessions.push(snapshot.clone());
-            continue;
-        }
-
-        match build_persisted_snapshot(discovered_session) {
-            Ok(snapshot) => sessions.push(snapshot),
-            Err(error) => eprintln!(
-                "skipping transcript snapshot for {} ({}): {error}",
-                discovered_session.id,
-                discovered_session.session_file.display(),
-            ),
-        }
-    }
-
-    Ok(SessionMessagesBatchReport {
-        host_location: host_location.to_string(),
-        sessions,
-    })
-}
 
 pub fn build_persisted_snapshot(
     discovered_session: &DiscoveredSession,
@@ -142,25 +115,30 @@ fn current_branch(
 fn entry_to_message(entry: &Value) -> Option<Message> {
     match entry.get("type").and_then(Value::as_str) {
         Some("message") => nested_message_to_message(entry),
-        Some("custom_message") => Some(Message {
-            created_at: parse_entry_timestamp(entry)?,
-            role: Role::Custom,
-            body: flatten_content(entry.get("content"), false)?,
-        }),
-        Some("branch_summary") => Some(Message {
-            created_at: parse_entry_timestamp(entry)?,
-            role: Role::BranchSummary,
-            body: truncate_body(collapse_whitespace(
-                entry.get("summary").and_then(Value::as_str)?,
-            )),
-        }),
-        Some("compaction") => Some(Message {
-            created_at: parse_entry_timestamp(entry)?,
-            role: Role::CompactionSummary,
-            body: truncate_body(collapse_whitespace(
-                entry.get("summary").and_then(Value::as_str)?,
-            )),
-        }),
+        Some("custom_message") => Message::from_text(
+            parse_entry_timestamp(entry)?,
+            Role::Custom,
+            truncate_text(
+                &flatten_text_content(entry.get("content"))?,
+                MAX_MESSAGE_BODY_CHARS,
+            ),
+        ),
+        Some("branch_summary") => Message::from_text(
+            parse_entry_timestamp(entry)?,
+            Role::BranchSummary,
+            truncate_text(
+                &collapse_whitespace(entry.get("summary").and_then(Value::as_str)?),
+                MAX_MESSAGE_BODY_CHARS,
+            ),
+        ),
+        Some("compaction") => Message::from_text(
+            parse_entry_timestamp(entry)?,
+            Role::CompactionSummary,
+            truncate_text(
+                &collapse_whitespace(entry.get("summary").and_then(Value::as_str)?),
+                MAX_MESSAGE_BODY_CHARS,
+            ),
+        ),
         _ => None,
     }
 }
@@ -178,25 +156,36 @@ fn nested_message_to_message(entry: &Value) -> Option<Message> {
         _ => Role::Other,
     };
     let created_at = parse_message_timestamp(entry, message)?;
-    let body = match role {
-        Role::User | Role::ToolResult | Role::Custom | Role::Other => {
-            flatten_content(message.get("content"), false)?
-        }
-        Role::Assistant => flatten_content(message.get("content"), true)?,
-        Role::BranchSummary => truncate_body(collapse_whitespace(
-            message.get("summary").and_then(Value::as_str)?,
-        )),
-        Role::CompactionSummary => truncate_body(collapse_whitespace(
-            message.get("summary").and_then(Value::as_str)?,
-        )),
-        Role::BashExecution => flatten_bash_execution(message),
-    };
 
-    Some(Message {
-        created_at,
-        role,
-        body,
-    })
+    match role {
+        Role::User | Role::ToolResult | Role::Custom | Role::Other => Message::from_blocks(
+            created_at,
+            role,
+            content_blocks(message.get("content"), false),
+        ),
+        Role::Assistant => Message::from_blocks(
+            created_at,
+            role,
+            content_blocks(message.get("content"), true),
+        ),
+        Role::BranchSummary => Message::from_text(
+            created_at,
+            role,
+            truncate_text(
+                &collapse_whitespace(message.get("summary").and_then(Value::as_str)?),
+                MAX_MESSAGE_BODY_CHARS,
+            ),
+        ),
+        Role::CompactionSummary => Message::from_text(
+            created_at,
+            role,
+            truncate_text(
+                &collapse_whitespace(message.get("summary").and_then(Value::as_str)?),
+                MAX_MESSAGE_BODY_CHARS,
+            ),
+        ),
+        Role::BashExecution => flatten_bash_execution_message(created_at, message),
+    }
 }
 
 fn parse_message_timestamp(entry: &Value, message: &Value) -> Option<DateTime<Utc>> {
@@ -227,81 +216,77 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
         .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
-fn flatten_content(content: Option<&Value>, include_tool_calls: bool) -> Option<String> {
-    let content = content?;
-    let flattened = match content {
-        Value::String(text) => collapse_whitespace(text),
-        Value::Array(blocks) => {
-            let mut parts = Vec::new();
-            for block in blocks {
-                match block.get("type").and_then(Value::as_str) {
-                    Some("text") => {
-                        if let Some(text) = block.get("text").and_then(Value::as_str) {
-                            let text = collapse_whitespace(text);
-                            if !text.is_empty() {
-                                parts.push(text);
-                            }
-                        }
-                    }
-                    Some("toolCall") if include_tool_calls => {
-                        if let Some(name) = block.get("name").and_then(Value::as_str) {
-                            parts.push(format!("Tool call: {}", collapse_whitespace(name)));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            parts.join("\n\n")
-        }
-        _ => return None,
+fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<MessageContentBlock> {
+    let Some(content) = content else {
+        return Vec::new();
     };
 
-    let flattened = flattened.trim();
-    if flattened.is_empty() {
+    match content {
+        Value::String(text) => MessageContentBlock::text(text).into_iter().collect(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+                Some("text") => block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .and_then(MessageContentBlock::text),
+                Some("thinking") => block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .and_then(MessageContentBlock::thinking),
+                Some("toolCall") if include_tool_calls => block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .and_then(MessageContentBlock::tool_call),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn flatten_text_content(content: Option<&Value>) -> Option<String> {
+    let blocks = content_blocks(content, false);
+    let parts = blocks
+        .iter()
+        .filter(|block| block.kind == MessageContentBlockKind::Text)
+        .filter_map(|block| block.text.clone())
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
         None
     } else {
-        Some(truncate_body(flattened.to_string()))
+        Some(parts.join("\n\n"))
     }
+}
+
+fn flatten_bash_execution_message(created_at: DateTime<Utc>, message: &Value) -> Option<Message> {
+    Message::from_text(
+        created_at,
+        Role::BashExecution,
+        flatten_bash_execution(message),
+    )
 }
 
 fn flatten_bash_execution(message: &Value) -> String {
     let mut parts = Vec::new();
 
-    if let Some(command) = message.get("command").and_then(Value::as_str) {
-        let command = collapse_whitespace(command);
-        if !command.is_empty() {
-            parts.push(format!("$ {command}"));
-        }
+    if let Some(command) = message.get("command").and_then(Value::as_str)
+        && let Some(command) = normalized_display_text(command)
+    {
+        parts.push(format!("$ {command}"));
     }
 
-    if let Some(output) = message.get("output").and_then(Value::as_str) {
-        let output = output.trim();
-        if !output.is_empty() {
-            parts.push(output.to_string());
-        }
+    if let Some(output) = message.get("output").and_then(Value::as_str)
+        && let Some(output) = normalized_display_text(output)
+    {
+        parts.push(output);
     }
 
     if parts.is_empty() {
         return "bash execution".to_string();
     }
 
-    truncate_body(parts.join("\n\n"))
-}
-
-fn collapse_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn truncate_body(body: String) -> String {
-    if body.chars().count() <= MAX_MESSAGE_BODY_CHARS {
-        return body;
-    }
-
-    let truncated = body
-        .chars()
-        .take(MAX_MESSAGE_BODY_CHARS)
-        .collect::<String>();
-    format!("{truncated}…")
+    truncate_text(&parts.join("\n\n"), MAX_MESSAGE_BODY_CHARS)
 }
 
 #[derive(Debug, Clone)]
@@ -309,4 +294,59 @@ struct ParsedEntry {
     id: String,
     parent_id: Option<String>,
     value: Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{content_blocks, flatten_bash_execution};
+    use crate::message::MessageContentBlockKind;
+
+    #[test]
+    fn content_blocks_preserve_multiline_text() {
+        let content = json!([
+            {
+                "type": "text",
+                "text": "first line\nsecond line"
+            }
+        ]);
+
+        let blocks = content_blocks(Some(&content), false);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, MessageContentBlockKind::Text);
+        assert_eq!(blocks[0].text.as_deref(), Some("first line\nsecond line"));
+    }
+
+    #[test]
+    fn content_blocks_include_thinking_and_tool_calls() {
+        let content = json!([
+            {
+                "type": "thinking",
+                "thinking": "considering"
+            },
+            {
+                "type": "toolCall",
+                "name": "bash"
+            }
+        ]);
+
+        let blocks = content_blocks(Some(&content), true);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, MessageContentBlockKind::Thinking);
+        assert_eq!(blocks[0].text.as_deref(), Some("considering"));
+        assert_eq!(blocks[1].kind, MessageContentBlockKind::ToolCall);
+        assert_eq!(blocks[1].tool_call_name.as_deref(), Some("bash"));
+    }
+
+    #[test]
+    fn flatten_bash_execution_preserves_multiline_output() {
+        let message = json!({
+            "command": "printf 'hi\\nthere'",
+            "output": "hi\nthere\n"
+        });
+
+        let flattened = flatten_bash_execution(&message);
+        assert_eq!(flattened, "$ printf 'hi\\nthere'\n\nhi\nthere");
+    }
 }

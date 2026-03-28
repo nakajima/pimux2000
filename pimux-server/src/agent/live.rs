@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::{
-    message::{Message, Role},
+    message::{Message, Role, truncate_text},
     transcript::{
         SessionActivity, SessionMessagesResponse, TranscriptFreshness, TranscriptFreshnessState,
         TranscriptSource,
@@ -37,6 +37,12 @@ impl LiveSessionStoreHandle {
                 detached_ttl,
             ))),
         }
+    }
+
+    pub async fn apply_event(&self, event: LiveSessionEvent) -> Option<SessionMessagesResponse> {
+        let mut store = self.inner.lock().await;
+        store.purge_expired();
+        store.apply_event(event)
     }
 
     pub async fn snapshot_for_session(&self, session_id: &str) -> Option<SessionMessagesResponse> {
@@ -181,6 +187,7 @@ struct LiveSessionStore {
     active_sessions: HashMap<String, LiveSessionState>,
     recent_detached_sessions: HashMap<String, DetachedSessionState>,
     detached_order: VecDeque<String>,
+    warned_legacy_sessions: HashSet<String>,
     detached_capacity: usize,
     detached_ttl: Duration,
 }
@@ -191,6 +198,7 @@ impl LiveSessionStore {
             active_sessions: HashMap::new(),
             recent_detached_sessions: HashMap::new(),
             detached_order: VecDeque::new(),
+            warned_legacy_sessions: HashSet::new(),
             detached_capacity,
             detached_ttl,
         }
@@ -199,6 +207,7 @@ impl LiveSessionStore {
     fn apply_event(&mut self, event: LiveSessionEvent) -> Option<SessionMessagesResponse> {
         match event {
             LiveSessionEvent::SessionAttached { session_id } => {
+                self.warned_legacy_sessions.remove(&session_id);
                 let state =
                     if let Some(detached) = self.recent_detached_sessions.remove(&session_id) {
                         self.detached_order
@@ -215,6 +224,7 @@ impl LiveSessionStore {
                 session_id,
                 messages,
             } => {
+                self.maybe_warn_legacy_payload(&session_id, &messages);
                 let state = self
                     .active_sessions
                     .entry(session_id.clone())
@@ -228,6 +238,7 @@ impl LiveSessionStore {
                 session_id,
                 messages,
             } => {
+                self.maybe_warn_legacy_payload(&session_id, &messages);
                 let state = self
                     .active_sessions
                     .entry(session_id.clone())
@@ -252,6 +263,7 @@ impl LiveSessionStore {
                 session_id,
                 mut message,
             } => {
+                self.maybe_warn_legacy_payload(&session_id, std::slice::from_ref(&message));
                 let state = self
                     .active_sessions
                     .entry(session_id.clone())
@@ -274,6 +286,25 @@ impl LiveSessionStore {
                 Some(response)
             }
         }
+    }
+
+    fn maybe_warn_legacy_payload(&mut self, session_id: &str, messages: &[Message]) {
+        if self.warned_legacy_sessions.contains(session_id) {
+            return;
+        }
+
+        let has_body_only_messages = messages
+            .iter()
+            .any(|message| !message.body.is_empty() && message.blocks.is_empty());
+        if !has_body_only_messages {
+            return;
+        }
+
+        self.warned_legacy_sessions.insert(session_id.to_string());
+        eprintln!(
+            "live extension warning for session {}: received body-only live payloads without structured blocks; the running pi session may be using an outdated pimux-live extension. The agent keeps the on-disk extension current on startup, but already-running pi sessions may need restart to load the update.",
+            session_id
+        );
     }
 
     fn snapshot_for_session(&self, session_id: &str) -> Option<SessionMessagesResponse> {
@@ -411,13 +442,14 @@ struct DetachedSessionState {
 }
 
 fn sanitize_message(mut message: Message) -> Message {
-    if message.body.chars().count() > MAX_LIVE_MESSAGE_BODY_CHARS {
-        let truncated = message
-            .body
-            .chars()
-            .take(MAX_LIVE_MESSAGE_BODY_CHARS)
-            .collect::<String>();
-        message.body = format!("{truncated}…");
+    message.body = truncate_text(&message.body, MAX_LIVE_MESSAGE_BODY_CHARS);
+    for block in &mut message.blocks {
+        if let Some(text) = block.text.as_deref() {
+            block.text = Some(truncate_text(text, MAX_LIVE_MESSAGE_BODY_CHARS));
+        }
+        if let Some(name) = block.tool_call_name.as_deref() {
+            block.tool_call_name = Some(truncate_text(name, MAX_LIVE_MESSAGE_BODY_CHARS));
+        }
     }
 
     message

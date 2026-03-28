@@ -1,176 +1,135 @@
 import Foundation
 import GRDB
 import GRDBQuery
-import Pi
 
 struct PiSessionSync {
 	var dbContext: DatabaseContext
 
 	func sync() async {
-		let hosts: [Host]
+		let serverConfiguration: ServerConfiguration?
 		do {
-			hosts = try await self.dbContext.reader.read { db in
-				try Host.all().fetchAll(db)
+			serverConfiguration = try await dbContext.reader.read { db in
+				try CurrentServerConfigurationRequest().fetch(db)
 			}
 		} catch {
-			print("Error reading hosts: \(error)")
+			print("Error reading server configuration: \(error)")
 			return
 		}
 
-		await withTaskGroup { group in
-			for host in hosts {
-				group.addTask {
-					do {
-						try await self.sync(host: host)
-					} catch let error as PiError {
-						if case let .commandFailed(message) = error,
-							message == "The remote server is too old. Please update it from pimux2000." {
-							return
-						}
-						print("Error syncing \(host.sshTarget): \(error)")
-					} catch {
-						print("Error syncing \(host.sshTarget): \(error)")
-					}
+		guard let serverConfiguration else { return }
+
+		do {
+			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+			async let remoteHosts = client.listHosts()
+			async let remoteSessions = client.listSessions()
+			let (hosts, sessions) = try await (remoteHosts, remoteSessions)
+
+			try await dbContext.writer.write { db in
+				try Self.store(remoteHosts: hosts, remoteSessions: sessions, in: db)
+			}
+		} catch {
+			print("Error syncing \(serverConfiguration.serverURL): \(error)")
+		}
+	}
+
+	nonisolated static func store(
+		remoteHosts: [PimuxHostSessions],
+		remoteSessions: [PimuxListedSession],
+		in db: Database
+	) throws {
+		var latestHostUpdates: [String: Date] = [:]
+
+		for remoteHost in remoteHosts {
+			let latestSessionUpdate = remoteHost.sessions.map(\.updatedAt).max() ?? Date.distantPast
+			latestHostUpdates[remoteHost.location] = max(
+				latestHostUpdates[remoteHost.location] ?? Date.distantPast,
+				latestSessionUpdate
+			)
+		}
+
+		for remoteSession in remoteSessions {
+			latestHostUpdates[remoteSession.hostLocation] = max(
+				latestHostUpdates[remoteSession.hostLocation] ?? Date.distantPast,
+				remoteSession.updatedAt
+			)
+		}
+
+		let remoteLocations = Set(latestHostUpdates.keys)
+		let existingHosts = try Host.fetchAll(db)
+		var existingHostsByLocation = Dictionary(uniqueKeysWithValues: existingHosts.map { ($0.location, $0) })
+		var hostIDByLocation: [String: Int64] = [:]
+		let now = Date()
+
+		for location in remoteLocations.sorted() {
+			let updatedAt = latestHostUpdates[location] ?? now
+			if var host = existingHostsByLocation.removeValue(forKey: location) {
+				host.updatedAt = updatedAt
+				try host.update(db)
+				if let id = host.id {
+					hostIDByLocation[location] = id
+				}
+			} else {
+				var host = Host(id: nil, location: location, createdAt: now, updatedAt: updatedAt)
+				try host.insert(db)
+				if let id = host.id {
+					hostIDByLocation[location] = id
 				}
 			}
 		}
-	}
 
-	private nonisolated func sync(host: Host) async throws {
-		guard let hostID = host.id else { return }
+		let staleHostIDs = existingHostsByLocation.values.compactMap(\.id)
+		if !staleHostIDs.isEmpty {
+			_ = try Host.filter(staleHostIDs.contains(Column("id"))).deleteAll(db)
+		}
 
-		let client = PiServerClient(serverURL: host.serverURL)
-		let remoteSessions = try await client.listSessions().filter(Self.shouldSync)
+		let existingSessions = try PiSession.fetchAll(db)
+		var existingSessionsByID = Dictionary(uniqueKeysWithValues: existingSessions.map { ($0.sessionID, $0) })
 
 		for remoteSession in remoteSessions {
-			try await self.sync(remoteSession: remoteSession, hostID: hostID, client: client)
-		}
+			guard let hostID = hostIDByLocation[remoteSession.hostLocation] else { continue }
 
-		let keptSessionIDs = Set(remoteSessions.compactMap { $0["sessionId"]?.stringValue })
-		try await self.cleanupStaleSessions(hostID: hostID, keepingSessionIDs: keptSessionIDs)
-	}
+			let lastMessageAt = max(remoteSession.lastUserMessageAt, remoteSession.lastAssistantMessageAt)
+			let lastMessageRole = remoteSession.lastAssistantMessageAt >= remoteSession.lastUserMessageAt
+				? "assistant"
+				: "user"
 
-	private func sync(remoteSession: JSONObject, hostID: Int64, client: PiServerClient) async throws {
-		let sessionId = remoteSession["sessionId"]?.stringValue ?? ""
-		guard !sessionId.isEmpty else { return }
-
-		let formatter = ISO8601DateFormatter()
-		formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-		let startedAt = remoteSession["startedAt"]?.stringValue.flatMap { formatter.date(from: $0) } ?? Date.distantPast
-		let lastSeenAt = remoteSession["lastSeenAt"]?.stringValue.flatMap { formatter.date(from: $0) } ?? Date.distantPast
-		let lastMessageAt = remoteSession["lastMessageAt"]?.stringValue.flatMap { formatter.date(from: $0) }
-
-		let modelString: String
-		if let model = remoteSession["model"]?.objectValue {
-			let provider = model["provider"]?.stringValue ?? ""
-			let id = model["id"]?.stringValue ?? ""
-			modelString = "\(provider)/\(id)"
-		} else {
-			modelString = "unknown model"
-		}
-
-		let summary = remoteSession["workSummary"]?.stringValue
-			?? remoteSession["sessionName"]?.stringValue
-			?? Self.cwdFolderName(remoteSession["cwd"]?.stringValue)
-			?? sessionId
-
-		let session = PiSession(
-			hostID: hostID,
-			summary: summary,
-			sessionID: sessionId,
-			sessionFile: remoteSession["sessionFile"]?.stringValue,
-			model: modelString,
-			lastMessage: remoteSession["lastMessage"]?.stringValue,
-			lastMessageAt: lastMessageAt,
-			lastMessageRole: remoteSession["lastMessageRole"]?.stringValue,
-			startedAt: startedAt,
-			lastSeenAt: lastSeenAt
-		)
-
-		let piSessionID = try await self.dbContext.writer.write { db -> Int64 in
-			var session = session
-			try session.upsert(db)
-			guard let currentSessionID = try PiSession
-				.filter(Column("sessionID") == sessionId)
-				.fetchOne(db)?.id else {
-				throw NSError(
-					domain: "PiSessionSync",
-					code: 1,
-					userInfo: [NSLocalizedDescriptionKey: "Failed to resolve synced session ID for \(sessionId)"]
+			if var session = existingSessionsByID.removeValue(forKey: remoteSession.id) {
+				session.hostID = hostID
+				session.summary = remoteSession.summary
+				session.sessionFile = nil
+				session.model = remoteSession.model
+				session.lastMessage = nil
+				session.lastMessageAt = lastMessageAt
+				session.lastMessageRole = lastMessageRole
+				session.startedAt = remoteSession.createdAt
+				session.lastSeenAt = remoteSession.updatedAt
+				try session.update(db)
+			} else {
+				var session = PiSession(
+					id: nil,
+					hostID: hostID,
+					summary: remoteSession.summary,
+					sessionID: remoteSession.id,
+					sessionFile: nil,
+					model: remoteSession.model,
+					lastMessage: nil,
+					lastMessageAt: lastMessageAt,
+					lastMessageRole: lastMessageRole,
+					lastReadMessageAt: lastMessageAt,
+					startedAt: remoteSession.createdAt,
+					lastSeenAt: remoteSession.updatedAt
 				)
-			}
-			return currentSessionID
-		}
-
-		// Sync messages if we have a session file
-		guard let sessionFile = remoteSession["sessionFile"]?.stringValue else { return }
-		do {
-			try await self.syncMessages(sessionFile: sessionFile, piSessionID: piSessionID, client: client)
-		} catch {
-			print("Error syncing messages for \(sessionId): \(error)")
-		}
-	}
-
-	private func cleanupStaleSessions(hostID: Int64, keepingSessionIDs: Set<String>) async throws {
-		try await self.dbContext.writer.write { db in
-			let existingSessions = try PiSession
-				.filter(Column("hostID") == hostID)
-				.fetchAll(db)
-
-			let idsToDelete = existingSessions
-				.filter { !keepingSessionIDs.contains($0.sessionID) }
-				.compactMap(\.id)
-
-			if !idsToDelete.isEmpty {
-				_ = try PiSession.filter(ids: idsToDelete).deleteAll(db)
+				try session.insert(db)
 			}
 		}
-	}
 
-	// MARK: - Message sync
-
-	private func syncMessages(sessionFile: String, piSessionID: Int64, client: PiServerClient) async throws {
-		let remoteMessages = try await client.getMessages(sessionFile: sessionFile)
-
-		try await self.dbContext.writer.write { db in
-			try Self.storeMessages(remoteMessages, piSessionID: piSessionID, in: db)
+		let staleSessionIDs = existingSessionsByID.values.compactMap(\.id)
+		if !staleSessionIDs.isEmpty {
+			_ = try PiSession.filter(staleSessionIDs.contains(Column("id"))).deleteAll(db)
 		}
 	}
 
-	nonisolated static func shouldSync(_ remoteSession: JSONObject) -> Bool {
-		if let mode = remoteSession["mode"]?.stringValue {
-			return mode == "interactive"
-		}
-		return remoteSession["sessionFile"]?.stringValue != nil
-	}
-
-	private nonisolated static func cwdFolderName(_ cwd: String?) -> String? {
-		guard let cwd, !cwd.isEmpty else { return nil }
-		let name = (cwd as NSString).lastPathComponent
-		if name.isEmpty || name == "/" { return nil }
-		return name
-	}
-
-	nonisolated static func parseContentBlocks(from content: JSONValue?, messageID: Int64) -> [MessageContentBlock] {
-		guard let content else { return [] }
-
-		if let text = content.stringValue {
-			return [MessageContentBlock(messageID: messageID, type: "text", text: text, toolCallName: nil, position: 0)]
-		}
-
-		guard let items = content.arrayValue else { return [] }
-
-		return items.enumerated().compactMap { index, item -> MessageContentBlock? in
-			guard let object = item.objectValue else { return nil }
-			let type = object["type"]?.stringValue ?? "text"
-			let text = object["text"]?.stringValue ?? object["thinking"]?.stringValue
-			let toolCallName = object["name"]?.stringValue
-			return MessageContentBlock(messageID: messageID, type: type, text: text, toolCallName: toolCallName, position: index)
-		}
-	}
-
-	static func storeMessages(_ remoteMessages: [JSONObject], piSessionID: Int64, in db: Database) throws {
+	nonisolated static func storeMessages(_ remoteMessages: [PimuxTranscriptMessage], piSessionID: Int64, in db: Database) throws {
 		let incomingPayloads = messagePayloads(from: remoteMessages)
 		let existingPayloads = try messagePayloads(in: db, piSessionID: piSessionID)
 
@@ -178,14 +137,13 @@ struct PiSessionSync {
 
 		try Message.filter(Column("piSessionID") == piSessionID).deleteAll(db)
 
-		let now = Date()
 		for payload in incomingPayloads {
 			var message = Message(
 				piSessionID: piSessionID,
 				role: payload.role,
 				toolName: payload.toolName,
 				position: payload.position,
-				createdAt: now
+				createdAt: payload.createdAt
 			)
 			try message.insert(db)
 
@@ -202,18 +160,45 @@ struct PiSessionSync {
 		}
 	}
 
-	private static func messagePayloads(from remoteMessages: [JSONObject]) -> [MessagePayload] {
+	nonisolated private static func messagePayloads(from remoteMessages: [PimuxTranscriptMessage]) -> [MessagePayload] {
 		remoteMessages.enumerated().map { index, remoteMessage in
 			MessagePayload(
-				role: Message.Role(remoteMessage["role"]?.stringValue ?? "unknown"),
-				toolName: remoteMessage["toolName"]?.stringValue,
+				role: Message.Role(remoteMessage.role),
+				toolName: nil,
 				position: index,
-				blocks: parseContentBlocks(from: remoteMessage["content"], messageID: 0).map(BlockPayload.init)
+				createdAt: remoteMessage.createdAt,
+				blocks: blockPayloads(from: remoteMessage)
 			)
 		}
 	}
 
-	private static func messagePayloads(in db: Database, piSessionID: Int64) throws -> [MessagePayload] {
+	nonisolated private static func blockPayloads(from remoteMessage: PimuxTranscriptMessage) -> [BlockPayload] {
+		let explicitBlocks = remoteMessage.blocks.enumerated().compactMap { (index, block) -> BlockPayload? in
+			let normalizedText = block.text?.trimmingCharacters(in: .whitespacesAndNewlines)
+			switch block.type {
+			case "text", "thinking", "other":
+				guard let normalizedText, !normalizedText.isEmpty else { return nil }
+				return BlockPayload(type: block.type, text: normalizedText, toolCallName: nil, position: index)
+			case "toolCall":
+				guard let toolCallName = block.toolCallName?.trimmingCharacters(in: .whitespacesAndNewlines), !toolCallName.isEmpty else {
+					return nil
+				}
+				return BlockPayload(type: "toolCall", text: nil, toolCallName: toolCallName, position: index)
+			default:
+				guard let normalizedText, !normalizedText.isEmpty else { return nil }
+				return BlockPayload(type: block.type, text: normalizedText, toolCallName: block.toolCallName, position: index)
+			}
+		}
+
+		if !explicitBlocks.isEmpty {
+			return explicitBlocks
+		}
+
+		guard !remoteMessage.body.isEmpty else { return [] }
+		return [BlockPayload(type: "text", text: remoteMessage.body, toolCallName: nil, position: 0)]
+	}
+
+	nonisolated private static func messagePayloads(in db: Database, piSessionID: Int64) throws -> [MessagePayload] {
 		let messages = try Message
 			.filter(Column("piSessionID") == piSessionID)
 			.order(Column("position").asc)
@@ -237,6 +222,7 @@ struct PiSessionSync {
 				role: message.role,
 				toolName: message.toolName,
 				position: message.position,
+				createdAt: message.createdAt,
 				blocks: (blocksByMessageID[message.id ?? -1] ?? []).map(BlockPayload.init)
 			)
 		}
@@ -247,6 +233,7 @@ private struct MessagePayload: Equatable {
 	let role: Message.Role
 	let toolName: String?
 	let position: Int
+	let createdAt: Date
 	let blocks: [BlockPayload]
 }
 
@@ -256,7 +243,14 @@ private struct BlockPayload: Equatable {
 	let toolCallName: String?
 	let position: Int
 
-	init(_ block: MessageContentBlock) {
+	nonisolated init(type: String, text: String?, toolCallName: String?, position: Int) {
+		self.type = type
+		self.text = text
+		self.toolCallName = toolCallName
+		self.position = position
+	}
+
+	nonisolated init(_ block: MessageContentBlock) {
 		self.type = block.type
 		self.text = block.text
 		self.toolCallName = block.toolCallName

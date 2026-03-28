@@ -1,10 +1,3 @@
-//
-//  pimux2000UITests.swift
-//  pimux2000UITests
-//
-//  Created by Pat Nakajima on 3/22/26.
-//
-
 import XCTest
 
 final class pimux2000UITests: XCTestCase {
@@ -15,48 +8,31 @@ final class pimux2000UITests: XCTestCase {
 	override func tearDownWithError() throws {}
 
 	@MainActor
-	func testFixtureHostShowsSessions() throws {
+	func testFixtureDataShowsConnectedServerAndSessions() throws {
 		let app = configuredApp()
 		app.launch()
 
-		let hostField = app.textFields["hostTextField"]
-		XCTAssertTrue(hostField.waitForExistence(timeout: 5))
-		hostField.tap()
-		hostField.typeText("demo@fixture")
-
-		let addButton = app.buttons["addHostButton"]
-		XCTAssertTrue(addButton.isEnabled)
-		addButton.tap()
-
-		let hostCell = app.staticTexts["demo@fixture"]
-		XCTAssertTrue(hostCell.waitForExistence(timeout: 10))
-		let shellSummary = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Shell session health")).firstMatch
-		XCTAssertTrue(shellSummary.waitForExistence(timeout: 15))
-
-		let logsSummary = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Watching logs")).firstMatch
-		XCTAssertTrue(logsSummary.waitForExistence(timeout: 15))
-		XCTAssertFalse(app.staticTexts["Couldn’t Load Sessions"].exists)
+		XCTAssertTrue(app.staticTexts["Connected server"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["http://fixture.local:3000"].exists)
+		XCTAssertTrue(app.staticTexts["demo@fixture"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Shell session health"].waitForExistence(timeout: 5))
+		XCTAssertTrue(app.staticTexts["Watching logs"].waitForExistence(timeout: 5))
 	}
 
 	@MainActor
-	func testBrokenFixtureHostShowsRecoverableError() throws {
+	func testSelectingFixtureSessionShowsTranscript() throws {
 		let app = configuredApp()
 		app.launch()
 
-		let hostField = app.textFields["hostTextField"]
-		XCTAssertTrue(hostField.waitForExistence(timeout: 5))
-		hostField.tap()
-		hostField.typeText("broken@fixture")
+		let sessionCell = app.staticTexts["Shell session health"]
+		XCTAssertTrue(sessionCell.waitForExistence(timeout: 5))
+		sessionCell.tap()
 
-		let addButton = app.buttons["addHostButton"]
-		XCTAssertTrue(addButton.isEnabled)
-		addButton.tap()
+		let userMessage = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Run the health check")).firstMatch
+		XCTAssertTrue(userMessage.waitForExistence(timeout: 5))
 
-		XCTAssertTrue(app.staticTexts["broken@fixture"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.staticTexts["Couldn’t Load Sessions"].waitForExistence(timeout: 5))
-
-		let fixtureMessage = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "configured to fail")).firstMatch
-		XCTAssertTrue(fixtureMessage.waitForExistence(timeout: 5))
+		let assistantMessage = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "Everything looks healthy")).firstMatch
+		XCTAssertTrue(assistantMessage.waitForExistence(timeout: 5))
 	}
 
 	@MainActor
