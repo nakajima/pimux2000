@@ -207,6 +207,7 @@ fn systemd_user_status(pi_agent_dir: &Path) -> Result<String, BoxError> {
 
     let mut output = String::new();
     writeln!(output, "service manager: systemd --user")?;
+    writeln!(output, "agent version: {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(
         output,
         "unit file: {} ({})",
@@ -247,6 +248,7 @@ fn launch_agent_status(pi_agent_dir: &Path) -> Result<String, BoxError> {
 
     let mut output = String::new();
     writeln!(output, "service manager: launchctl")?;
+    writeln!(output, "agent version: {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(output, "label: {LAUNCH_AGENT_LABEL}")?;
     writeln!(
         output,
