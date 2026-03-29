@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{host::HostIdentity, session::ActiveSession, transcript::SessionMessagesResponse};
+use crate::{
+    host::HostIdentity, message::ImageContent, session::ActiveSession,
+    transcript::SessionMessagesResponse,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -39,6 +42,8 @@ pub enum ServerToAgentMessage {
         request_id: String,
         session_id: String,
         body: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageContent>,
     },
     Ping,
     Pong,

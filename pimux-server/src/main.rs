@@ -17,6 +17,7 @@ mod transcript;
 #[derive(Debug, Parser)]
 #[command(name = "pimux")]
 #[command(about = "pimux server and agent")]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

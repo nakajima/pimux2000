@@ -207,6 +207,11 @@ private enum ChatFontCatalog {
 		if CTFontGetSymbolicTraits(font).contains(.traitMonoSpace) {
 			return true
 		}
+		
+		if String(CTFontCopyFullName(font)).lowercased().contains("mono") {
+			return true
+		}
+		
 		return hasFixedGlyphAdvances(font)
 	}
 

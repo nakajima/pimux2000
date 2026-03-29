@@ -21,7 +21,7 @@ struct PiSessionSync {
 		do {
 			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
 			async let remoteHosts = client.listHosts()
-			async let remoteSessions = client.listSessions()
+			async let remoteSessions = client.listAllSessions()
 			let (hosts, sessions) = try await (remoteHosts, remoteSessions)
 
 			try await dbContext.writer.write { db in
@@ -206,6 +206,8 @@ struct PiSessionSync {
 					type: blockPayload.type,
 					text: blockPayload.text,
 					toolCallName: blockPayload.toolCallName,
+					mimeType: blockPayload.mimeType,
+					attachmentID: blockPayload.attachmentID,
 					position: blockPayload.position
 				)
 				try block.insert(db)
@@ -231,15 +233,24 @@ struct PiSessionSync {
 			switch block.type {
 			case "text", "thinking", "other":
 				guard let normalizedText, !normalizedText.isEmpty else { return nil }
-				return BlockPayload(type: block.type, text: normalizedText, toolCallName: nil, position: index)
+				return BlockPayload(type: block.type, text: normalizedText, toolCallName: nil, mimeType: nil, attachmentID: nil, position: index)
 			case "toolCall":
 				guard let toolCallName = block.toolCallName?.trimmingCharacters(in: .whitespacesAndNewlines), !toolCallName.isEmpty else {
 					return nil
 				}
-				return BlockPayload(type: "toolCall", text: nil, toolCallName: toolCallName, position: index)
+				return BlockPayload(type: "toolCall", text: nil, toolCallName: toolCallName, mimeType: nil, attachmentID: nil, position: index)
+			case "image":
+				return BlockPayload(
+					type: "image",
+					text: nil,
+					toolCallName: nil,
+					mimeType: block.mimeType,
+					attachmentID: block.attachmentId,
+					position: index
+				)
 			default:
 				guard let normalizedText, !normalizedText.isEmpty else { return nil }
-				return BlockPayload(type: block.type, text: normalizedText, toolCallName: block.toolCallName, position: index)
+				return BlockPayload(type: block.type, text: normalizedText, toolCallName: block.toolCallName, mimeType: block.mimeType, attachmentID: block.attachmentId, position: index)
 			}
 		}
 
@@ -248,7 +259,7 @@ struct PiSessionSync {
 		}
 
 		guard !remoteMessage.body.isEmpty else { return [] }
-		return [BlockPayload(type: "text", text: remoteMessage.body, toolCallName: nil, position: 0)]
+		return [BlockPayload(type: "text", text: remoteMessage.body, toolCallName: nil, mimeType: nil, attachmentID: nil, position: 0)]
 	}
 
 	nonisolated private static func messagePayloads(in db: Database, piSessionID: Int64) throws -> [MessagePayload] {
@@ -294,12 +305,16 @@ private struct BlockPayload: Equatable {
 	let type: String
 	let text: String?
 	let toolCallName: String?
+	let mimeType: String?
+	let attachmentID: String?
 	let position: Int
 
-	nonisolated init(type: String, text: String?, toolCallName: String?, position: Int) {
+	nonisolated init(type: String, text: String?, toolCallName: String?, mimeType: String?, attachmentID: String?, position: Int) {
 		self.type = type
 		self.text = text
 		self.toolCallName = toolCallName
+		self.mimeType = mimeType
+		self.attachmentID = attachmentID
 		self.position = position
 	}
 
@@ -307,6 +322,8 @@ private struct BlockPayload: Equatable {
 		self.type = block.type
 		self.text = block.text
 		self.toolCallName = block.toolCallName
+		self.mimeType = block.mimeType
+		self.attachmentID = block.attachmentID
 		self.position = block.position
 	}
 }

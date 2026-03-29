@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::message::Message;
+use crate::message::{ApiMessage, Message};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,6 +11,34 @@ pub struct SessionMessagesResponse {
     pub freshness: TranscriptFreshness,
     pub activity: SessionActivity,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiSessionMessagesResponse {
+    pub session_id: String,
+    pub messages: Vec<ApiMessage>,
+    pub freshness: TranscriptFreshness,
+    pub activity: SessionActivity,
+    pub warnings: Vec<String>,
+}
+
+impl From<&SessionMessagesResponse> for ApiSessionMessagesResponse {
+    fn from(response: &SessionMessagesResponse) -> Self {
+        Self {
+            session_id: response.session_id.clone(),
+            messages: response.messages.iter().map(Message::to_api).collect(),
+            freshness: response.freshness.clone(),
+            activity: response.activity.clone(),
+            warnings: response.warnings.clone(),
+        }
+    }
+}
+
+impl From<SessionMessagesResponse> for ApiSessionMessagesResponse {
+    fn from(response: SessionMessagesResponse) -> Self {
+        Self::from(&response)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,7 +86,7 @@ pub struct TranscriptFetchFulfillment {
 pub enum SessionStreamEvent {
     Snapshot {
         sequence: u64,
-        session: SessionMessagesResponse,
+        session: ApiSessionMessagesResponse,
     },
     SessionState {
         sequence: u64,

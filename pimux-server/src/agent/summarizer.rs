@@ -14,6 +14,13 @@ use crate::session::ActiveSession;
 use super::discovery::{DiscoveredSession, SessionFingerprint};
 
 pub const DEFAULT_SUMMARY_MODEL: &str = "anthropic/claude-haiku-4-5";
+
+const FALLBACK_MODELS: &[(&str, &str)] = &[
+    ("anthropic", "anthropic/claude-haiku-4-5"),
+    ("openai", "openai/gpt-4o-mini"),
+    ("google", "google/gemini-2.0-flash"),
+];
+
 const SUMMARY_RETRY_BACKOFF: Duration = Duration::from_secs(30);
 const SUMMARY_LLM_CONCURRENCY: usize = 4;
 const MAX_LLM_SUMMARY_LEN: usize = 80;
@@ -22,6 +29,70 @@ const MAX_LLM_SUMMARY_LEN: usize = 80;
 pub struct Config {
     pub model: String,
     pub pi_agent_dir: PathBuf,
+}
+
+pub fn resolve_summary_model(pi_agent_dir: &Path, requested_model: &str) -> String {
+    let Some(provider) = extract_provider(requested_model) else {
+        return requested_model.to_string();
+    };
+
+    if has_provider_auth(pi_agent_dir, provider) {
+        return requested_model.to_string();
+    }
+
+    for &(fallback_provider, fallback_model) in FALLBACK_MODELS {
+        if fallback_provider == provider {
+            continue;
+        }
+        if has_provider_auth(pi_agent_dir, fallback_provider) {
+            eprintln!("no {provider} auth found; using {fallback_model} for session summaries",);
+            return fallback_model.to_string();
+        }
+    }
+
+    eprintln!(
+        "no auth found for any known provider; session summaries will fall back to heuristics"
+    );
+    requested_model.to_string()
+}
+
+fn extract_provider(model: &str) -> Option<&str> {
+    let provider = model.split('/').next()?;
+    if provider.is_empty() || !model.contains('/') {
+        return None;
+    }
+    Some(provider)
+}
+
+fn has_provider_auth(pi_agent_dir: &Path, provider: &str) -> bool {
+    let env_vars: &[&str] = match provider {
+        "anthropic" => &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        "google" => &["GEMINI_API_KEY"],
+        "groq" => &["GROQ_API_KEY"],
+        "xai" => &["XAI_API_KEY"],
+        "openrouter" => &["OPENROUTER_API_KEY"],
+        "cerebras" => &["CEREBRAS_API_KEY"],
+        "mistral" => &["MISTRAL_API_KEY"],
+        _ => &[],
+    };
+
+    for var in env_vars {
+        if env::var(var).ok().filter(|v| !v.is_empty()).is_some() {
+            return true;
+        }
+    }
+
+    let auth_path = pi_agent_dir.join("auth.json");
+    if let Ok(contents) = fs::read_to_string(&auth_path) {
+        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&contents) {
+            if let Some(obj) = data.as_object() {
+                return obj.contains_key(provider);
+            }
+        }
+    }
+
+    false
 }
 
 pub struct SummaryCache {
@@ -662,6 +733,72 @@ mod tests {
             normalize_llm_summary("\n- \"Ship iOS transcript polling.\"\n\n"),
             Some("Ship iOS transcript polling".to_string())
         );
+    }
+
+    #[test]
+    fn extract_provider_from_model() {
+        assert_eq!(
+            extract_provider("anthropic/claude-haiku-4-5"),
+            Some("anthropic")
+        );
+        assert_eq!(extract_provider("openai/gpt-4o-mini"), Some("openai"));
+        assert_eq!(
+            extract_provider("openrouter/anthropic/claude-3.5-haiku"),
+            Some("openrouter")
+        );
+        assert_eq!(extract_provider("bare-model"), None);
+        assert_eq!(extract_provider(""), None);
+    }
+
+    #[test]
+    fn resolve_model_keeps_requested_when_auth_present() {
+        let dir = tempdir_with_auth("resolve_keep", &["anthropic"]);
+        assert_eq!(
+            resolve_summary_model(&dir, "anthropic/claude-haiku-4-5"),
+            "anthropic/claude-haiku-4-5"
+        );
+    }
+
+    #[test]
+    fn resolve_model_falls_back_when_no_auth() {
+        let dir = tempdir_with_auth("resolve_fallback", &["openai"]);
+        assert_eq!(
+            resolve_summary_model(&dir, "anthropic/claude-haiku-4-5"),
+            "openai/gpt-4o-mini"
+        );
+    }
+
+    #[test]
+    fn resolve_model_returns_requested_when_no_auth_at_all() {
+        let dir = tempdir_with_auth("resolve_none", &[]);
+        assert_eq!(
+            resolve_summary_model(&dir, "anthropic/claude-haiku-4-5"),
+            "anthropic/claude-haiku-4-5"
+        );
+    }
+
+    fn tempdir_with_auth(name: &str, providers: &[&str]) -> PathBuf {
+        let dir = env::temp_dir().join(format!("pimux-test-{name}-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let mut auth = serde_json::Map::new();
+        for provider in providers {
+            let mut entry = serde_json::Map::new();
+            entry.insert(
+                "type".to_string(),
+                serde_json::Value::String("api_key".to_string()),
+            );
+            entry.insert(
+                "key".to_string(),
+                serde_json::Value::String("sk-test".to_string()),
+            );
+            auth.insert(provider.to_string(), serde_json::Value::Object(entry));
+        }
+        fs::write(
+            dir.join("auth.json"),
+            serde_json::to_vec_pretty(&auth).unwrap(),
+        )
+        .unwrap();
+        dir
     }
 
     #[test]

@@ -18,8 +18,8 @@ use tokio::sync::{
 };
 
 use crate::{
-    message::{Message, Role, truncate_text},
-    session::ActiveSession,
+    message::{ImageContent, Message, Role, truncate_text},
+    session::{ActiveSession, SessionContextUsage},
     transcript::{
         SessionActivity, SessionMessagesResponse, TranscriptFreshness, TranscriptFreshnessState,
         TranscriptSource,
@@ -31,7 +31,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub const DEFAULT_DETACHED_CAPACITY: usize = 3;
 pub const DEFAULT_DETACHED_TTL: Duration = Duration::from_secs(180);
 const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
-const LIVE_PROTOCOL_VERSION: u32 = 1;
+const LIVE_PROTOCOL_VERSION: u32 = 2;
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +41,8 @@ pub struct LiveSessionMetadata {
     pub cwd: String,
     pub summary: String,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<SessionContextUsage>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +143,7 @@ impl LiveSessionStoreHandle {
         &self,
         session_id: &str,
         body: &str,
+        images: Vec<ImageContent>,
     ) -> Result<(), SendUserMessageError> {
         let (sender, request_id, receiver) = {
             let mut store = self.inner.lock().await;
@@ -153,6 +156,7 @@ impl LiveSessionStoreHandle {
                 request_id: request_id.clone(),
                 session_id: session_id.to_string(),
                 body: body.to_string(),
+                images,
             })
             .is_err()
         {
@@ -218,7 +222,10 @@ async fn maybe_request_extension_reload(
     let store = store.clone();
     let session_id = session_id.to_string();
     tokio::spawn(async move {
-        match store.send_user_message(&session_id, "/reload").await {
+        match store
+            .send_user_message(&session_id, "/reload", Vec::new())
+            .await
+        {
             Ok(()) => {
                 eprintln!(
                     "requested /reload in attached pi session {} to load the updated pimux-live extension",
@@ -610,6 +617,8 @@ enum LiveAgentCommand {
         request_id: String,
         session_id: String,
         body: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageContent>,
     },
 }
 
@@ -1175,7 +1184,7 @@ impl LiveSessionState {
             last_assistant_message_at: self.last_assistant_message_at(),
             cwd: metadata.cwd.clone(),
             model: metadata.model.clone(),
-            context_usage: None,
+            context_usage: metadata.context_usage.clone(),
         })
     }
 }
@@ -1221,7 +1230,7 @@ impl DetachedSessionState {
             last_assistant_message_at,
             cwd: metadata.cwd.clone(),
             model: metadata.model.clone(),
-            context_usage: None,
+            context_usage: metadata.context_usage.clone(),
         })
     }
 }
@@ -1277,7 +1286,7 @@ mod tests {
         let sender_handle = handle.clone();
         let send_task = tokio::spawn(async move {
             sender_handle
-                .send_user_message("session-1", "hello live")
+                .send_user_message("session-1", "hello live", Vec::new())
                 .await
         });
 
@@ -1286,10 +1295,12 @@ mod tests {
             request_id,
             session_id,
             body,
+            images,
         } = command;
         assert_eq!(request_id, "live-send-1");
         assert_eq!(session_id, "session-1");
         assert_eq!(body, "hello live");
+        assert!(images.is_empty());
 
         handle.fulfill_send_user_message(1, &request_id, None).await;
 
@@ -1300,7 +1311,9 @@ mod tests {
     async fn send_user_message_requires_command_capable_connection() {
         let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
         assert_eq!(
-            handle.send_user_message("session-1", "hello").await,
+            handle
+                .send_user_message("session-1", "hello", Vec::new())
+                .await,
             Err(SendUserMessageError::Unavailable)
         );
     }
@@ -1353,6 +1366,10 @@ mod tests {
                     cwd: "/tmp/project".to_string(),
                     summary: "Brand new session".to_string(),
                     model: "anthropic/claude-sonnet-4-5".to_string(),
+                    context_usage: Some(SessionContextUsage {
+                        used_tokens: Some(12_345),
+                        max_tokens: Some(200_000),
+                    }),
                 },
             );
         }
@@ -1365,6 +1382,13 @@ mod tests {
         assert_eq!(listed.created_at, created_at);
         assert_eq!(listed.updated_at, created_at);
         assert_eq!(listed.cwd, "/tmp/project");
+        assert_eq!(
+            listed.context_usage,
+            Some(SessionContextUsage {
+                used_tokens: Some(12_345),
+                max_tokens: Some(200_000),
+            })
+        );
     }
 
     #[test]

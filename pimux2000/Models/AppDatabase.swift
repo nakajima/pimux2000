@@ -66,6 +66,8 @@ struct AppDatabase {
 				t.column("type", .text).notNull()
 				t.column("text", .text)
 				t.column("toolCallName", .text)
+				t.column("mimeType", .text)
+				t.column("attachmentID", .text)
 				t.column("position", .integer).notNull()
 			}
 		}
@@ -112,6 +114,16 @@ struct AppDatabase {
 			}
 			if !columnNames.contains("contextTokensMax") {
 				try db.execute(sql: "ALTER TABLE piSessions ADD COLUMN contextTokensMax INTEGER")
+			}
+		}
+
+		migrator.registerMigration("addMessageContentBlockAttachments") { db in
+			let columnNames = try Self.columnNames(in: "messageContentBlocks", db: db)
+			if !columnNames.contains("mimeType") {
+				try db.execute(sql: "ALTER TABLE messageContentBlocks ADD COLUMN mimeType TEXT")
+			}
+			if !columnNames.contains("attachmentID") {
+				try db.execute(sql: "ALTER TABLE messageContentBlocks ADD COLUMN attachmentID TEXT")
 			}
 		}
 

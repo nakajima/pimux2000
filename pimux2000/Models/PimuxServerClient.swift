@@ -120,7 +120,7 @@ struct PimuxTranscriptMessage: Decodable, Equatable {
 		if let blocks {
 			self.blocks = blocks
 		} else if !body.isEmpty {
-			self.blocks = [PimuxTranscriptMessageBlock(type: "text", text: body, toolCallName: nil)]
+			self.blocks = [PimuxTranscriptMessageBlock(type: "text", text: body, toolCallName: nil, mimeType: nil, attachmentId: nil)]
 		} else {
 			self.blocks = []
 		}
@@ -140,11 +140,15 @@ struct PimuxTranscriptMessageBlock: Decodable, Equatable {
 	let type: String
 	let text: String?
 	let toolCallName: String?
+	let mimeType: String?
+	let attachmentId: String?
 
-	init(type: String, text: String?, toolCallName: String?) {
+	init(type: String, text: String?, toolCallName: String?, mimeType: String? = nil, attachmentId: String? = nil) {
 		self.type = type
 		self.text = text
 		self.toolCallName = toolCallName
+		self.mimeType = mimeType
+		self.attachmentId = attachmentId
 	}
 }
 
@@ -170,7 +174,7 @@ enum PimuxSessionStreamEvent: Decodable, Equatable {
 		case session
 		case connected
 		case missing
-		case lastSeenAt
+		case lastSeenAt = "last_seen_at"
 		case timestamp
 	}
 
@@ -257,12 +261,35 @@ struct PimuxServerClient {
 		)
 	}
 
-	func listSessions() async throws -> [PimuxListedSession] {
-		try await requestJSON([PimuxListedSession].self, path: "/sessions")
+	func listSessions(count: Int? = nil, beforeID: String? = nil) async throws -> [PimuxListedSession] {
+		var queryItems: [URLQueryItem] = []
+		if let count { queryItems.append(URLQueryItem(name: "count", value: "\(count)")) }
+		if let beforeID { queryItems.append(URLQueryItem(name: "before_id", value: beforeID)) }
+		return try await requestJSON([PimuxListedSession].self, path: "/sessions", queryItems: queryItems)
+	}
+
+	func listAllSessions(pageSize: Int = 25) async throws -> [PimuxListedSession] {
+		var all: [PimuxListedSession] = []
+		var beforeID: String?
+		while true {
+			let page = try await listSessions(count: pageSize, beforeID: beforeID)
+			all.append(contentsOf: page)
+			guard page.count >= pageSize, let lastID = page.last?.id else { break }
+			beforeID = lastID
+		}
+		return all
 	}
 
 	func getMessages(sessionID: String) async throws -> PimuxSessionMessagesResponse {
 		try await requestJSON(PimuxSessionMessagesResponse.self, path: "/sessions/\(sessionID)/messages")
+	}
+
+	func attachmentURL(sessionID: String, attachmentID: String) -> URL {
+		baseURL
+			.appendingPathComponent("sessions")
+			.appendingPathComponent(sessionID)
+			.appendingPathComponent("attachments")
+			.appendingPathComponent(attachmentID)
 	}
 
 	func streamMessages(
@@ -298,7 +325,9 @@ struct PimuxServerClient {
 				let event = try Self.decoder.decode(PimuxSessionStreamEvent.self, from: Data(trimmed.utf8))
 				await onEvent(event)
 			} catch {
-				throw PimuxServerError.invalidResponse("Invalid stream event from the server.")
+				let preview = String(trimmed.prefix(200))
+				print("Skipping undecodable stream event: \(error) — raw: \(preview)")
+				continue
 			}
 		}
 	}

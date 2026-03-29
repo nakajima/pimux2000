@@ -3,7 +3,7 @@ import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const LIVE_PROTOCOL_VERSION = 1;
+const LIVE_PROTOCOL_VERSION = 2;
 const PARTIAL_UPDATE_THROTTLE_MS = 150;
 const SOCKET_RECONNECT_DELAY_MS = 500;
 
@@ -17,12 +17,14 @@ type PimuxRole =
 	| "compactionSummary"
 	| "other";
 
-type PimuxMessageBlockType = "text" | "thinking" | "toolCall" | "other";
+type PimuxMessageBlockType = "text" | "thinking" | "toolCall" | "image" | "other";
 
 interface PimuxMessageBlock {
 	type: PimuxMessageBlockType;
 	text?: string;
 	toolCallName?: string;
+	mimeType?: string;
+	data?: string;
 }
 
 interface PimuxMessage {
@@ -32,11 +34,17 @@ interface PimuxMessage {
 	blocks?: PimuxMessageBlock[];
 }
 
+interface PimuxSessionContextUsage {
+	usedTokens?: number;
+	maxTokens?: number;
+}
+
 interface PimuxSessionMetadata {
 	createdAt: string;
 	cwd: string;
 	summary: string;
 	model: string;
+	contextUsage?: PimuxSessionContextUsage;
 }
 
 type BridgeToAgentMessage =
@@ -48,11 +56,18 @@ type BridgeToAgentMessage =
 	| { type: "sessionDetached"; sessionId: string }
 	| { type: "sendUserMessageResult"; requestId: string; sessionId: string; error?: string };
 
+interface PimuxInputImage {
+	type: "image";
+	data: string;
+	mimeType: string;
+}
+
 type AgentToBridgeMessage = {
 	type: "sendUserMessage";
 	requestId: string;
 	sessionId: string;
 	body: string;
+	images?: PimuxInputImage[];
 };
 
 interface PendingPartial {
@@ -64,9 +79,8 @@ interface BridgeStateSnapshot {
 	currentSessionId?: string;
 	latestSnapshotMessages: PimuxMessage[];
 	latestMetadata?: PimuxSessionMetadata;
+	currentAssistantPartial?: PimuxMessage;
 }
-
-const MAX_PENDING_PAYLOADS = 256;
 
 class LiveBridgeClient {
 	private readonly socketPath: string;
@@ -78,7 +92,6 @@ class LiveBridgeClient {
 	private connected = false;
 	private closed = false;
 	private reconnectTimer?: ReturnType<typeof setTimeout>;
-	private pendingPayloads: string[] = [];
 	private incomingBuffer = "";
 
 	constructor(
@@ -94,16 +107,10 @@ class LiveBridgeClient {
 
 	send(message: BridgeToAgentMessage) {
 		if (this.closed) return;
+		if (this.writeNow(message)) return;
 
-		const payload = `${JSON.stringify(message)}\n`;
-		if (this.connected && this.socket && !this.socket.destroyed) {
-			this.socket.write(payload);
-			return;
-		}
-
-		if (this.pendingPayloads.length < MAX_PENDING_PAYLOADS) {
-			this.pendingPayloads.push(payload);
-		}
+		// Reconnects always resync the current session state, so avoid buffering
+		// stale live payloads while the socket is down.
 		this.ensureConnected();
 	}
 
@@ -119,7 +126,6 @@ class LiveBridgeClient {
 		this.socket = undefined;
 		this.connected = false;
 		this.connecting = false;
-		this.pendingPayloads = [];
 	}
 
 	private ensureConnected() {
@@ -136,7 +142,6 @@ class LiveBridgeClient {
 			this.connected = true;
 			this.incomingBuffer = "";
 			this.writeNow({ type: "hello", protocolVersion: LIVE_PROTOCOL_VERSION });
-			this.flushPendingPayloads();
 			this.resyncCurrentSession();
 		});
 
@@ -159,26 +164,14 @@ class LiveBridgeClient {
 		});
 	}
 
-	private writeNow(message: BridgeToAgentMessage) {
-		if (this.closed) return;
+	private writeNow(message: BridgeToAgentMessage): boolean {
+		if (this.closed) return false;
 		if (!this.connected || !this.socket || this.socket.destroyed) {
-			if (this.pendingPayloads.length < MAX_PENDING_PAYLOADS) {
-				this.pendingPayloads.push(`${JSON.stringify(message)}\n`);
-			}
-			this.ensureConnected();
-			return;
+			return false;
 		}
 
 		this.socket.write(`${JSON.stringify(message)}\n`);
-	}
-
-	private flushPendingPayloads() {
-		if (!this.connected || !this.socket || this.socket.destroyed) return;
-		while (this.pendingPayloads.length > 0) {
-			const payload = this.pendingPayloads.shift();
-			if (!payload) continue;
-			this.socket.write(payload);
-		}
+		return true;
 	}
 
 	private resyncCurrentSession() {
@@ -195,6 +188,13 @@ class LiveBridgeClient {
 			messages: state.latestSnapshotMessages,
 			metadata: state.latestMetadata,
 		});
+		if (state.currentAssistantPartial) {
+			this.writeNow({
+				type: "assistantPartial",
+				sessionId: state.currentSessionId,
+				message: state.currentAssistantPartial,
+			});
+		}
 	}
 
 	private drainIncomingBuffer() {
@@ -233,11 +233,13 @@ export default function (pi: ExtensionAPI) {
 		currentSessionId?: string;
 		latestSnapshotMessages: PimuxMessage[];
 		latestMetadata?: PimuxSessionMetadata;
+		currentAssistantPartial?: PimuxMessage;
 		isAgentBusy: boolean;
 	} = {
 		currentSessionId: undefined,
 		latestSnapshotMessages: [],
 		latestMetadata: undefined,
+		currentAssistantPartial: undefined,
 		isAgentBusy: false,
 	};
 
@@ -249,11 +251,26 @@ export default function (pi: ExtensionAPI) {
 			currentSessionId: state.currentSessionId,
 			latestSnapshotMessages: state.latestSnapshotMessages,
 			latestMetadata: state.latestMetadata,
+			currentAssistantPartial: state.currentAssistantPartial,
 		};
 	}
 
 	function respondToSendRequest(requestId: string, sessionId: string, error?: string) {
 		bridge.send({ type: "sendUserMessageResult", requestId, sessionId, error });
+	}
+
+	function userMessageContent(
+		body: string,
+		images: PimuxInputImage[]
+	): string | Array<{ type: "text"; text: string } | PimuxInputImage> {
+		if (images.length === 0) return body;
+
+		const content: Array<{ type: "text"; text: string } | PimuxInputImage> = [];
+		if (body) {
+			content.push({ type: "text", text: body });
+		}
+		content.push(...images);
+		return content;
 	}
 
 	function handleBridgeCommand(command: AgentToBridgeMessage) {
@@ -269,15 +286,17 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const body = command.body.trim();
-		if (!body) {
-			respondToSendRequest(command.requestId, command.sessionId, "message body must not be empty");
+		const images = Array.isArray(command.images) ? command.images : [];
+		if (!body && images.length === 0) {
+			respondToSendRequest(command.requestId, command.sessionId, "message body or images must not both be empty");
 			return;
 		}
 
+		const content = userMessageContent(body, images);
 		if (state.isAgentBusy) {
-			pi.sendUserMessage(body, { deliverAs: "followUp" });
+			pi.sendUserMessage(content, { deliverAs: "followUp" });
 		} else {
-			pi.sendUserMessage(body);
+			pi.sendUserMessage(content);
 		}
 
 		respondToSendRequest(command.requestId, command.sessionId);
@@ -326,6 +345,7 @@ export default function (pi: ExtensionAPI) {
 		const message = agentMessageToPimuxMessage(event.message);
 		if (!message || message.role !== "assistant") return;
 
+		state.currentAssistantPartial = message;
 		schedulePartial(sessionId, message);
 	});
 
@@ -338,6 +358,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (message.role === "assistant") {
 			cancelPendingPartial(sessionId);
+			state.currentAssistantPartial = undefined;
 		}
 
 		state.latestSnapshotMessages = [...state.latestSnapshotMessages, message];
@@ -360,6 +381,7 @@ export default function (pi: ExtensionAPI) {
 			state.currentSessionId = undefined;
 			state.latestSnapshotMessages = [];
 			state.latestMetadata = undefined;
+			state.currentAssistantPartial = undefined;
 		}
 
 		bridge.close();
@@ -405,6 +427,7 @@ export default function (pi: ExtensionAPI) {
 		state.currentSessionId = nextSessionId;
 		state.latestSnapshotMessages = buildSnapshotMessages(ctx);
 		state.latestMetadata = buildSessionMetadata(ctx, state.latestSnapshotMessages);
+		state.currentAssistantPartial = undefined;
 		bridge.send({
 			type: "sessionAttached",
 			sessionId: nextSessionId,
@@ -425,6 +448,7 @@ export default function (pi: ExtensionAPI) {
 		state.currentSessionId = sessionId;
 		state.latestSnapshotMessages = buildSnapshotMessages(ctx);
 		state.latestMetadata = buildSessionMetadata(ctx, state.latestSnapshotMessages);
+		state.currentAssistantPartial = undefined;
 		cancelPendingPartial(sessionId);
 		bridge.send({
 			type: "sessionSnapshot",
@@ -441,12 +465,21 @@ function buildSessionMetadata(ctx: ExtensionContext, messages: PimuxMessage[]): 
 	const namedSummary = normalizeDisplayText(ctx.sessionManager.getSessionName());
 	const fallbackSummary = summarizeMessages(messages) || sessionId;
 	const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown";
+	const usage = ctx.getContextUsage();
+	const contextUsage =
+		usage && (typeof usage.tokens === "number" || typeof usage.contextWindow === "number")
+			? {
+					usedTokens: typeof usage.tokens === "number" ? usage.tokens : undefined,
+					maxTokens: typeof usage.contextWindow === "number" ? usage.contextWindow : undefined,
+				}
+			: undefined;
 
 	return {
 		createdAt: toIsoString(header?.timestamp ?? messages[0]?.created_at ?? new Date().toISOString()),
 		cwd: ctx.sessionManager.getCwd(),
 		summary: namedSummary || fallbackSummary,
 		model,
+		contextUsage,
 	};
 }
 
@@ -581,21 +614,33 @@ function normalizeBlock(block: PimuxMessageBlock | undefined): PimuxMessageBlock
 			if (!toolCallName) return undefined;
 			return { type: "toolCall", toolCallName };
 		}
+		case "image": {
+			const mimeType = normalizeMimeType(block.mimeType);
+			const data = normalizeImageData(block.data);
+			if (!data) return mimeType ? { type: "image", mimeType } : { type: "image" };
+			return mimeType ? { type: "image", mimeType, data } : { type: "image", data };
+		}
 		default:
 			return undefined;
 	}
 }
 
 function bodyFromBlocks(role: PimuxRole, blocks: PimuxMessageBlock[]): string {
-	return blocks
-		.flatMap((block) => {
-			if (block.type === "text" && block.text) return [block.text];
-			if (role === "assistant" && block.type === "toolCall" && block.toolCallName) {
-				return [`Tool call: ${block.toolCallName}`];
-			}
-			return [];
-		})
-		.join("\n\n");
+	const parts = blocks.flatMap((block) => {
+		if (block.type === "text" && block.text) return [block.text];
+		if (role === "assistant" && block.type === "toolCall" && block.toolCallName) {
+			return [`Tool call: ${block.toolCallName}`];
+		}
+		return [];
+	});
+	if (parts.length > 0) {
+		return parts.join("\n\n");
+	}
+
+	const imageCount = blocks.filter((block) => block.type === "image").length;
+	if (imageCount === 1) return "[Image]";
+	if (imageCount > 1) return `[${imageCount} images]`;
+	return "";
 }
 
 function contentToBlocks(content: any, includeToolCalls: boolean): PimuxMessageBlock[] {
@@ -607,7 +652,7 @@ function contentToBlocks(content: any, includeToolCalls: boolean): PimuxMessageB
 	if (!Array.isArray(content)) return [];
 
 	return content
-		.map((block) => {
+		.map((block): PimuxMessageBlock | undefined => {
 			switch (block?.type) {
 				case "text": {
 					const text = normalizeDisplayText(block.text);
@@ -623,6 +668,14 @@ function contentToBlocks(content: any, includeToolCalls: boolean): PimuxMessageB
 					return toolCallName
 						? ({ type: "toolCall", toolCallName } satisfies PimuxMessageBlock)
 						: undefined;
+				}
+				case "image": {
+					const mimeType = normalizeMimeType(block.mimeType);
+					const data = normalizeImageData(block.data);
+					if (mimeType && data) return { type: "image", mimeType, data } satisfies PimuxMessageBlock;
+					if (mimeType) return { type: "image", mimeType } satisfies PimuxMessageBlock;
+					if (data) return { type: "image", data } satisfies PimuxMessageBlock;
+					return { type: "image" } satisfies PimuxMessageBlock;
 				}
 				default:
 					return undefined;
@@ -688,6 +741,16 @@ function normalizeDisplayText(value: unknown): string {
 function collapseWhitespace(value: unknown): string {
 	if (typeof value !== "string") return "";
 	return value.split(/\s+/).filter(Boolean).join(" ");
+}
+
+function normalizeMimeType(value: unknown): string {
+	if (typeof value !== "string") return "";
+	return value.trim().toLowerCase();
+}
+
+function normalizeImageData(value: unknown): string {
+	if (typeof value !== "string") return "";
+	return value.replace(/\s+/g, "");
 }
 
 function truncateChars(value: string, maxChars: number): string {

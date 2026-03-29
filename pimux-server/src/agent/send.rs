@@ -13,7 +13,7 @@ use tokio::{
 };
 
 use crate::message::{
-    Message, MessageContentBlock, Role, collapse_whitespace, normalized_display_text,
+    ImageContent, Message, MessageContentBlock, Role, collapse_whitespace, normalized_display_text,
 };
 
 use super::{
@@ -27,6 +27,7 @@ const PARTIAL_UPDATE_THROTTLE: Duration = Duration::from_millis(150);
 pub async fn send_message_to_session(
     discovered_session: DiscoveredSession,
     body: String,
+    images: Vec<ImageContent>,
     pi_agent_dir: PathBuf,
     live_store: LiveSessionStoreHandle,
     live_updates: UnboundedSender<LiveUpdate>,
@@ -72,6 +73,7 @@ pub async fn send_message_to_session(
     tokio::spawn(run_headless_prompt(
         discovered_session,
         body,
+        images,
         pi_agent_dir,
         live_store,
         live_updates,
@@ -90,6 +92,7 @@ pub async fn send_message_to_session(
 async fn run_headless_prompt(
     discovered_session: DiscoveredSession,
     body: String,
+    images: Vec<ImageContent>,
     pi_agent_dir: PathBuf,
     live_store: LiveSessionStoreHandle,
     live_updates: UnboundedSender<LiveUpdate>,
@@ -134,11 +137,7 @@ async fn run_headless_prompt(
         tokio::spawn(log_stderr(session_id.clone(), stderr));
 
         let prompt_id = format!("send-{session_id}");
-        let payload = json!({
-            "id": prompt_id,
-            "type": "prompt",
-            "message": body,
-        });
+        let payload = prompt_payload(&prompt_id, &body, &images);
         stdin
             .write_all(payload.to_string().as_bytes())
             .await
@@ -224,14 +223,6 @@ async fn run_headless_prompt(
                     }
                 }
                 "message_end" => {
-                    flush_pending_partial(
-                        &session_id,
-                        &live_store,
-                        &live_updates,
-                        &mut pending_partial,
-                    )
-                    .await;
-
                     if let Some(message) = event.get("message").and_then(rpc_message_to_message) {
                         let role = message.role.clone();
                         publish_event(
@@ -244,21 +235,18 @@ async fn run_headless_prompt(
                         )
                         .await;
 
-                        match role {
-                            Role::Assistant => {
-                                last_partial_sent_at = None;
+                        if role == Role::User {
+                            saw_user_message_end = true;
+                            if prompt_accepted {
+                                confirm_delivery(&mut ack_tx, &mut delivery_confirmed);
                             }
-                            Role::User => {
-                                saw_user_message_end = true;
-                                if prompt_accepted {
-                                    confirm_delivery(&mut ack_tx, &mut delivery_confirmed);
-                                }
-                            }
-                            _ => {}
                         }
                     }
                 }
                 "turn_end" => {
+                    if prompt_accepted {
+                        confirm_delivery(&mut ack_tx, &mut delivery_confirmed);
+                    }
                     flush_pending_partial(
                         &session_id,
                         &live_store,
@@ -266,14 +254,18 @@ async fn run_headless_prompt(
                         &mut pending_partial,
                     )
                     .await;
-                    if prompt_accepted {
-                        confirm_delivery(&mut ack_tx, &mut delivery_confirmed);
-                    }
-                    break;
                 }
                 _ => {}
             }
         }
+
+        flush_pending_partial(
+            &session_id,
+            &live_store,
+            &live_updates,
+            &mut pending_partial,
+        )
+        .await;
 
         if !prompt_accepted {
             return Err(format!(
@@ -372,6 +364,20 @@ async fn log_stderr(session_id: String, stderr: tokio::process::ChildStderr) {
     }
 }
 
+fn prompt_payload(prompt_id: &str, body: &str, images: &[ImageContent]) -> Value {
+    let mut payload = json!({
+        "id": prompt_id,
+        "type": "prompt",
+        "message": body,
+    });
+
+    if !images.is_empty() {
+        payload["images"] = serde_json::to_value(images).expect("images serialize");
+    }
+
+    payload
+}
+
 fn response_error_message(event: &Value) -> String {
     event
         .get("error")
@@ -466,6 +472,10 @@ fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<Mess
                     .get("name")
                     .and_then(Value::as_str)
                     .and_then(MessageContentBlock::tool_call),
+                Some("image") => Some(MessageContentBlock::image(
+                    block.get("mimeType").and_then(Value::as_str),
+                    block.get("data").and_then(Value::as_str),
+                )),
                 _ => None,
             })
             .collect(),
@@ -492,5 +502,45 @@ fn flatten_bash_execution(value: &Value) -> Option<String> {
         None
     } else {
         Some(parts.join("\n\n"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{content_blocks, prompt_payload};
+    use crate::message::{ImageContent, MessageContentBlockKind};
+
+    #[test]
+    fn prompt_payload_includes_images_when_present() {
+        let payload = prompt_payload(
+            "req-1",
+            "what is this",
+            &[ImageContent::new("image/png", "ZmFrZQ==")],
+        );
+
+        assert_eq!(payload["id"], "req-1");
+        assert_eq!(payload["type"], "prompt");
+        assert_eq!(payload["message"], "what is this");
+        assert_eq!(payload["images"][0]["type"], "image");
+        assert_eq!(payload["images"][0]["mimeType"], "image/png");
+    }
+
+    #[test]
+    fn content_blocks_preserve_image_blocks() {
+        let content = json!([
+            {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "ZmFrZQ=="
+            }
+        ]);
+
+        let blocks = content_blocks(Some(&content), false);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, MessageContentBlockKind::Image);
+        assert_eq!(blocks[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(blocks[0].data.as_deref(), Some("ZmFrZQ=="));
     }
 }

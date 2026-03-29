@@ -222,6 +222,7 @@ Request shape:
 Notes:
 - `auth` is optional and defaults to `"none"`
 - newly added hosts start as `connected: false`, `missing: true`, with an empty `sessions` list until an agent reports in
+- when persistent host registry mode is enabled, the server only accepts agent connections for hosts already present in this registry
 - this is the endpoint the iOS app should use when adding a host so server-side persistence stays in sync
 
 Status codes:
@@ -235,13 +236,13 @@ Deletes a host from the server’s expected-host registry.
 Notes:
 - `{location}` is the host location string as a URL path component
 - deleting a host also removes its persisted session snapshot from the server
-- currently connected hosts cannot be deleted; disconnect them first
+- if the host is currently connected, the server drops that agent connection as part of deletion
+- after deletion, future agent reconnects for that host are rejected until the host is added again
 - this is the endpoint the iOS app should use when deleting a host so server-side persistence stays in sync
 
 Status codes:
 - `204 No Content` — host deleted
 - `404 Not Found` — host is unknown
-- `409 Conflict` — host is currently connected
 
 ### GET /sessions
 
@@ -294,9 +295,16 @@ Request shape:
 
 ```json
 {
-  "body": "continue from here"
+  "body": "continue from here",
+  "images": [
+    { "type": "image", "mimeType": "image/png", "data": "base64-encoded-data" }
+  ]
 }
 ```
+
+Notes:
+- `body` may be omitted or empty when `images` is non-empty.
+- `images` is optional.
 
 Current behavior:
 1. the server finds the owning host for the session
@@ -313,6 +321,21 @@ Status codes:
 - `404 Not Found` — session is unknown or not present on the owning host
 - `502 Bad Gateway` — host-side delivery failed
 - `504 Gateway Timeout` — timed out waiting for host confirmation
+
+### GET /sessions/{id}/attachments/{attachmentId}
+
+Returns the raw bytes for an image attachment referenced by a message block.
+
+Current behavior:
+1. the server resolves the best transcript snapshot it has for the session
+2. it looks for an image block whose `attachmentId` matches the requested id
+3. it returns the decoded image bytes with the block's `mimeType`
+
+Status codes:
+- `200 OK` — attachment bytes returned
+- `404 Not Found` — session or attachment was not found
+- `502 Bad Gateway` — host-side transcript fetch failed or attachment data was invalid
+- `504 Gateway Timeout` — timed out waiting for the host transcript fetch
 
 ### GET /sessions/{id}/stream
 
@@ -402,13 +425,17 @@ Each message has:
 
 - `created_at: string`
 - `role: string`
-- `body: string` — compatibility/plain-text rendering field
+- `body: string` — compatibility/plain-text rendering field; image-only messages may use placeholders like `[Image]`
 - `blocks: MessageBlock[]` — structured display blocks for the app
 
+Snapshots do not inline raw image bytes. Image blocks reference fetchable attachments instead.
+
 `blocks` entries currently use:
-- `type: "text" | "thinking" | "toolCall" | "other"`
+- `type: "text" | "thinking" | "toolCall" | "image" | "other"`
 - `text?: string`
 - `toolCallName?: string`
+- `mimeType?: string`
+- `attachmentId?: string` — present for image blocks when the attachment can be fetched from `GET /sessions/{id}/attachments/{attachmentId}`
 
 Supported `role` values:
 
@@ -543,6 +570,13 @@ pimux server
 
 The server listens on port `3000` by default.
 You can still override that with the `PORT` environment variable.
+
+When the server starts, it also advertises itself on the local network via Bonjour / DNS-SD as `_pimux._tcp.local.` so the iOS app can discover nearby servers automatically.
+If you want to disable that advertisement, set:
+
+```sh
+PIMUX_DISABLE_MDNS=1
+```
 
 The server also persists its expected-host registry so hosts can be reported as missing after disconnects or server restarts.
 The iOS app can manage that registry via `POST /hosts` and `DELETE /hosts/{location}`.

@@ -238,6 +238,10 @@ fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<Mess
                     .get("name")
                     .and_then(Value::as_str)
                     .and_then(MessageContentBlock::tool_call),
+                Some("image") => Some(MessageContentBlock::image(
+                    block.get("mimeType").and_then(Value::as_str),
+                    block.get("data").and_then(Value::as_str),
+                )),
                 _ => None,
             })
             .collect(),
@@ -337,6 +341,23 @@ mod tests {
         assert_eq!(blocks[0].text.as_deref(), Some("considering"));
         assert_eq!(blocks[1].kind, MessageContentBlockKind::ToolCall);
         assert_eq!(blocks[1].tool_call_name.as_deref(), Some("bash"));
+    }
+
+    #[test]
+    fn content_blocks_preserve_images() {
+        let content = json!([
+            {
+                "type": "image",
+                "mimeType": "image/png",
+                "data": "ZmFrZQ=="
+            }
+        ]);
+
+        let blocks = content_blocks(Some(&content), false);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].kind, MessageContentBlockKind::Image);
+        assert_eq!(blocks[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(blocks[0].data.as_deref(), Some("ZmFrZQ=="));
     }
 
     #[test]

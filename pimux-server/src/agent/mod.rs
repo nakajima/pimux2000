@@ -22,6 +22,7 @@ use tokio::{
 use crate::{
     channel::{AgentToServerMessage, ServerToAgentMessage},
     host::{HostAuth, HostIdentity},
+    message::ImageContent,
     report::{ReportPayload, VersionResponse},
     session::{parse_local_date_filter, utc_range_for_local_date},
     transcript::TranscriptFetchFulfillment,
@@ -111,7 +112,7 @@ pub async fn list(config: ListConfig) -> Result<(), BoxError> {
     eprintln!("discovering sessions in {}...", pi_agent_dir.display());
 
     let summary_config = summarizer::Config {
-        model: config.summary_model,
+        model: summarizer::resolve_summary_model(&pi_agent_dir, &config.summary_model),
         pi_agent_dir: pi_agent_dir.clone(),
     };
     let mut summary_cache = summarizer::SummaryCache::load(&pi_agent_dir);
@@ -186,7 +187,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     let pi_agent_dir = discovery::resolve_pi_agent_dir(config.pi_agent_dir)?;
     let session_root = discovery::session_root(&pi_agent_dir);
     let summary_config = summarizer::Config {
-        model: config.summary_model,
+        model: summarizer::resolve_summary_model(&pi_agent_dir, &config.summary_model),
         pi_agent_dir: pi_agent_dir.clone(),
     };
     let host = HostIdentity {
@@ -489,10 +490,17 @@ async fn handle_server_message(
             request_id,
             session_id,
             body,
+            images,
         } => {
-            let result =
-                handle_send_message(&session_id, body, pi_agent_dir, live_store, live_updates_tx)
-                    .await;
+            let result = handle_send_message(
+                &session_id,
+                body,
+                images,
+                pi_agent_dir,
+                live_store,
+                live_updates_tx,
+            )
+            .await;
 
             if matches!(result.as_ref(), Ok(SendMessageDispatch::HeadlessRpc))
                 && let Some(snapshot) = live_store.snapshot_for_session(&session_id).await
@@ -590,11 +598,15 @@ enum SendMessageDispatch {
 async fn handle_send_message(
     session_id: &str,
     body: String,
+    images: Vec<ImageContent>,
     pi_agent_dir: &Path,
     live_store: &live::LiveSessionStoreHandle,
     live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
 ) -> Result<SendMessageDispatch, String> {
-    match live_store.send_user_message(session_id, &body).await {
+    match live_store
+        .send_user_message(session_id, &body, images.clone())
+        .await
+    {
         Ok(()) => return Ok(SendMessageDispatch::LiveExtension),
         Err(live::SendUserMessageError::Unavailable) => {}
         Err(error) => return Err(error.to_string()),
@@ -612,6 +624,7 @@ async fn handle_send_message(
     send::send_message_to_session(
         discovered_session,
         body,
+        images,
         pi_agent_dir.to_path_buf(),
         live_store.clone(),
         live_updates_tx.clone(),

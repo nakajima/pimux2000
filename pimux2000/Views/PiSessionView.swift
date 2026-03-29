@@ -123,7 +123,11 @@ struct PiSessionView: View {
 							ForEach(displayedMessages) { displayedMessage in
 								switch displayedMessage {
 								case .confirmed(let messageInfo):
-									MessageView(messageInfo: messageInfo)
+									MessageView(
+										messageInfo: messageInfo,
+										sessionID: session.sessionID,
+										serverURL: serverConfiguration?.serverURL
+									)
 										.id(displayedMessage.id)
 								case .pending(let pendingMessage):
 									PendingLocalMessageView(message: pendingMessage)
@@ -182,24 +186,44 @@ struct PiSessionView: View {
 
 	private var displayedMessagesScrollSignature: String {
 		guard let lastMessage = displayedMessages.last else { return "empty" }
+
 		switch lastMessage {
 		case .confirmed(let messageInfo):
-			let lastBlock = messageInfo.contentBlocks.last
-			return [
-				String(displayedMessages.count),
-				messageInfo.id,
-				lastBlock?.type ?? "none",
-				lastBlock?.text ?? "",
-				lastBlock?.toolCallName ?? "",
-			].joined(separator: "|")
+			return confirmedScrollSignature(for: messageInfo)
 		case .pending(let pendingMessage):
-			return [
-				String(displayedMessages.count),
-				"pending",
-				pendingMessage.id.uuidString,
-				pendingMessage.normalizedBody,
-			].joined(separator: "|")
+			return pendingScrollSignature(for: pendingMessage)
 		}
+	}
+
+	private func confirmedScrollSignature(for messageInfo: MessageInfo) -> String {
+		let count = String(displayedMessages.count)
+		let messageID = messageInfo.id
+		let lastBlock = messageInfo.contentBlocks.last
+		let blockType = lastBlock?.type ?? "none"
+		let blockText = lastBlock?.text ?? ""
+		let toolCallName = lastBlock?.toolCallName ?? ""
+		let mimeType = lastBlock?.mimeType ?? ""
+		let attachmentID = lastBlock?.attachmentID ?? ""
+		let components: [String] = [
+			count,
+			messageID,
+			blockType,
+			blockText,
+			toolCallName,
+			mimeType,
+			attachmentID,
+		]
+		return components.joined(separator: "|")
+	}
+
+	private func pendingScrollSignature(for pendingMessage: PendingLocalMessage) -> String {
+		let components: [String] = [
+			String(displayedMessages.count),
+			"pending",
+			pendingMessage.id.uuidString,
+			pendingMessage.normalizedBody,
+		]
+		return components.joined(separator: "|")
 	}
 
 	private var transcriptStatusText: String? {
@@ -463,6 +487,17 @@ struct PiSessionView: View {
 							toolCallName: toolCallName,
 							position: blockIndex
 						)
+					case "image":
+						return MessageContentBlock(
+							id: nil,
+							messageID: Int64(index),
+							type: "image",
+							text: nil,
+							toolCallName: nil,
+							mimeType: block.mimeType,
+							attachmentID: block.attachmentId,
+							position: blockIndex
+						)
 					default:
 						guard let text, !text.isEmpty else { return nil }
 						return MessageContentBlock(
@@ -471,6 +506,8 @@ struct PiSessionView: View {
 							type: block.type,
 							text: text,
 							toolCallName: block.toolCallName,
+							mimeType: block.mimeType,
+							attachmentID: block.attachmentId,
 							position: blockIndex
 						)
 					}
@@ -540,6 +577,8 @@ private struct PendingLocalMessageView: View {
 
 struct MessageView: View {
 	let messageInfo: MessageInfo
+	let sessionID: String
+	let serverURL: String?
 
 	private var message: Message { messageInfo.message }
 
@@ -564,7 +603,8 @@ struct MessageView: View {
 				ContentBlockView(
 					block: block,
 					messageRole: message.role,
-					messageTitle: messageTitle
+					messageTitle: messageTitle,
+					attachmentURL: attachmentURL(for: block)
 				)
 			}
 		}
@@ -615,6 +655,23 @@ struct MessageView: View {
 		}
 		return roleLabel
 	}
+
+	private func attachmentURL(for block: MessageContentBlock) -> URL? {
+		guard block.type == "image",
+			let attachmentID = block.attachmentID,
+			!attachmentID.isEmpty,
+			let serverURL
+		else {
+			return nil
+		}
+
+		do {
+			let client = try PimuxServerClient(baseURL: serverURL)
+			return client.attachmentURL(sessionID: sessionID, attachmentID: attachmentID)
+		} catch {
+			return nil
+		}
+	}
 }
 
 // MARK: - ContentBlockView
@@ -623,6 +680,7 @@ struct ContentBlockView: View {
 	let block: MessageContentBlock
 	let messageRole: Message.Role
 	let messageTitle: String
+	let attachmentURL: URL?
 
 	var body: some View {
 		switch block.type {
@@ -653,9 +711,17 @@ struct ContentBlockView: View {
 				.background(.teal.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
 
 		case "image":
-			Label("Image", systemImage: "photo")
-				.font(chatFont(style: .callout))
-				.foregroundStyle(.secondary)
+			if let attachmentURL {
+				TranscriptImageView(
+					url: attachmentURL,
+					mimeType: block.mimeType,
+					attachmentID: block.attachmentID
+				)
+			} else {
+				Label("Image", systemImage: "photo")
+					.font(chatFont(style: .callout))
+					.foregroundStyle(.secondary)
+			}
 
 		default:
 			if let text = block.text, !text.isEmpty {
@@ -667,14 +733,96 @@ struct ContentBlockView: View {
 	}
 }
 
+private struct TranscriptImageView: View {
+	let url: URL
+	let mimeType: String?
+	let attachmentID: String?
+
+	var body: some View {
+		AsyncImage(url: url) { phase in
+			switch phase {
+			case .empty:
+				placeholder(label: "Loading image…", systemImage: "photo")
+			case .success(let image):
+				image
+					.resizable()
+					.scaledToFit()
+					.frame(maxWidth: 320, maxHeight: 240, alignment: .leading)
+					.clipShape(RoundedRectangle(cornerRadius: 10))
+			case .failure:
+				placeholder(label: "Couldn’t load image", systemImage: "exclamationmark.triangle")
+			@unknown default:
+				placeholder(label: "Image", systemImage: "photo")
+			}
+		}
+	}
+
+	@ViewBuilder
+	private func placeholder(label: String, systemImage: String) -> some View {
+		VStack(alignment: .leading, spacing: 6) {
+			Label(label, systemImage: systemImage)
+				.font(chatFont(style: .callout))
+				.foregroundStyle(.secondary)
+
+			if let mimeType, !mimeType.isEmpty {
+				Text(verbatim: mimeType)
+					.font(.caption)
+					.foregroundStyle(.secondary)
+			}
+
+			if let attachmentID, !attachmentID.isEmpty {
+				Text(verbatim: attachmentID)
+					.font(.caption2)
+					.foregroundStyle(.tertiary)
+			}
+		}
+		.padding(.vertical, 8)
+		.padding(.horizontal, 10)
+		.background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+	}
+}
+
 // MARK: - Preview
 
-#Preview {
+#Preview("All message types") {
 	let db = AppDatabase.preview()
 	try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
 
 	try! db.dbQueue.write { dbConn in
-		var host = Host(id: nil, location: "nakajima@localhost", createdAt: Date(), updatedAt: Date())
+		let now = Date()
+
+		func insertMessage(
+			for sessionID: Int64,
+			role: Message.Role,
+			toolName: String? = nil,
+			position: Int,
+			createdAt: Date,
+			blocks: [(type: String, text: String?, toolCallName: String?, mimeType: String?, attachmentID: String?)]
+		) throws {
+			var message = Message(
+				piSessionID: sessionID,
+				role: role,
+				toolName: toolName,
+				position: position,
+				createdAt: createdAt
+			)
+			try message.insert(dbConn)
+
+			for (blockIndex, block) in blocks.enumerated() {
+				var contentBlock = MessageContentBlock(
+					messageID: message.id!,
+					type: block.type,
+					text: block.text,
+					toolCallName: block.toolCallName,
+					mimeType: block.mimeType,
+					attachmentID: block.attachmentID,
+					position: blockIndex
+				)
+				try contentBlock.insert(dbConn)
+			}
+		}
+
+		var host = Host(id: nil, location: "nakajima@localhost", createdAt: now, updatedAt: now)
 		try host.insert(dbConn)
 
 		var session = PiSession(
@@ -684,25 +832,101 @@ struct ContentBlockView: View {
 			sessionID: "test-session-1",
 			sessionFile: nil,
 			model: "anthropic/claude-sonnet",
-			lastMessage: nil,
-			lastMessageAt: Date(),
-			lastMessageRole: "assistant",
-			startedAt: Date(),
-			lastSeenAt: Date()
+			lastMessage: "Unknown roles fall back gracefully.",
+			lastMessageAt: now.addingTimeInterval(210),
+			lastMessageRole: "systemNote",
+			startedAt: now.addingTimeInterval(-900),
+			lastSeenAt: now.addingTimeInterval(210)
 		)
 		try session.insert(dbConn)
 
-		var userMessage = Message(piSessionID: session.id!, role: .user, toolName: nil, position: 0, createdAt: Date())
-		try userMessage.insert(dbConn)
-		var userBlock = MessageContentBlock(messageID: userMessage.id!, type: "text", text: "Can you help me set up a transcript view?", toolCallName: nil, position: 0)
-		try userBlock.insert(dbConn)
+		let sessionRowID = session.id!
 
-		var assistantMessage = Message(piSessionID: session.id!, role: .assistant, toolName: nil, position: 1, createdAt: Date())
-		try assistantMessage.insert(dbConn)
-		var assistantThinking = MessageContentBlock(messageID: assistantMessage.id!, type: "thinking", text: "Planning a robust live transcript path with stream fallback.", toolCallName: nil, position: 0)
-		try assistantThinking.insert(dbConn)
-		var assistantBlock = MessageContentBlock(messageID: assistantMessage.id!, type: "text", text: "Sure — this view now supports a live session stream plus snapshot fallback.", toolCallName: nil, position: 1)
-		try assistantBlock.insert(dbConn)
+		try insertMessage(
+			for: sessionRowID,
+			role: .user,
+			position: 0,
+			createdAt: now,
+			blocks: [
+				(type: "text", text: "Can you help me expand this preview so it covers more transcript cases?", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .assistant,
+			position: 1,
+			createdAt: now.addingTimeInterval(30),
+			blocks: [
+				(type: "thinking", text: "Inspecting the supported roles and block kinds before updating the fixtures.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: nil, toolCallName: "read", mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: nil, toolCallName: "bash", mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: nil, toolCallName: "edit", mimeType: nil, attachmentID: nil),
+				(type: "text", text: "Sure — this preview now includes tool calls, summaries, shell output, image attachments, and fallback cases.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: "img-preview")
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .toolResult,
+			toolName: "read",
+			position: 2,
+			createdAt: now.addingTimeInterval(60),
+			blocks: [
+				(type: "text", text: "Found the preview block at the bottom of `PiSessionView.swift` and confirmed it only covered a subset of transcript content.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .bashExecution,
+			position: 3,
+			createdAt: now.addingTimeInterval(90),
+			blocks: [
+				(type: "text", text: "$ xcodebuild -scheme pimux2000 ENABLE_PREVIEWS=YES\n** BUILD SUCCEEDED **", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .custom,
+			position: 4,
+			createdAt: now.addingTimeInterval(120),
+			blocks: [
+				(type: "other", text: "Custom extension note: the live stream briefly detached, so the app fell back to a persisted snapshot.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .branchSummary,
+			position: 5,
+			createdAt: now.addingTimeInterval(150),
+			blocks: [
+				(type: "text", text: "Created branch `preview-message-fixtures` from `main` and staged the updated transcript preview data.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .compactionSummary,
+			position: 6,
+			createdAt: now.addingTimeInterval(180),
+			blocks: [
+				(type: "text", text: "Earlier setup discussion was compacted into a shorter summary so the preview still shows long-running session behavior.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .other("systemNote"),
+			position: 7,
+			createdAt: now.addingTimeInterval(210),
+			blocks: [
+				(type: "text", text: "Unknown roles render with fallback styling so future transcript events remain visible.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
 	}
 
 	let session = try! db.dbQueue.read { dbConn in

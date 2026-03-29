@@ -20,9 +20,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{Mutex, RwLock, mpsc, oneshot},
@@ -33,10 +35,12 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::{
     channel::{AgentToServerMessage, ServerToAgentMessage},
     host::{HostIdentity, HostSessions},
+    message::{ImageContent, normalize_mime_type},
     report::VersionResponse,
-    session::{ActiveSession, ListedSession, parse_local_date_filter, utc_range_for_local_date},
+    session::{ActiveSession, ListedSession},
     transcript::{
-        SessionMessagesResponse, SessionStreamEvent, TranscriptFreshnessState, TranscriptSource,
+        ApiSessionMessagesResponse, SessionMessagesResponse, SessionStreamEvent,
+        TranscriptFreshnessState, TranscriptSource,
     },
 };
 
@@ -47,10 +51,26 @@ const ON_DEMAND_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const SEND_MESSAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const STREAM_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SEND_MESSAGE_IMAGES: usize = 8;
+const MAX_SEND_MESSAGE_IMAGE_BASE64_CHARS: usize = 8 * 1024 * 1024;
+const MAX_SEND_MESSAGE_TOTAL_IMAGE_BASE64_CHARS: usize = 12 * 1024 * 1024;
 const SYSTEMD_UNIT_NAME: &str = "pimux-server.service";
 const LAUNCH_AGENT_LABEL: &str = "dev.pimux.server";
 const LAUNCH_AGENT_FILE_NAME: &str = "dev.pimux.server.plist";
 const HOST_REGISTRY_FILE_NAME: &str = "expected-hosts.json";
+const PIMUX_MDNS_SERVICE_TYPE: &str = "_pimux._tcp.local.";
+const PIMUX_MDNS_PROTOCOL: &str = "http";
+const PIMUX_MDNS_PATH: &str = "/";
+
+struct MdnsAdvertisement {
+    daemon: ServiceDaemon,
+}
+
+impl Drop for MdnsAdvertisement {
+    fn drop(&mut self) {
+        let _ = self.daemon.shutdown();
+    }
+}
 
 pub struct ServiceConfig {
     pub port: Option<u16>,
@@ -147,6 +167,7 @@ struct CachedTranscript {
 struct AgentConnection {
     connection_id: u64,
     sender: mpsc::UnboundedSender<ServerToAgentMessage>,
+    close_sender: mpsc::UnboundedSender<()>,
 }
 
 struct InflightFetch {
@@ -169,19 +190,25 @@ enum SessionSubscriptionEvent {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
     error: String,
 }
 
+const DEFAULT_SESSION_PAGE_SIZE: usize = 25;
+
 #[derive(Debug, Default, Deserialize)]
 struct SessionsQuery {
-    date: Option<String>,
+    count: Option<usize>,
+    before_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 struct SendMessageRequest {
+    #[serde(default)]
     body: String,
+    #[serde(default)]
+    images: Vec<ImageContent>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -198,6 +225,14 @@ pub async fn start() -> Result<(), BoxError> {
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     println!("server listening on http://{}", listener.local_addr()?);
+
+    let _mdns = match start_mdns_advertisement(port) {
+        Ok(advertisement) => advertisement,
+        Err(error) => {
+            eprintln!("warning: failed to start Bonjour advertisement: {error}");
+            None
+        }
+    };
 
     axum::serve(listener, app).await?;
 
@@ -239,6 +274,10 @@ fn app(state: AppState) -> Router {
             "/sessions/{id}/messages",
             get(session_messages).post(send_session_message),
         )
+        .route(
+            "/sessions/{id}/attachments/{attachment_id}",
+            get(session_attachment),
+        )
         .route("/sessions/{id}/stream", get(session_stream))
         .route("/agent/connect", get(agent_connect))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
@@ -251,6 +290,109 @@ fn port_from_env() -> Result<u16, BoxError> {
         Err(std::env::VarError::NotPresent) => Ok(3000),
         Err(err) => Err(Box::new(err)),
     }
+}
+
+fn start_mdns_advertisement(port: u16) -> Result<Option<MdnsAdvertisement>, BoxError> {
+    if mdns_disabled_from_env() {
+        return Ok(None);
+    }
+
+    let host_label = mdns_host_label()?;
+    let host_name = format!("{host_label}.local.");
+    let instance_name = format!("pimux on {host_label}:{port}");
+    let daemon = ServiceDaemon::new()?;
+
+    if let Ok(receiver) = daemon.monitor() {
+        std::thread::spawn(move || {
+            while let Ok(event) = receiver.recv() {
+                if let DaemonEvent::Error(error) = event {
+                    eprintln!("warning: pimux Bonjour error: {error}");
+                }
+            }
+        });
+    }
+
+    let properties = [
+        ("version", env!("CARGO_PKG_VERSION")),
+        ("proto", PIMUX_MDNS_PROTOCOL),
+        ("path", PIMUX_MDNS_PATH),
+    ];
+
+    let service_info = ServiceInfo::new(
+        PIMUX_MDNS_SERVICE_TYPE,
+        &instance_name,
+        &host_name,
+        "",
+        port,
+        &properties[..],
+    )?
+    .enable_addr_auto();
+
+    daemon.register(service_info)?;
+    println!(
+        "advertising {PIMUX_MDNS_SERVICE_TYPE} via Bonjour as `{instance_name}` on {host_name}:{port}"
+    );
+
+    Ok(Some(MdnsAdvertisement { daemon }))
+}
+
+fn mdns_disabled_from_env() -> bool {
+    let Ok(value) = env::var("PIMUX_DISABLE_MDNS") else {
+        return false;
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+}
+
+fn mdns_host_label() -> Result<String, BoxError> {
+    let raw = hostname::get()?
+        .to_string_lossy()
+        .trim()
+        .trim_matches('.')
+        .to_string();
+    let sanitized = sanitize_mdns_host_label(&raw);
+    if sanitized.is_empty() {
+        return Err("could not derive a valid hostname for Bonjour advertisement".into());
+    }
+    Ok(sanitized)
+}
+
+fn sanitize_mdns_host_label(raw: &str) -> String {
+    let mut label = String::new();
+    let mut last_was_hyphen = false;
+
+    for ch in raw.chars() {
+        let mapped = match ch {
+            'a'..='z' | '0'..='9' => Some(ch),
+            'A'..='Z' => Some(ch.to_ascii_lowercase()),
+            '-' | '_' | ' ' => Some('-'),
+            _ => None,
+        };
+
+        let Some(mapped) = mapped else {
+            continue;
+        };
+
+        if mapped == '-' {
+            if label.is_empty() || last_was_hyphen {
+                continue;
+            }
+            last_was_hyphen = true;
+        } else {
+            last_was_hyphen = false;
+        }
+
+        label.push(mapped);
+        if label.len() >= 63 {
+            break;
+        }
+    }
+
+    while label.ends_with('-') {
+        label.pop();
+    }
+
+    label
 }
 
 async fn health() -> &'static str {
@@ -322,16 +464,14 @@ async fn delete_host(
 
     let removed_session_ids = {
         let mut hosts = state.hosts.write().await;
-        let Some(existing) = hosts.get(&location) else {
-            return Err(not_found(format!("host {location} is not known to the server")));
-        };
-        if existing.connected {
-            return Err(conflict(format!(
-                "host {location} is currently connected and cannot be deleted"
+        let Some(_existing) = hosts.get(&location) else {
+            return Err(not_found(format!(
+                "host {location} is not known to the server"
             )));
-        }
+        };
 
-        hosts.remove(&location)
+        hosts
+            .remove(&location)
             .into_iter()
             .flat_map(|record| record.sessions.into_iter().map(|session| session.id))
             .collect::<Vec<_>>()
@@ -339,12 +479,14 @@ async fn delete_host(
 
     if !removed_session_ids.is_empty() {
         let mut transcripts = state.transcripts.write().await;
-        for session_id in removed_session_ids {
-            transcripts.remove(&session_id);
+        for session_id in &removed_session_ids {
+            transcripts.remove(session_id);
         }
     }
 
     persist_hosts(&state).await;
+    disconnect_host_connection(&state, &location).await;
+    fail_inflight_for_host(&state, &location).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -353,17 +495,6 @@ async fn sessions(
     Query(query): Query<SessionsQuery>,
 ) -> Result<Json<Vec<ListedSession>>, (StatusCode, Json<ErrorResponse>)> {
     let mut sessions = listed_sessions(&state).await;
-
-    if let Some(date) = query.date {
-        let date = parse_local_date_filter(&date).map_err(bad_request)?;
-        let (start, end) = utc_range_for_local_date(date).map_err(bad_request)?;
-        sessions.retain(|session| {
-            session.session.updated_at >= start && session.session.updated_at < end
-        });
-    } else {
-        let cutoff = Utc::now() - ChronoDuration::hours(24);
-        sessions.retain(|session| session.session.updated_at >= cutoff);
-    }
 
     sessions.sort_by(|left, right| {
         right
@@ -374,14 +505,56 @@ async fn sessions(
             .then_with(|| left.session.id.cmp(&right.session.id))
     });
 
+    if let Some(before_id) = &query.before_id {
+        let cursor_pos = sessions
+            .iter()
+            .position(|s| s.session.id == *before_id)
+            .ok_or_else(|| bad_request(format!("session `{before_id}` not found")))?;
+        sessions = sessions.split_off(cursor_pos + 1);
+    }
+
+    let count = query.count.unwrap_or(DEFAULT_SESSION_PAGE_SIZE);
+    sessions.truncate(count);
+
     Ok(Json(sessions))
 }
 
 async fn session_messages(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<SessionMessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
-    Ok(Json(resolve_session_snapshot(&state, &session_id).await?))
+) -> Result<Json<ApiSessionMessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let snapshot = resolve_session_snapshot(&state, &session_id).await?;
+    Ok(Json(ApiSessionMessagesResponse::from(&snapshot)))
+}
+
+async fn session_attachment(
+    State(state): State<AppState>,
+    Path((session_id, attachment_id)): Path<(String, String)>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let snapshot = resolve_session_snapshot(&state, &session_id).await?;
+    let Some((mime_type, base64_data)) = attachment_payload(&snapshot, &attachment_id) else {
+        return Err(not_found(format!(
+            "attachment {attachment_id} was not found for session {session_id}"
+        )));
+    };
+
+    let bytes = BASE64_STANDARD.decode(base64_data).map_err(|error| {
+        bad_gateway(format!(
+            "attachment {attachment_id} for session {session_id} could not be decoded: {error}"
+        ))
+    })?;
+
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=300"),
+    );
+    Ok(response)
 }
 
 async fn session_stream(
@@ -401,7 +574,7 @@ async fn session_stream(
             &body_tx,
             SessionStreamEvent::Snapshot {
                 sequence,
-                session: snapshot,
+                session: ApiSessionMessagesResponse::from(&snapshot),
             },
         )
         .is_err()
@@ -412,9 +585,10 @@ async fn session_stream(
 
         if let Some(event) = initial_state {
             let stream_event = match event {
-                SessionSubscriptionEvent::Snapshot(session) => {
-                    SessionStreamEvent::Snapshot { sequence, session }
-                }
+                SessionSubscriptionEvent::Snapshot(session) => SessionStreamEvent::Snapshot {
+                    sequence,
+                    session: ApiSessionMessagesResponse::from(&session),
+                },
                 SessionSubscriptionEvent::SessionState {
                     connected,
                     missing,
@@ -442,7 +616,7 @@ async fn session_stream(
                     let stream_event = match event {
                         SessionSubscriptionEvent::Snapshot(session) => SessionStreamEvent::Snapshot {
                             sequence,
-                            session,
+                            session: ApiSessionMessagesResponse::from(&session),
                         },
                         SessionSubscriptionEvent::SessionState {
                             connected,
@@ -491,14 +665,85 @@ async fn session_stream(
     Ok(response)
 }
 
+fn attachment_payload<'a>(
+    snapshot: &'a SessionMessagesResponse,
+    attachment_id: &str,
+) -> Option<(&'a str, &'a str)> {
+    snapshot.messages.iter().find_map(|message| {
+        message.blocks.iter().find_map(|block| {
+            let mime_type = block.mime_type.as_deref()?;
+            let data = block.data.as_deref()?;
+            let block_attachment_id = block.attachment_id()?;
+            (block_attachment_id == attachment_id).then_some((mime_type, data))
+        })
+    })
+}
+
+fn normalize_image_base64(data: &str) -> String {
+    data.chars().filter(|char| !char.is_whitespace()).collect()
+}
+
+fn validate_request_images(images: Vec<ImageContent>) -> Result<Vec<ImageContent>, String> {
+    if images.len() > MAX_SEND_MESSAGE_IMAGES {
+        return Err(format!(
+            "too many images: received {}, limit is {}",
+            images.len(),
+            MAX_SEND_MESSAGE_IMAGES
+        ));
+    }
+
+    let mut total_base64_chars = 0usize;
+    let mut normalized_images = Vec::with_capacity(images.len());
+    for (index, image) in images.into_iter().enumerate() {
+        let image_number = index + 1;
+        let Some(mime_type) = normalize_mime_type(&image.mime_type) else {
+            return Err(format!("image {image_number} is missing a valid mimeType"));
+        };
+        if !mime_type.starts_with("image/") {
+            return Err(format!(
+                "image {image_number} must use an image/* mimeType, got {mime_type}"
+            ));
+        }
+
+        let data = normalize_image_base64(&image.data);
+        if data.is_empty() {
+            return Err(format!("image {image_number} must not have empty data"));
+        }
+        BASE64_STANDARD.decode(&data).map_err(|error| {
+            format!("image {image_number} must contain valid base64 data: {error}")
+        })?;
+        if data.len() > MAX_SEND_MESSAGE_IMAGE_BASE64_CHARS {
+            return Err(format!(
+                "image {image_number} is too large: base64 payload exceeds {} characters",
+                MAX_SEND_MESSAGE_IMAGE_BASE64_CHARS
+            ));
+        }
+
+        total_base64_chars += data.len();
+        if total_base64_chars > MAX_SEND_MESSAGE_TOTAL_IMAGE_BASE64_CHARS {
+            return Err(format!(
+                "images are too large: combined base64 payload exceeds {} characters",
+                MAX_SEND_MESSAGE_TOTAL_IMAGE_BASE64_CHARS
+            ));
+        }
+
+        normalized_images.push(ImageContent::new(mime_type, data));
+    }
+
+    Ok(normalized_images)
+}
+
 async fn send_session_message(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Json(request): Json<SendMessageRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let body = request.body.trim().to_string();
-    if body.is_empty() {
-        return Err(bad_request("message body must not be empty".to_string()));
+    let images = validate_request_images(request.images).map_err(bad_request)?;
+    if body.is_empty() && images.is_empty() {
+        return Err(bad_request(
+            "message body or images must not both be empty".to_string(),
+        ));
     }
 
     let Some(host_location) = host_for_session(&state, &session_id).await else {
@@ -527,6 +772,7 @@ async fn send_session_message(
             request_id: request_id.clone(),
             session_id: session_id.clone(),
             body,
+            images,
         },
     )
     .await?;
@@ -555,14 +801,28 @@ async fn agent_connect(ws: WebSocketUpgrade, State(state): State<AppState>) -> i
 async fn handle_agent_socket(state: AppState, socket: WebSocket) {
     let connection_id = state.next_connection_id.fetch_add(1, Ordering::Relaxed);
     let (sender, mut receiver) = mpsc::unbounded_channel::<ServerToAgentMessage>();
+    let (close_sender, mut close_receiver) = mpsc::unbounded_channel::<()>();
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let writer = tokio::spawn(async move {
-        while let Some(message) = receiver.recv().await {
-            let Ok(payload) = serde_json::to_string(&message) else {
-                break;
-            };
-            if ws_sender.send(Message::Text(payload.into())).await.is_err() {
-                break;
+        loop {
+            tokio::select! {
+                maybe_close = close_receiver.recv() => {
+                    if maybe_close.is_some() {
+                        let _ = ws_sender.send(Message::Close(None)).await;
+                    }
+                    break;
+                }
+                maybe_message = receiver.recv() => {
+                    let Some(message) = maybe_message else {
+                        break;
+                    };
+                    let Ok(payload) = serde_json::to_string(&message) else {
+                        break;
+                    };
+                    if ws_sender.send(Message::Text(payload.into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -590,8 +850,17 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
 
                 match incoming {
                     AgentToServerMessage::Hello { host } => {
-                        register_agent_connection(&state, &host, connection_id, sender.clone())
-                            .await;
+                        let accepted = register_agent_connection(
+                            &state,
+                            &host,
+                            connection_id,
+                            sender.clone(),
+                            close_sender.clone(),
+                        )
+                        .await;
+                        if !accepted {
+                            break;
+                        }
                         current_host = Some(host);
                     }
                     AgentToServerMessage::HostSnapshot { sessions } => {
@@ -599,6 +868,13 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             eprintln!("received host snapshot before hello");
                             continue;
                         };
+                        if !host_is_allowed(&state, &host.location).await {
+                            eprintln!(
+                                "dropping host snapshot from deleted or unknown host {}",
+                                host.location
+                            );
+                            break;
+                        }
                         update_host_snapshot(&state, host, sessions).await;
                     }
                     AgentToServerMessage::LiveSessionUpdate {
@@ -609,6 +885,13 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             eprintln!("received live session update before hello");
                             continue;
                         };
+                        if !host_is_allowed(&state, &host.location).await {
+                            eprintln!(
+                                "dropping live session update from deleted or unknown host {}",
+                                host.location
+                            );
+                            break;
+                        }
                         let changed = {
                             let mut transcripts = state.transcripts.write().await;
                             upsert_cached_transcript(
@@ -633,6 +916,13 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             eprintln!("received transcript result before hello");
                             continue;
                         };
+                        if !host_is_allowed(&state, &host.location).await {
+                            eprintln!(
+                                "dropping transcript result from deleted or unknown host {}",
+                                host.location
+                            );
+                            break;
+                        }
                         fulfill_fetch_result(&state, &host.location, &request_id, session, error)
                             .await;
                     }
@@ -641,6 +931,13 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             eprintln!("received send message result before hello");
                             continue;
                         };
+                        if !host_is_allowed(&state, &host.location).await {
+                            eprintln!(
+                                "dropping send message result from deleted or unknown host {}",
+                                host.location
+                            );
+                            break;
+                        }
                         fulfill_send_result(&state, &host.location, &request_id, error).await;
                     }
                     AgentToServerMessage::Ping => {
@@ -666,7 +963,17 @@ async fn register_agent_connection(
     host: &HostIdentity,
     connection_id: u64,
     sender: mpsc::UnboundedSender<ServerToAgentMessage>,
-) {
+    close_sender: mpsc::UnboundedSender<()>,
+) -> bool {
+    if !host_is_allowed(state, &host.location).await {
+        eprintln!(
+            "rejecting agent connection for unknown host {}; add it first via POST /hosts",
+            host.location
+        );
+        let _ = close_sender.send(());
+        return false;
+    }
+
     {
         let mut connections = state.agent_connections.write().await;
         connections.insert(
@@ -674,6 +981,7 @@ async fn register_agent_connection(
             AgentConnection {
                 connection_id,
                 sender,
+                close_sender,
             },
         );
     }
@@ -703,6 +1011,8 @@ async fn register_agent_connection(
     for session_id in session_ids {
         broadcast_session_state(state, &session_id, true, false, Some(now)).await;
     }
+
+    true
 }
 
 async fn update_host_snapshot(state: &AppState, host: HostIdentity, sessions: Vec<ActiveSession>) {
@@ -797,6 +1107,27 @@ async fn disconnect_agent(state: &AppState, host_location: &str, connection_id: 
         broadcast_session_state(state, &session_id, false, true, last_seen_at.clone()).await;
     }
     fail_inflight_for_host(state, host_location).await;
+}
+
+async fn disconnect_host_connection(state: &AppState, host_location: &str) {
+    let close_sender = {
+        let connections = state.agent_connections.read().await;
+        connections
+            .get(host_location)
+            .map(|connection| connection.close_sender.clone())
+    };
+
+    if let Some(close_sender) = close_sender {
+        let _ = close_sender.send(());
+    }
+}
+
+async fn host_is_allowed(state: &AppState, host_location: &str) -> bool {
+    if state.host_registry_path.is_none() {
+        return true;
+    }
+
+    state.hosts.read().await.contains_key(host_location)
 }
 
 async fn send_to_agent(
@@ -901,10 +1232,12 @@ async fn current_session_subscription_state(
     session_id: &str,
 ) -> Option<SessionSubscriptionEvent> {
     let hosts = state.hosts.read().await;
-    preferred_listed_session(&hosts, session_id).map(|session| SessionSubscriptionEvent::SessionState {
-        connected: session.host_connected,
-        missing: session.host_missing,
-        last_seen_at: session.host_last_seen_at,
+    preferred_listed_session(&hosts, session_id).map(|session| {
+        SessionSubscriptionEvent::SessionState {
+            connected: session.host_connected,
+            missing: session.host_missing,
+            last_seen_at: session.host_last_seen_at,
+        }
     })
 }
 
@@ -1094,7 +1427,11 @@ fn preferred_listed_session(
     let mut preferred = None;
 
     for record in hosts.values() {
-        let Some(session) = record.sessions.iter().find(|session| session.id == session_id) else {
+        let Some(session) = record
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+        else {
             continue;
         };
 
@@ -1305,10 +1642,6 @@ fn bad_request(error: String) -> (StatusCode, Json<ErrorResponse>) {
 
 fn bad_gateway(error: String) -> (StatusCode, Json<ErrorResponse>) {
     (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error }))
-}
-
-fn conflict(error: String) -> (StatusCode, Json<ErrorResponse>) {
-    (StatusCode::CONFLICT, Json(ErrorResponse { error }))
 }
 
 fn gateway_timeout(error: String) -> (StatusCode, Json<ErrorResponse>) {
@@ -1593,15 +1926,18 @@ fn run_command(command: &str, args: &[&str]) -> Result<String, BoxError> {
 mod tests {
     use axum::{
         body::{Body, to_bytes},
-        http::{Method, Request},
+        http::{Method, Request, header},
     };
-    use chrono::{Local, TimeZone, Utc};
+    use chrono::{TimeZone, Utc};
     use serde::{Serialize, de::DeserializeOwned};
     use tower::util::ServiceExt;
 
     use crate::{
         host::{HostAuth, HostIdentity, HostSessions},
-        message::{Message as TranscriptMessage, MessageContentBlock, Role},
+        message::{
+            ImageContent, Message as TranscriptMessage, MessageContentBlock, Role,
+            image_attachment_id,
+        },
         session::{ActiveSession, ListedSession},
         transcript::{SessionActivity, TranscriptFreshness},
     };
@@ -1750,45 +2086,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_deleting_connected_host() {
-        let state = AppState::default();
-        update_host_snapshot(
-            &state,
-            HostIdentity {
-                location: "dev@mac".to_string(),
-                auth: HostAuth::None,
+    async fn deletes_connected_host_from_persisted_registry() {
+        let path = unique_test_path("expected-hosts.json");
+        let host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+        let mut initial_hosts = HashMap::new();
+        initial_hosts.insert(
+            host.location.clone(),
+            HostRecord {
+                host: host.clone(),
+                sessions: vec![sample_active_session("session-1")],
+                connected: false,
+                last_seen_at: Some(timestamp(5_000)),
             },
-            vec![sample_active_session("session-1")],
-        )
-        .await;
+        );
+        persist_host_registry(&path, &initial_hosts).unwrap();
 
-        let app = app(state);
+        let state = AppState::new(initial_hosts, Some(path.clone()));
+        let _receiver = register_test_agent(&state, host.clone()).await;
+        let app = app(state.clone());
         let response = app
             .oneshot(empty_request(Method::DELETE, "/hosts/dev@mac"))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let persisted = load_host_registry(&path).unwrap();
+        assert!(persisted.is_empty());
+        assert!(!host_is_allowed(&state, &host.location).await);
+
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let (close_sender, _close_receiver) = mpsc::unbounded_channel();
+        let accepted = register_agent_connection(&state, &host, 2, sender, close_sender).await;
+        assert!(!accepted);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = path.parent().map(std::fs::remove_dir_all);
     }
 
     #[tokio::test]
-    async fn returns_recent_sessions_by_default() {
+    async fn rejects_unknown_agent_when_persistent_registry_is_enabled() {
+        let path = unique_test_path("expected-hosts.json");
+        let state = AppState::new(HashMap::new(), Some(path.clone()));
+        let host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let (close_sender, _close_receiver) = mpsc::unbounded_channel();
+        let accepted = register_agent_connection(&state, &host, 1, sender, close_sender).await;
+        assert!(!accepted);
+
+        let response = app(state)
+            .oneshot(empty_request(Method::GET, "/hosts"))
+            .await
+            .unwrap();
+        let hosts: Vec<HostSessions> = json_response(response).await;
+        assert!(hosts.is_empty());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = path.parent().map(std::fs::remove_dir_all);
+    }
+
+    #[tokio::test]
+    async fn returns_default_page_of_sessions() {
         let state = AppState::default();
+        let mut all_sessions = Vec::new();
+        for i in 0..30 {
+            all_sessions.push(sample_active_session_with_updated(
+                &format!("session-{i}"),
+                Utc::now() - ChronoDuration::hours(i as i64),
+            ));
+        }
         update_host_snapshot(
             &state,
             HostIdentity {
                 location: "dev@mac".to_string(),
                 auth: HostAuth::None,
             },
-            vec![
-                sample_active_session_with_updated(
-                    "recent-session",
-                    Utc::now() - ChronoDuration::hours(1),
-                ),
-                sample_active_session_with_updated(
-                    "old-session",
-                    Utc::now() - ChronoDuration::hours(48),
-                ),
-            ],
+            all_sessions,
         )
         .await;
 
@@ -1800,8 +2179,121 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let sessions: Vec<ListedSession> = json_response(response).await;
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session.id, "recent-session");
+        assert_eq!(sessions.len(), 25);
+        assert_eq!(sessions[0].session.id, "session-0");
+        assert_eq!(sessions[24].session.id, "session-24");
+    }
+
+    #[tokio::test]
+    async fn respects_count_param() {
+        let state = AppState::default();
+        update_host_snapshot(
+            &state,
+            HostIdentity {
+                location: "dev@mac".to_string(),
+                auth: HostAuth::None,
+            },
+            vec![
+                sample_active_session_with_updated(
+                    "session-a",
+                    Utc::now() - ChronoDuration::hours(1),
+                ),
+                sample_active_session_with_updated(
+                    "session-b",
+                    Utc::now() - ChronoDuration::hours(2),
+                ),
+                sample_active_session_with_updated(
+                    "session-c",
+                    Utc::now() - ChronoDuration::hours(3),
+                ),
+            ],
+        )
+        .await;
+
+        let app = app(state);
+        let response = app
+            .oneshot(empty_request(Method::GET, "/sessions?count=2"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let sessions: Vec<ListedSession> = json_response(response).await;
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session.id, "session-a");
+        assert_eq!(sessions[1].session.id, "session-b");
+    }
+
+    #[tokio::test]
+    async fn paginates_with_before_id() {
+        let state = AppState::default();
+        update_host_snapshot(
+            &state,
+            HostIdentity {
+                location: "dev@mac".to_string(),
+                auth: HostAuth::None,
+            },
+            vec![
+                sample_active_session_with_updated(
+                    "session-a",
+                    Utc::now() - ChronoDuration::hours(1),
+                ),
+                sample_active_session_with_updated(
+                    "session-b",
+                    Utc::now() - ChronoDuration::hours(2),
+                ),
+                sample_active_session_with_updated(
+                    "session-c",
+                    Utc::now() - ChronoDuration::hours(3),
+                ),
+                sample_active_session_with_updated(
+                    "session-d",
+                    Utc::now() - ChronoDuration::hours(4),
+                ),
+            ],
+        )
+        .await;
+
+        let app = app(state);
+        let response = app
+            .oneshot(empty_request(
+                Method::GET,
+                "/sessions?count=2&before_id=session-b",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let sessions: Vec<ListedSession> = json_response(response).await;
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session.id, "session-c");
+        assert_eq!(sessions[1].session.id, "session-d");
+    }
+
+    #[tokio::test]
+    async fn before_id_not_found_returns_400() {
+        let state = AppState::default();
+        update_host_snapshot(
+            &state,
+            HostIdentity {
+                location: "dev@mac".to_string(),
+                auth: HostAuth::None,
+            },
+            vec![sample_active_session_with_updated(
+                "session-a",
+                Utc::now() - ChronoDuration::hours(1),
+            )],
+        )
+        .await;
+
+        let app = app(state);
+        let response = app
+            .oneshot(empty_request(
+                Method::GET,
+                "/sessions?before_id=nonexistent",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1817,7 +2309,8 @@ mod tests {
             location: "tester@host".to_string(),
             auth: HostAuth::None,
         };
-        let connected_session = sample_active_session_with_updated("session-1", connected_updated_at);
+        let connected_session =
+            sample_active_session_with_updated("session-1", connected_updated_at);
         let missing_session = sample_active_session_with_updated("session-1", missing_updated_at);
 
         {
@@ -1857,26 +2350,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filters_sessions_by_local_date() {
+    async fn before_id_at_end_returns_empty() {
         let state = AppState::default();
-        let today = Local::now().date_naive();
-        let (start, _) = utc_range_for_local_date(today).unwrap();
         update_host_snapshot(
             &state,
             HostIdentity {
                 location: "dev@mac".to_string(),
                 auth: HostAuth::None,
             },
-            vec![
-                sample_active_session_with_updated(
-                    "today-session",
-                    start + ChronoDuration::hours(12),
-                ),
-                sample_active_session_with_updated(
-                    "previous-session",
-                    start - ChronoDuration::hours(12),
-                ),
-            ],
+            vec![sample_active_session_with_updated(
+                "only-session",
+                Utc::now() - ChronoDuration::hours(1),
+            )],
         )
         .await;
 
@@ -1884,15 +2369,14 @@ mod tests {
         let response = app
             .oneshot(empty_request(
                 Method::GET,
-                &format!("/sessions?date={}", today.format("%Y-%m-%d")),
+                "/sessions?before_id=only-session",
             ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
         let sessions: Vec<ListedSession> = json_response(response).await;
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session.id, "today-session");
+        assert!(sessions.is_empty());
     }
 
     #[tokio::test]
@@ -2004,6 +2488,7 @@ mod tests {
                 "/sessions/session-1/messages",
                 &SendMessageRequest {
                     body: "hello".to_string(),
+                    images: Vec::new(),
                 },
             ))
             .await
@@ -2016,9 +2501,11 @@ mod tests {
                 request_id,
                 session_id,
                 body,
+                images,
             } => {
                 assert_eq!(session_id, "session-1");
                 assert_eq!(body, "hello");
+                assert!(images.is_empty());
                 request_id
             }
             other => panic!("unexpected message: {other:?}"),
@@ -2027,6 +2514,138 @@ mod tests {
         fulfill_send_result(&state, &host.location, &request_id, None).await;
         let response = waiter.await.unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn message_snapshots_expose_attachment_ids_without_inline_data() {
+        let state = AppState::default();
+        let response = sample_image_transcript("session-1");
+        {
+            let mut transcripts = state.transcripts.write().await;
+            upsert_cached_transcript(&mut transcripts, "dev@mac".to_string(), response);
+        }
+
+        let response = session_messages(State(state), Path("session-1".to_string()))
+            .await
+            .unwrap()
+            .0;
+        let payload = serde_json::to_value(&response).unwrap();
+        let block = &payload["messages"][0]["blocks"][0];
+
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["mimeType"], "image/png");
+        assert_eq!(
+            block["attachmentId"],
+            image_attachment_id("image/png", "ZmFrZQ==")
+        );
+        assert!(block.get("data").is_none());
+    }
+
+    #[tokio::test]
+    async fn attachment_endpoint_returns_image_bytes() {
+        let state = AppState::default();
+        let response = sample_image_transcript("session-1");
+        let attachment_id = image_attachment_id("image/png", "ZmFrZQ==");
+        {
+            let mut transcripts = state.transcripts.write().await;
+            upsert_cached_transcript(&mut transcripts, "dev@mac".to_string(), response);
+        }
+
+        let app = app(state.clone());
+        let response = app
+            .oneshot(empty_request(
+                Method::GET,
+                &format!("/sessions/session-1/attachments/{attachment_id}"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"fake");
+    }
+
+    #[tokio::test]
+    async fn accepts_image_only_send_messages() {
+        let state = AppState::default();
+        let host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+        update_host_snapshot(
+            &state,
+            host.clone(),
+            vec![sample_active_session("session-1")],
+        )
+        .await;
+        let mut receiver = register_test_agent(&state, host.clone()).await;
+        let app = app(state.clone());
+
+        let waiter = tokio::spawn(async move {
+            app.oneshot(json_request(
+                Method::POST,
+                "/sessions/session-1/messages",
+                &SendMessageRequest {
+                    body: String::new(),
+                    images: vec![ImageContent::new("image/png", "ZmFrZQ==")],
+                },
+            ))
+            .await
+            .unwrap()
+        });
+
+        let message = receiver.recv().await.unwrap();
+        let request_id = match message {
+            ServerToAgentMessage::SendMessage {
+                request_id,
+                session_id,
+                body,
+                images,
+            } => {
+                assert_eq!(session_id, "session-1");
+                assert_eq!(body, "");
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0], ImageContent::new("image/png", "ZmFrZQ=="));
+                request_id
+            }
+            other => panic!("unexpected message: {other:?}"),
+        };
+
+        fulfill_send_result(&state, &host.location, &request_id, None).await;
+        let response = waiter.await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn rejects_send_message_when_body_and_images_are_empty() {
+        let state = AppState::default();
+        let host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+        update_host_snapshot(&state, host, vec![sample_active_session("session-1")]).await;
+        let app = app(state.clone());
+
+        let response = app
+            .oneshot(json_request(
+                Method::POST,
+                "/sessions/session-1/messages",
+                &SendMessageRequest::default(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: ErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload.error,
+            "message body or images must not both be empty"
+        );
     }
 
     #[tokio::test]
@@ -2119,7 +2738,8 @@ mod tests {
         host: HostIdentity,
     ) -> mpsc::UnboundedReceiver<ServerToAgentMessage> {
         let (sender, receiver) = mpsc::unbounded_channel();
-        register_agent_connection(state, &host, 1, sender).await;
+        let (close_sender, _close_receiver) = mpsc::unbounded_channel();
+        let _ = register_agent_connection(state, &host, 1, sender, close_sender).await;
         receiver
     }
 
@@ -2169,6 +2789,37 @@ mod tests {
             activity: SessionActivity { active, attached },
             warnings: Vec::new(),
         }
+    }
+
+    fn sample_image_transcript(session_id: &str) -> SessionMessagesResponse {
+        SessionMessagesResponse {
+            session_id: session_id.to_string(),
+            messages: vec![TranscriptMessage {
+                created_at: timestamp(2_500),
+                role: Role::User,
+                body: "[Image]".to_string(),
+                blocks: vec![MessageContentBlock::image(
+                    Some("image/png"),
+                    Some("ZmFrZQ=="),
+                )],
+            }],
+            freshness: TranscriptFreshness {
+                state: TranscriptFreshnessState::Live,
+                source: TranscriptSource::Extension,
+                as_of: timestamp(2_500),
+            },
+            activity: SessionActivity {
+                active: true,
+                attached: true,
+            },
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sanitizes_mdns_host_label() {
+        assert_eq!(sanitize_mdns_host_label("My Mac_Studio"), "my-mac-studio");
+        assert_eq!(sanitize_mdns_host_label("---"), "");
     }
 
     fn timestamp(millis: i64) -> chrono::DateTime<Utc> {
