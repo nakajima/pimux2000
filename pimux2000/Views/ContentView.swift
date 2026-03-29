@@ -68,6 +68,13 @@ struct ContentView: View {
 				await syncer.sync()
 			}
 		}
+		.onChange(of: selectedSessionID) {
+			guard let selectedSessionID else { return }
+			SessionSelectionPerformanceTrace.beginSelection(
+				sessionID: selectedSessionID,
+				source: "ContentView.selectedSessionID"
+			)
+		}
 		.onChange(of: sessions.map(\.session.sessionID)) {
 			guard !sessions.isEmpty else {
 				selectedSessionID = nil

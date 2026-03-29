@@ -44,6 +44,11 @@ struct SidebarView: View {
 						.tag(sessionInfo.session.sessionID)
 						.contentShape(Rectangle())
 						.onTapGesture {
+							SessionSelectionPerformanceTrace.emitEvent(
+								sessionID: sessionInfo.session.sessionID,
+								name: "SidebarTap",
+								message: "summary=\(sessionInfo.session.summary)"
+							)
 							selectedSessionID = sessionInfo.session.sessionID
 						}
 					}

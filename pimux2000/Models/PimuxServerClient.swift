@@ -1,6 +1,6 @@
 import Foundation
 
-struct PimuxHostSessions: Decodable, Equatable {
+struct PimuxHostSessions: Decodable, Equatable, Sendable {
 	let location: String
 	let connected: Bool
 	let missing: Bool
@@ -8,7 +8,7 @@ struct PimuxHostSessions: Decodable, Equatable {
 	let sessions: [PimuxActiveSession]
 }
 
-struct PimuxSessionContextUsage: Decodable, Equatable {
+struct PimuxSessionContextUsage: Decodable, Equatable, Sendable {
 	let usedTokens: Int?
 	let maxTokens: Int?
 
@@ -18,7 +18,7 @@ struct PimuxSessionContextUsage: Decodable, Equatable {
 	}
 }
 
-struct PimuxActiveSession: Decodable, Equatable {
+struct PimuxActiveSession: Decodable, Equatable, Sendable {
 	let id: String
 	let summary: String
 	let createdAt: Date
@@ -52,7 +52,7 @@ struct PimuxActiveSession: Decodable, Equatable {
 	}
 }
 
-struct PimuxListedSession: Decodable, Equatable {
+struct PimuxListedSession: Decodable, Equatable, Sendable {
 	let hostLocation: String
 	let hostConnected: Bool
 	let id: String
@@ -92,7 +92,7 @@ struct PimuxListedSession: Decodable, Equatable {
 	}
 }
 
-struct PimuxSessionMessagesResponse: Decodable, Equatable {
+struct PimuxSessionMessagesResponse: Decodable, Equatable, Sendable {
 	let sessionId: String
 	let messages: [PimuxTranscriptMessage]
 	let freshness: PimuxTranscriptFreshness
@@ -100,7 +100,7 @@ struct PimuxSessionMessagesResponse: Decodable, Equatable {
 	let warnings: [String]
 }
 
-struct PimuxTranscriptMessage: Decodable, Equatable {
+struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 	let createdAt: Date
 	let role: String
 	let body: String
@@ -140,7 +140,7 @@ struct PimuxTranscriptMessage: Decodable, Equatable {
 	}
 }
 
-struct PimuxTranscriptMessageBlock: Decodable, Equatable {
+struct PimuxTranscriptMessageBlock: Decodable, Equatable, Sendable {
 	let type: String
 	let text: String?
 	let toolCallName: String?
@@ -156,7 +156,7 @@ struct PimuxTranscriptMessageBlock: Decodable, Equatable {
 	}
 }
 
-struct PimuxSessionCommand: Decodable, Equatable, Identifiable {
+struct PimuxSessionCommand: Decodable, Equatable, Identifiable, Sendable {
 	let name: String
 	let description: String?
 	let source: String
@@ -164,23 +164,23 @@ struct PimuxSessionCommand: Decodable, Equatable, Identifiable {
 	var id: String { name }
 }
 
-struct PimuxSessionCommandsResponse: Decodable {
+struct PimuxSessionCommandsResponse: Decodable, Sendable {
 	let sessionId: String
 	let commands: [PimuxSessionCommand]
 }
 
-struct PimuxTranscriptFreshness: Decodable, Equatable {
+struct PimuxTranscriptFreshness: Decodable, Equatable, Sendable {
 	let state: String
 	let source: String
 	let asOf: Date
 }
 
-struct PimuxSessionActivity: Decodable, Equatable {
+struct PimuxSessionActivity: Decodable, Equatable, Sendable {
 	let active: Bool
 	let attached: Bool
 }
 
-enum PimuxSessionStreamEvent: Decodable, Equatable {
+enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 	case snapshot(sequence: UInt64, session: PimuxSessionMessagesResponse)
 	case sessionState(sequence: UInt64, connected: Bool, missing: Bool, lastSeenAt: Date?)
 	case keepalive(sequence: UInt64, timestamp: Date)
@@ -311,7 +311,7 @@ struct PimuxServerClient {
 			let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
 			if trimmed.isEmpty { continue }
 			do {
-				let event = try Self.decoder.decode(PimuxSessionStreamEvent.self, from: Data(trimmed.utf8))
+				let event = try await Self.decodeJSON(PimuxSessionStreamEvent.self, from: Data(trimmed.utf8))
 				await onEvent(event)
 			} catch {
 				let preview = String(trimmed.prefix(200))
@@ -393,14 +393,14 @@ struct PimuxServerClient {
 		return url
 	}
 
-	private func requestJSON<Response: Decodable>(
+	private nonisolated func requestJSON<Response: Decodable>(
 		_ type: Response.Type,
 		path: String,
 		queryItems: [URLQueryItem] = []
 	) async throws -> Response {
 		let (data, _) = try await performRequest(path: path, queryItems: queryItems)
 		do {
-			return try Self.decoder.decode(Response.self, from: data)
+			return try await Self.decodeJSON(Response.self, from: data)
 		} catch {
 			throw PimuxServerError.invalidResponse("Invalid JSON response from the server.")
 		}
@@ -481,7 +481,22 @@ struct PimuxServerClient {
 		return components.url
 	}
 
-	private static var decoder: JSONDecoder {
+	private nonisolated static func decodeJSON<Response: Decodable>(
+		_ type: Response.Type,
+		from data: Data
+	) async throws -> Response {
+		try await withCheckedThrowingContinuation { continuation in
+			DispatchQueue.global(qos: .userInitiated).async {
+				do {
+					continuation.resume(returning: try Self.decoder.decode(Response.self, from: data))
+				} catch {
+					continuation.resume(throwing: error)
+				}
+			}
+		}
+	}
+
+	private nonisolated static var decoder: JSONDecoder {
 		let decoder = JSONDecoder()
 		decoder.dateDecodingStrategy = .custom { decoder in
 			let container = try decoder.singleValueContainer()

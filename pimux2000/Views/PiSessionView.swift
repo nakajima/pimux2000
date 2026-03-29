@@ -7,7 +7,30 @@ import SwiftUI
 struct MessageInfo: Identifiable {
 	let message: Message
 	let contentBlocks: [MessageContentBlock]
+	let contentFingerprint: UInt64
 	var id: String { "\(message.piSessionID)-\(message.position)" }
+
+	init(message: Message, contentBlocks: [MessageContentBlock]) {
+		self.message = message
+		self.contentBlocks = contentBlocks
+		self.contentFingerprint = Self.makeContentFingerprint(message: message, contentBlocks: contentBlocks)
+	}
+
+	private static func makeContentFingerprint(message: Message, contentBlocks: [MessageContentBlock]) -> UInt64 {
+		TranscriptFingerprint.make { fingerprint in
+			fingerprint.combine(message.role.rawString)
+			fingerprint.combine(message.toolName)
+			fingerprint.combine(message.position)
+			for block in contentBlocks {
+				fingerprint.combine(block.position)
+				fingerprint.combine(block.type)
+				fingerprint.combine(block.text)
+				fingerprint.combine(block.toolCallName)
+				fingerprint.combine(block.mimeType)
+				fingerprint.combine(block.attachmentID)
+			}
+		}
+	}
 }
 
 struct MessagesRequest: ValueObservationQueryable {
@@ -16,6 +39,18 @@ struct MessagesRequest: ValueObservationQueryable {
 	let sessionID: String
 
 	func fetch(_ db: Database) throws -> [MessageInfo] {
+		let interval = SessionSelectionPerformanceTrace.beginInterval(
+			name: "MessagesRequestFetch",
+			sessionID: sessionID
+		)
+		var fetchedCount = 0
+		defer {
+			SessionSelectionPerformanceTrace.endInterval(
+				interval,
+				message: "count=\(fetchedCount)"
+			)
+		}
+
 		guard let currentSession = try PiSession
 			.filter(Column("sessionID") == sessionID)
 			.fetchOne(db),
@@ -35,13 +70,14 @@ struct MessagesRequest: ValueObservationQueryable {
 			.fetchAll(db)
 
 		let blocksByMessage = Dictionary(grouping: blocks, by: \.messageID)
-
-		return messages.map { message in
+		let messageInfos = messages.map { message in
 			MessageInfo(
 				message: message,
 				contentBlocks: blocksByMessage[message.id ?? -1] ?? []
 			)
 		}
+		fetchedCount = messageInfos.count
+		return messageInfos
 	}
 }
 
@@ -99,6 +135,10 @@ struct PiSessionView: View {
 	@State private var liveStreamState: LiveStreamState = .idle
 	@State private var lastStreamSequence: UInt64 = 0
 	@State private var customCommands: [PimuxSessionCommand] = []
+	@State private var requestedMessageContext: MessageContextRoute?
+	@State private var transcriptForcePinToken = 0
+	@State private var deferredStartupGeneration = 0
+	@State private var deferredStartupRequestID = 0
 
 	init(session: PiSession) {
 		self.session = session
@@ -107,46 +147,7 @@ struct PiSessionView: View {
 
 	var body: some View {
 		VStack(spacing: 0) {
-			ScrollViewReader { proxy in
-				ScrollView {
-					LazyVStack(alignment: .leading, spacing: 16) {
-						if let transcriptStatusText {
-							TranscriptStatusView(text: transcriptStatusText)
-						}
-
-						ForEach(transcriptWarnings, id: \.self) { warning in
-							TranscriptWarningView(text: warning)
-						}
-
-						if displayedMessages.isEmpty {
-							emptyStateView
-						} else {
-							ForEach(displayedMessages) { displayedMessage in
-								switch displayedMessage {
-								case .confirmed(let messageInfo):
-									MessageView(
-										messageInfo: messageInfo,
-										sessionID: session.sessionID,
-										serverURL: serverConfiguration?.serverURL
-									)
-										.id(displayedMessage.id)
-								case .pending(let pendingMessage):
-									PendingLocalMessageView(message: pendingMessage)
-										.id(displayedMessage.id)
-								}
-							}
-						}
-					}
-					.padding()
-				}
-				.refreshable {
-					await loadMessages()
-				}
-				.defaultScrollAnchor(.bottom)
-				.onChange(of: displayedMessagesScrollSignature) {
-					scrollToBottom(proxy: proxy)
-				}
-			}
+			transcriptView
 
 			MessageComposerView(
 				text: $draftMessage,
@@ -161,10 +162,26 @@ struct PiSessionView: View {
 			}
 		}
 		.navigationTitle(session.summary)
-		.task(id: liveTaskKey) {
+		.onAppear {
+			SessionSelectionPerformanceTrace.emitEvent(
+				sessionID: session.sessionID,
+				name: "PiSessionViewAppear",
+				message: "stored=\(storedMessages.count) streamed=\(streamedMessages?.count ?? -1) pending=\(pendingMessages.count)"
+			)
+			scheduleDeferredStartup()
+		}
+		.onChange(of: liveTaskKey) {
+			scheduleDeferredStartup()
+		}
+		.navigationDestination(item: $requestedMessageContext) { route in
+			MessageContextView(route: route)
+		}
+		.task(id: "live|\(liveTaskKey)|\(deferredStartupGeneration)") {
+			guard deferredStartupGeneration > 0 else { return }
 			await liveMessagesLoop()
 		}
-		.task(id: liveTaskKey) {
+		.task(id: "commands|\(liveTaskKey)|\(deferredStartupGeneration)") {
+			guard deferredStartupGeneration > 0 else { return }
 			await loadCustomCommands()
 		}
 	}
@@ -173,12 +190,124 @@ struct PiSessionView: View {
 		"\(session.sessionID)|\(serverConfiguration?.serverURL ?? "none")"
 	}
 
+	private func scheduleDeferredStartup() {
+		deferredStartupRequestID &+= 1
+		let requestID = deferredStartupRequestID
+		let scheduledKey = liveTaskKey
+
+		Task { @MainActor in
+			await Task.yield()
+			await Task.yield()
+			guard requestID == deferredStartupRequestID else { return }
+			guard scheduledKey == liveTaskKey else { return }
+			deferredStartupGeneration &+= 1
+			SessionSelectionPerformanceTrace.emitEvent(
+				sessionID: session.sessionID,
+				name: "DeferredStartupActivated",
+				message: "generation=\(deferredStartupGeneration) key=\(scheduledKey)"
+			)
+		}
+	}
+
 	private var renderedMessages: [MessageInfo] {
 		streamedMessages ?? storedMessages
 	}
 
 	private var displayedMessages: [DisplayedSessionMessage] {
 		renderedMessages.map(DisplayedSessionMessage.confirmed) + pendingMessages.map(DisplayedSessionMessage.pending)
+	}
+
+	private var transcriptRows: [SessionTranscriptRow] {
+		var rows: [SessionTranscriptRow] = []
+
+		if let transcriptStatusText {
+			rows.append(.status(transcriptStatusText))
+		}
+
+		rows += transcriptWarnings.enumerated().map { index, warning in
+			.warning(id: "transcript-warning-\(index)", text: warning)
+		}
+
+		if displayedMessages.isEmpty {
+			rows.append(.empty(transcriptEmptyState))
+		} else {
+			rows += displayedMessages.map { displayedMessage in
+				switch displayedMessage {
+				case .confirmed(let messageInfo):
+					.confirmed(messageInfo)
+				case .pending(let pendingMessage):
+					.pending(pendingMessage)
+				}
+			}
+		}
+
+		return rows
+	}
+
+	private var transcriptEmptyState: TranscriptEmptyState {
+		if isLoadingMessages {
+			.loading
+		} else if let loadError {
+			.error(loadError)
+		} else {
+			.empty
+		}
+	}
+
+	@ViewBuilder
+	private var transcriptView: some View {
+		#if canImport(UIKit) && !os(macOS)
+		SessionTranscriptView(
+			rows: transcriptRows,
+			sessionID: session.sessionID,
+			serverURL: serverConfiguration?.serverURL,
+			forcePinToken: transcriptForcePinToken,
+			onRefresh: { await loadMessages() },
+			onRetry: { Task { await loadMessages() } },
+			onOpenMessageContext: { requestedMessageContext = $0 }
+		)
+		#else
+		ScrollViewReader { proxy in
+			ScrollView {
+				LazyVStack(alignment: .leading, spacing: 16) {
+					if let transcriptStatusText {
+						TranscriptStatusView(text: transcriptStatusText)
+					}
+
+					ForEach(transcriptWarnings, id: \.self) { warning in
+						TranscriptWarningView(text: warning)
+					}
+
+					if displayedMessages.isEmpty {
+						emptyStateView
+					} else {
+						ForEach(displayedMessages) { displayedMessage in
+							switch displayedMessage {
+							case .confirmed(let messageInfo):
+								MessageView(
+									messageInfo: messageInfo,
+									sessionID: session.sessionID,
+									serverURL: serverConfiguration?.serverURL
+								)
+									.id(displayedMessage.id)
+							case .pending(let pendingMessage):
+								PendingLocalMessageView(message: pendingMessage)
+									.id(displayedMessage.id)
+							}
+						}
+					}
+				}
+				.padding()
+			}
+			.refreshable {
+				await loadMessages()
+			}
+			.defaultScrollAnchor(.bottom)
+			.onChange(of: displayedMessagesScrollSignature) {
+				scrollToBottom(proxy: proxy)
+			}
+		}
+		#endif
 	}
 
 	private var confirmedUserMessageCount: Int {
@@ -261,6 +390,12 @@ struct PiSessionView: View {
 	}
 
 	private func liveMessagesLoop() async {
+		SessionSelectionPerformanceTrace.emitEvent(
+			sessionID: session.sessionID,
+			name: "LiveMessagesLoopStart",
+			message: "serverConfigured=\(serverConfiguration != nil)"
+		)
+
 		guard serverConfiguration != nil else {
 			liveStreamState = .idle
 			return
@@ -375,6 +510,7 @@ struct PiSessionView: View {
 			body: body,
 			confirmedUserMessageBaseline: confirmedUserMessageCount
 		)
+		transcriptForcePinToken &+= 1
 		pendingMessages.append(pendingMessage)
 		draftMessage = ""
 		isSendingMessage = true
@@ -409,8 +545,19 @@ struct PiSessionView: View {
 			return
 		}
 
+		let interval = SessionSelectionPerformanceTrace.beginInterval(
+			name: "LoadMessages",
+			sessionID: session.sessionID,
+			message: "stored=\(storedMessages.count) rendered=\(renderedMessages.count)"
+		)
 		isLoadingMessages = true
-		defer { isLoadingMessages = false }
+		defer {
+			isLoadingMessages = false
+			SessionSelectionPerformanceTrace.endInterval(
+				interval,
+				message: "loadError=\(loadError ?? "none") rendered=\(renderedMessages.count)"
+			)
+		}
 
 		do {
 			guard let currentSession = try await currentSessionRow() else {
