@@ -1736,7 +1736,10 @@ fn launch_agent_log_path(suffix: &str) -> Result<PathBuf, BoxError> {
 }
 
 fn launchctl_domain() -> Result<String, BoxError> {
-    let uid = run_command("id", &["-u"])?;
+    let uid = env::var("SUDO_UID")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| run_command("id", &["-u"]).unwrap_or_default());
     Ok(format!("gui/{}", uid.trim()))
 }
 
