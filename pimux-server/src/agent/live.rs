@@ -19,7 +19,7 @@ use tokio::sync::{
 
 use crate::{
     message::{ImageContent, Message, Role, truncate_text},
-    session::{ActiveSession, SessionContextUsage},
+    session::{ActiveSession, SessionCommand, SessionContextUsage},
     transcript::{
         SessionActivity, SessionMessagesResponse, TranscriptFreshness, TranscriptFreshnessState,
         TranscriptSource,
@@ -33,6 +33,7 @@ pub const DEFAULT_DETACHED_TTL: Duration = Duration::from_secs(180);
 const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
 const LIVE_PROTOCOL_VERSION: u32 = 2;
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
+const GET_COMMANDS_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -137,6 +138,50 @@ impl LiveSessionStoreHandle {
         let mut store = self.inner.lock().await;
         store.purge_expired();
         store.disconnect_command_connection(connection_id)
+    }
+
+    pub async fn get_commands(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionCommand>, GetCommandsError> {
+        let (sender, request_id, receiver) = {
+            let mut store = self.inner.lock().await;
+            store.purge_expired();
+            store.prepare_get_commands(session_id)?
+        };
+
+        if sender
+            .send(LiveAgentCommand::GetCommands {
+                request_id: request_id.clone(),
+                session_id: session_id.to_string(),
+            })
+            .is_err()
+        {
+            let mut store = self.inner.lock().await;
+            store.cancel_get_commands(&request_id);
+            return Err(GetCommandsError::Unavailable);
+        }
+
+        match tokio::time::timeout(GET_COMMANDS_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(GetCommandsError::Disconnected),
+            Err(_) => {
+                let mut store = self.inner.lock().await;
+                store.cancel_get_commands(&request_id);
+                Err(GetCommandsError::TimedOut)
+            }
+        }
+    }
+
+    pub async fn fulfill_get_commands(
+        &self,
+        connection_id: u64,
+        request_id: &str,
+        commands: Vec<SessionCommand>,
+        error: Option<String>,
+    ) {
+        let mut store = self.inner.lock().await;
+        store.fulfill_get_commands(connection_id, request_id, commands, error);
     }
 
     pub async fn send_user_message(
@@ -344,6 +389,21 @@ async fn start_listener_impl(
                                         .fulfill_send_user_message(
                                             connection_id,
                                             &request_id,
+                                            error,
+                                        )
+                                        .await;
+                                }
+                                LiveSessionIpcMessage::GetCommandsResult {
+                                    request_id,
+                                    session_id: _,
+                                    commands,
+                                    error,
+                                } => {
+                                    store
+                                        .fulfill_get_commands(
+                                            connection_id,
+                                            &request_id,
+                                            commands,
                                             error,
                                         )
                                         .await;
@@ -565,6 +625,28 @@ impl std::fmt::Display for SendUserMessageError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetCommandsError {
+    Unavailable,
+    Disconnected,
+    TimedOut,
+    Failed(String),
+}
+
+impl std::fmt::Display for GetCommandsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => write!(
+                f,
+                "no live attached pimux extension is available for this session"
+            ),
+            Self::Disconnected => write!(f, "live session command connection disconnected"),
+            Self::TimedOut => write!(f, "timed out waiting for commands response"),
+            Self::Failed(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -604,6 +686,13 @@ enum LiveSessionIpcMessage {
         session_id: String,
         error: Option<String>,
     },
+    GetCommandsResult {
+        request_id: String,
+        session_id: String,
+        commands: Vec<SessionCommand>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -619,6 +708,10 @@ enum LiveAgentCommand {
         body: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageContent>,
+    },
+    GetCommands {
+        request_id: String,
+        session_id: String,
     },
 }
 
@@ -658,6 +751,7 @@ struct LiveSessionStore {
     command_connections: HashMap<u64, LiveCommandConnection>,
     command_session_connections: HashMap<String, u64>,
     inflight_send_user_messages: HashMap<String, InflightSendUserMessage>,
+    inflight_get_commands: HashMap<String, InflightGetCommands>,
     next_send_request_id: u64,
     detached_capacity: usize,
     detached_ttl: Duration,
@@ -674,6 +768,7 @@ impl LiveSessionStore {
             command_connections: HashMap::new(),
             command_session_connections: HashMap::new(),
             inflight_send_user_messages: HashMap::new(),
+            inflight_get_commands: HashMap::new(),
             next_send_request_id: 1,
             detached_capacity,
             detached_ttl,
@@ -983,6 +1078,66 @@ impl LiveSessionStore {
         self.inflight_send_user_messages.remove(request_id);
     }
 
+    fn prepare_get_commands(
+        &mut self,
+        session_id: &str,
+    ) -> Result<
+        (
+            UnboundedSender<LiveAgentCommand>,
+            String,
+            oneshot::Receiver<Result<Vec<SessionCommand>, GetCommandsError>>,
+        ),
+        GetCommandsError,
+    > {
+        let Some(connection_id) = self.command_session_connections.get(session_id).copied() else {
+            return Err(GetCommandsError::Unavailable);
+        };
+        let Some(connection) = self.command_connections.get(&connection_id) else {
+            self.command_session_connections.remove(session_id);
+            return Err(GetCommandsError::Unavailable);
+        };
+
+        let request_id = format!("live-cmds-{}", self.next_send_request_id);
+        self.next_send_request_id += 1;
+
+        let (sender, receiver) = oneshot::channel();
+        self.inflight_get_commands.insert(
+            request_id.clone(),
+            InflightGetCommands {
+                connection_id,
+                sender,
+            },
+        );
+
+        Ok((connection.sender.clone(), request_id, receiver))
+    }
+
+    fn fulfill_get_commands(
+        &mut self,
+        connection_id: u64,
+        request_id: &str,
+        commands: Vec<SessionCommand>,
+        error: Option<String>,
+    ) {
+        let Some(inflight) = self.inflight_get_commands.remove(request_id) else {
+            return;
+        };
+
+        if inflight.connection_id != connection_id {
+            return;
+        }
+
+        let result = match error {
+            Some(error) => Err(GetCommandsError::Failed(error)),
+            None => Ok(commands),
+        };
+        let _ = inflight.sender.send(result);
+    }
+
+    fn cancel_get_commands(&mut self, request_id: &str) {
+        self.inflight_get_commands.remove(request_id);
+    }
+
     fn disconnect_command_connection(
         &mut self,
         connection_id: u64,
@@ -992,6 +1147,10 @@ impl LiveSessionStore {
         self.fail_inflight_send_user_messages_for_connection(
             connection_id,
             SendUserMessageError::Disconnected,
+        );
+        self.fail_inflight_get_commands_for_connection(
+            connection_id,
+            GetCommandsError::Disconnected,
         );
 
         let session_id = connection.current_session_id?;
@@ -1017,6 +1176,26 @@ impl LiveSessionStore {
 
         for request_id in request_ids {
             if let Some(inflight) = self.inflight_send_user_messages.remove(&request_id) {
+                let _ = inflight.sender.send(Err(error.clone()));
+            }
+        }
+    }
+
+    fn fail_inflight_get_commands_for_connection(
+        &mut self,
+        connection_id: u64,
+        error: GetCommandsError,
+    ) {
+        let request_ids = self
+            .inflight_get_commands
+            .iter()
+            .filter_map(|(request_id, inflight)| {
+                (inflight.connection_id == connection_id).then_some(request_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for request_id in request_ids {
+            if let Some(inflight) = self.inflight_get_commands.remove(&request_id) {
                 let _ = inflight.sender.send(Err(error.clone()));
             }
         }
@@ -1245,6 +1424,11 @@ struct InflightSendUserMessage {
     sender: oneshot::Sender<Result<(), SendUserMessageError>>,
 }
 
+struct InflightGetCommands {
+    connection_id: u64,
+    sender: oneshot::Sender<Result<Vec<SessionCommand>, GetCommandsError>>,
+}
+
 fn sanitize_message(mut message: Message) -> Message {
     message.body = truncate_text(&message.body, MAX_LIVE_MESSAGE_BODY_CHARS);
     for block in &mut message.blocks {
@@ -1296,7 +1480,10 @@ mod tests {
             session_id,
             body,
             images,
-        } = command;
+        } = command
+        else {
+            panic!("expected SendUserMessage command");
+        };
         assert_eq!(request_id, "live-send-1");
         assert_eq!(session_id, "session-1");
         assert_eq!(body, "hello live");

@@ -426,13 +426,14 @@ Each message has:
 - `created_at: string`
 - `role: string`
 - `body: string` — compatibility/plain-text rendering field; image-only messages may use placeholders like `[Image]`
+- `toolName?: string` — present for tool result messages when available
 - `blocks: MessageBlock[]` — structured display blocks for the app
 
 Snapshots do not inline raw image bytes. Image blocks reference fetchable attachments instead.
 
 `blocks` entries currently use:
 - `type: "text" | "thinking" | "toolCall" | "image" | "other"`
-- `text?: string`
+- `text?: string` — for text/thinking/other blocks, and for tool-call argument summaries when available
 - `toolCallName?: string`
 - `mimeType?: string`
 - `attachmentId?: string` — present for image blocks when the attachment can be fetched from `GET /sessions/{id}/attachments/{attachmentId}`

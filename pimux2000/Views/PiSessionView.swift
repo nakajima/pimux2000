@@ -98,6 +98,7 @@ struct PiSessionView: View {
 	@State private var transcriptActivity: PimuxSessionActivity?
 	@State private var liveStreamState: LiveStreamState = .idle
 	@State private var lastStreamSequence: UInt64 = 0
+	@State private var customCommands: [PimuxSessionCommand] = []
 
 	init(session: PiSession) {
 		self.session = session
@@ -149,6 +150,7 @@ struct PiSessionView: View {
 
 			MessageComposerView(
 				text: $draftMessage,
+				customCommands: customCommands,
 				isEnabled: serverConfiguration != nil,
 				isSending: isSendingMessage,
 				errorMessage: sendError,
@@ -161,6 +163,9 @@ struct PiSessionView: View {
 		.navigationTitle(session.summary)
 		.task(id: liveTaskKey) {
 			await liveMessagesLoop()
+		}
+		.task(id: liveTaskKey) {
+			await loadCustomCommands()
 		}
 	}
 
@@ -436,6 +441,17 @@ struct PiSessionView: View {
 		}
 	}
 
+	private func loadCustomCommands() async {
+		guard let serverConfiguration else { return }
+		do {
+			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+			customCommands = try await client.getCommands(sessionID: session.sessionID)
+		} catch {
+			// Non-critical; built-in commands still work
+			print("Failed to load custom commands for \(session.sessionID): \(error)")
+		}
+	}
+
 	private func persistActivity(_ activity: PimuxSessionActivity) {
 		try? appDatabase?.updateSessionActivity(
 			sessionID: session.sessionID,
@@ -458,7 +474,12 @@ struct PiSessionView: View {
 					id: nil,
 					piSessionID: piSessionID,
 					role: Message.Role(remoteMessage.role),
-					toolName: nil,
+					toolName: {
+						guard let toolName = remoteMessage.toolName?.trimmingCharacters(in: .whitespacesAndNewlines), !toolName.isEmpty else {
+							return nil
+						}
+						return toolName
+					}(),
 					position: index,
 					createdAt: remoteMessage.createdAt
 				),
@@ -483,7 +504,7 @@ struct PiSessionView: View {
 							id: nil,
 							messageID: Int64(index),
 							type: "toolCall",
-							text: nil,
+							text: text,
 							toolCallName: toolCallName,
 							position: blockIndex
 						)
@@ -703,16 +724,22 @@ struct ContentBlockView: View {
 			}
 
 		case "toolCall":
-			Label {
-				Text(verbatim: block.toolCallName ?? "unknown tool")
-			} icon: {
-				Image(systemName: "terminal.fill")
+			VStack(alignment: .leading, spacing: 8) {
+				Label {
+					Text(verbatim: block.toolCallName ?? "unknown tool")
+				} icon: {
+					Image(systemName: "terminal.fill")
+				}
+					.font(chatFont(style: .callout))
+					.foregroundStyle(.teal)
+					.padding(.vertical, 4)
+					.padding(.horizontal, 8)
+					.background(.teal.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+
+				if let text = block.text, !text.isEmpty {
+					ToolCallDetailsView(text: text)
+				}
 			}
-				.font(chatFont(style: .callout))
-				.foregroundStyle(.teal)
-				.padding(.vertical, 4)
-				.padding(.horizontal, 8)
-				.background(.teal.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
 
 		case "image":
 			if let attachmentURL {
@@ -734,6 +761,20 @@ struct ContentBlockView: View {
 					.foregroundStyle(.secondary)
 			}
 		}
+	}
+}
+
+private struct ToolCallDetailsView: View {
+	let text: String
+
+	var body: some View {
+		Text(verbatim: text)
+			.font(.system(.caption, design: .monospaced))
+			.foregroundStyle(.secondary)
+			.textSelection(.enabled)
+			.padding(.vertical, 8)
+			.padding(.horizontal, 10)
+			.background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
 	}
 }
 
@@ -863,7 +904,7 @@ private struct TranscriptImageView: View {
 			createdAt: now.addingTimeInterval(30),
 			blocks: [
 				(type: "thinking", text: "Inspecting the supported roles and block kinds before updating the fixtures.", toolCallName: nil, mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: nil, toolCallName: "read", mimeType: nil, attachmentID: nil)
+				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift (offset=785, limit=140)", toolCallName: "read", mimeType: nil, attachmentID: nil)
 			]
 		)
 
@@ -884,7 +925,7 @@ private struct TranscriptImageView: View {
 			position: 3,
 			createdAt: now.addingTimeInterval(90),
 			blocks: [
-				(type: "toolCall", text: nil, toolCallName: "bash", mimeType: nil, attachmentID: nil)
+				(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil)
 			]
 		)
 
@@ -904,7 +945,7 @@ private struct TranscriptImageView: View {
 			position: 5,
 			createdAt: now.addingTimeInterval(150),
 			blocks: [
-				(type: "toolCall", text: nil, toolCallName: "edit", mimeType: nil, attachmentID: nil)
+				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil)
 			]
 		)
 
@@ -925,9 +966,9 @@ private struct TranscriptImageView: View {
 			position: 7,
 			createdAt: now.addingTimeInterval(210),
 			blocks: [
-				(type: "toolCall", text: nil, toolCallName: "read", mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: nil, toolCallName: "bash", mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: nil, toolCallName: "edit", mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift (offset=785, limit=140)", toolCallName: "read", mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil),
 				(type: "text", text: "Done — this preview now shows tool calls alongside realistic outputs, plus summaries, shell output, image attachments, and fallback cases.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: "img-preview")
 			]

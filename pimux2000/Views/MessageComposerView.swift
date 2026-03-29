@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MessageComposerView: View {
 	@Binding var text: String
+	var customCommands: [PimuxSessionCommand] = []
 	var placeholder: String = "Send a message"
 	var isEnabled: Bool = true
 	var isSending: Bool = false
@@ -16,11 +17,29 @@ struct MessageComposerView: View {
 		isEnabled && !isSending && !trimmedText.isEmpty
 	}
 
+	private var allCommands: [SlashCommand] {
+		SlashCommand.merged(custom: customCommands)
+	}
+
+	private var matchingCommands: [SlashCommand] {
+		// Only match when the text is purely a slash prefix (no spaces yet)
+		let trimmed = trimmedText
+		guard trimmed.hasPrefix("/"), !trimmed.dropFirst().contains(" ") else { return [] }
+		return SlashCommand.matching(query: trimmed, from: allCommands)
+	}
+
 	var body: some View {
 		VStack(spacing: 0) {
 			Divider()
 
 			VStack(alignment: .leading, spacing: 8) {
+				if !matchingCommands.isEmpty {
+					SlashCommandMenuView(commands: matchingCommands) { command in
+						text = command.displayName + " "
+					}
+					.transition(.move(edge: .bottom).combined(with: .opacity))
+				}
+
 				if let errorMessage, !errorMessage.isEmpty {
 					Label {
 						Text(verbatim: errorMessage)
@@ -61,7 +80,44 @@ struct MessageComposerView: View {
 			.padding(.horizontal)
 			.padding(.vertical, 12)
 			.background(.thinMaterial)
+			.animation(.easeOut(duration: 0.15), value: matchingCommands.map(\.name))
 		}
+	}
+}
+
+// MARK: - Slash Command Menu
+
+private struct SlashCommandMenuView: View {
+	let commands: [SlashCommand]
+	let onSelect: (SlashCommand) -> Void
+
+	var body: some View {
+		ScrollView {
+			LazyVStack(alignment: .leading, spacing: 0) {
+				ForEach(commands) { command in
+					Button {
+						onSelect(command)
+					} label: {
+						HStack(spacing: 8) {
+							Text(command.displayName)
+								.fontWeight(.medium)
+								.foregroundStyle(.primary)
+							Text(command.description)
+								.foregroundStyle(.secondary)
+								.lineLimit(1)
+							Spacer()
+						}
+						.font(.callout)
+						.padding(.horizontal, 12)
+						.padding(.vertical, 8)
+						.contentShape(Rectangle())
+					}
+					.buttonStyle(.plain)
+				}
+			}
+		}
+		.frame(maxHeight: 200)
+		.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
 	}
 }
 
@@ -89,6 +145,14 @@ private struct MessageComposerPreviewHost: View {
 
 #Preview("Ready") {
 	MessageComposerPreviewHost(text: "Continue from here")
+}
+
+#Preview("Slash commands") {
+	MessageComposerPreviewHost(text: "/")
+}
+
+#Preview("Slash filter") {
+	MessageComposerPreviewHost(text: "/co")
 }
 
 #Preview("Sending") {

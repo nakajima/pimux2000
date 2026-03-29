@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +70,8 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
     pub role: Role,
     pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<MessageContentBlock>,
 }
@@ -93,6 +96,8 @@ pub struct ApiMessage {
     pub created_at: DateTime<Utc>,
     pub role: Role,
     pub body: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<ApiMessageContentBlock>,
 }
@@ -120,6 +125,7 @@ impl Message {
             created_at,
             role,
             body: body_from_blocks(role, &blocks),
+            tool_name: None,
             blocks,
         })
     }
@@ -129,6 +135,7 @@ impl Message {
             created_at: self.created_at,
             role: self.role,
             body: self.body.clone(),
+            tool_name: self.tool_name.clone(),
             blocks: self
                 .blocks
                 .iter()
@@ -159,7 +166,7 @@ impl MessageContentBlock {
         })
     }
 
-    pub fn tool_call(name: impl AsRef<str>) -> Option<Self> {
+    pub fn tool_call(name: impl AsRef<str>, text: Option<&str>) -> Option<Self> {
         let name = collapse_whitespace(name.as_ref());
         if name.is_empty() {
             return None;
@@ -167,7 +174,7 @@ impl MessageContentBlock {
 
         Some(Self {
             kind: MessageContentBlockKind::ToolCall,
-            text: None,
+            text: text.and_then(normalized_display_text),
             tool_call_name: Some(name),
             mime_type: None,
             data: None,
@@ -275,6 +282,116 @@ pub fn truncate_text(text: &str, max_chars: usize) -> String {
     format!("{truncated}…")
 }
 
+pub fn tool_call_summary(name: &str, arguments: Option<&Value>) -> Option<String> {
+    let arguments = arguments?;
+
+    match name {
+        "read" => {
+            let path = arguments.get("path").and_then(Value::as_str)?;
+            let path = normalized_display_text(path)?;
+            let mut summary = path;
+            let mut options = Vec::new();
+            if let Some(offset) = display_number(arguments.get("offset")) {
+                options.push(format!("offset={offset}"));
+            }
+            if let Some(limit) = display_number(arguments.get("limit")) {
+                options.push(format!("limit={limit}"));
+            }
+            if !options.is_empty() {
+                summary.push_str(&format!(" ({})", options.join(", ")));
+            }
+            Some(summary)
+        }
+        "bash" => {
+            let command = arguments.get("command").and_then(Value::as_str)?;
+            let command = normalized_display_text(command)?;
+            let mut summary = format!("$ {command}");
+            if let Some(timeout) = display_number(arguments.get("timeout")) {
+                summary.push_str(&format!("\n\ntimeout: {timeout}s"));
+            }
+            Some(summary)
+        }
+        "edit" => {
+            let path = arguments.get("path").and_then(Value::as_str)?;
+            let path = normalized_display_text(path)?;
+            let mut lines = vec![path];
+            if let Some(edits) = arguments.get("edits").and_then(Value::as_array) {
+                let count = edits.len();
+                let label = if count == 1 { "edit" } else { "edits" };
+                lines.push(format!("{count} {label}"));
+            } else if arguments.get("oldText").is_some() || arguments.get("newText").is_some() {
+                lines.push("single replacement".to_string());
+            }
+            Some(lines.join("\n\n"))
+        }
+        "write" => {
+            let path = arguments.get("path").and_then(Value::as_str)?;
+            let path = normalized_display_text(path)?;
+            let mut lines = vec![path];
+            if let Some(content) = arguments.get("content").and_then(Value::as_str) {
+                let line_count = content.lines().count().max(1);
+                lines.push(format!("{line_count} lines"));
+            }
+            Some(lines.join("\n\n"))
+        }
+        "mcp" => {
+            let mut lines = Vec::new();
+            for key in ["tool", "server", "connect", "describe", "search", "action"] {
+                if let Some(value) = arguments.get(key).and_then(Value::as_str)
+                    && let Some(value) = normalized_display_text(value)
+                {
+                    lines.push(format!("{key}: {value}"));
+                }
+            }
+            if let Some(args) = arguments.get("args")
+                && !args.is_null()
+            {
+                lines.push(format!("args: {}", truncate_text(&value_to_summary(args), 500)));
+            }
+            if lines.is_empty() {
+                pretty_json_summary(arguments)
+            } else {
+                Some(lines.join("\n"))
+            }
+        }
+        "multi_tool_use.parallel" => {
+            let count = arguments
+                .get("tool_uses")
+                .and_then(Value::as_array)
+                .map(Vec::len)?;
+            let label = if count == 1 { "tool call" } else { "tool calls" };
+            Some(format!("{count} parallel {label}"))
+        }
+        _ => pretty_json_summary(arguments),
+    }
+}
+
+fn display_number(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(number) = value.as_i64() {
+        return Some(number.to_string());
+    }
+    if let Some(number) = value.as_u64() {
+        return Some(number.to_string());
+    }
+    if let Some(number) = value.as_f64() {
+        return Some(number.to_string());
+    }
+    None
+}
+
+fn pretty_json_summary(value: &Value) -> Option<String> {
+    let pretty = serde_json::to_string_pretty(value).ok()?;
+    normalized_display_text(&truncate_text(&pretty, 2_000))
+}
+
+fn value_to_summary(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
+    }
+}
+
 fn normalize_block(mut block: MessageContentBlock) -> Option<MessageContentBlock> {
     match block.kind {
         MessageContentBlockKind::Text
@@ -298,7 +415,7 @@ fn normalize_block(mut block: MessageContentBlock) -> Option<MessageContentBlock
             {
                 return None;
             }
-            block.text = None;
+            block.text = block.text.as_deref().and_then(normalized_display_text);
             block.mime_type = None;
             block.data = None;
         }

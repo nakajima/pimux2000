@@ -13,7 +13,8 @@ use tokio::{
 };
 
 use crate::message::{
-    ImageContent, Message, MessageContentBlock, Role, collapse_whitespace, normalized_display_text,
+    ImageContent, Message, MessageContentBlock, Role, collapse_whitespace,
+    normalized_display_text, tool_call_summary,
 };
 
 use super::{
@@ -416,7 +417,7 @@ fn rpc_message_to_message(value: &Value) -> Option<Message> {
 
     let created_at = value.get("timestamp").and_then(parse_unix_millis)?;
 
-    match role {
+    let mut parsed = match role {
         Role::User | Role::ToolResult | Role::Custom | Role::Other => Message::from_blocks(
             created_at,
             role,
@@ -436,7 +437,10 @@ fn rpc_message_to_message(value: &Value) -> Option<Message> {
             collapse_whitespace(value.get("summary").and_then(Value::as_str)?),
         ),
         Role::BashExecution => Message::from_text(created_at, role, flatten_bash_execution(value)?),
-    }
+    }?;
+
+    parsed.tool_name = message_tool_name(value);
+    Some(parsed)
 }
 
 fn parse_unix_millis(value: &Value) -> Option<DateTime<Utc>> {
@@ -448,6 +452,16 @@ fn parse_unix_millis(value: &Value) -> Option<DateTime<Utc>> {
     };
 
     Utc.timestamp_millis_opt(millis).single()
+}
+
+fn message_tool_name(message: &Value) -> Option<String> {
+    let tool_name = message.get("toolName").and_then(Value::as_str)?;
+    let tool_name = collapse_whitespace(tool_name);
+    if tool_name.is_empty() {
+        None
+    } else {
+        Some(tool_name)
+    }
 }
 
 fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<MessageContentBlock> {
@@ -468,10 +482,11 @@ fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<Mess
                     .get("thinking")
                     .and_then(Value::as_str)
                     .and_then(MessageContentBlock::thinking),
-                Some("toolCall") if include_tool_calls => block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .and_then(MessageContentBlock::tool_call),
+                Some("toolCall") if include_tool_calls => {
+                    let name = block.get("name").and_then(Value::as_str)?;
+                    let summary = tool_call_summary(name, block.get("arguments"));
+                    MessageContentBlock::tool_call(name, summary.as_deref())
+                }
                 Some("image") => Some(MessageContentBlock::image(
                     block.get("mimeType").and_then(Value::as_str),
                     block.get("data").and_then(Value::as_str),
@@ -496,6 +511,25 @@ fn flatten_bash_execution(value: &Value) -> Option<String> {
         && let Some(output) = normalized_display_text(output)
     {
         parts.push(output);
+    }
+
+    let mut metadata = Vec::new();
+    if let Some(exit_code) = value.get("exitCode").and_then(Value::as_i64) {
+        metadata.push(format!("exit code: {exit_code}"));
+    }
+    if value.get("cancelled").and_then(Value::as_bool) == Some(true) {
+        metadata.push("cancelled".to_string());
+    }
+    if value.get("truncated").and_then(Value::as_bool) == Some(true) {
+        metadata.push("truncated".to_string());
+    }
+    if let Some(path) = value.get("fullOutputPath").and_then(Value::as_str)
+        && let Some(path) = normalized_display_text(path)
+    {
+        metadata.push(format!("full output: {path}"));
+    }
+    if !metadata.is_empty() {
+        parts.push(metadata.join("\n"));
     }
 
     if parts.is_empty() {

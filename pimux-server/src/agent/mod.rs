@@ -28,6 +28,8 @@ use crate::{
     transcript::TranscriptFetchFulfillment,
 };
 
+
+
 pub use summarizer::DEFAULT_SUMMARY_MODEL;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -516,6 +518,21 @@ async fn handle_server_message(
             let _ = channel_tx.send(AgentToServerMessage::SendMessageResult {
                 request_id,
                 error: result.err(),
+            });
+        }
+        ServerToAgentMessage::GetCommands {
+            request_id,
+            session_id,
+        } => {
+            let result = live_store.get_commands(&session_id).await;
+            let (commands, error) = match result {
+                Ok(commands) => (Some(commands), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let _ = channel_tx.send(AgentToServerMessage::GetCommandsResult {
+                request_id,
+                commands,
+                error,
             });
         }
         ServerToAgentMessage::Ping => {

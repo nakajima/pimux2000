@@ -31,6 +31,7 @@ interface PimuxMessage {
 	created_at: string;
 	role: PimuxRole;
 	body: string;
+	toolName?: string;
 	blocks?: PimuxMessageBlock[];
 }
 
@@ -54,7 +55,8 @@ type BridgeToAgentMessage =
 	| { type: "sessionAppend"; sessionId: string; messages: PimuxMessage[]; metadata: PimuxSessionMetadata }
 	| { type: "assistantPartial"; sessionId: string; message: PimuxMessage }
 	| { type: "sessionDetached"; sessionId: string }
-	| { type: "sendUserMessageResult"; requestId: string; sessionId: string; error?: string };
+	| { type: "sendUserMessageResult"; requestId: string; sessionId: string; error?: string }
+	| { type: "getCommandsResult"; requestId: string; sessionId: string; commands: PimuxSessionCommand[]; error?: string };
 
 interface PimuxInputImage {
 	type: "image";
@@ -62,13 +64,25 @@ interface PimuxInputImage {
 	mimeType: string;
 }
 
-type AgentToBridgeMessage = {
-	type: "sendUserMessage";
-	requestId: string;
-	sessionId: string;
-	body: string;
-	images?: PimuxInputImage[];
-};
+type AgentToBridgeMessage =
+	| {
+			type: "sendUserMessage";
+			requestId: string;
+			sessionId: string;
+			body: string;
+			images?: PimuxInputImage[];
+	  }
+	| {
+			type: "getCommands";
+			requestId: string;
+			sessionId: string;
+	  };
+
+interface PimuxSessionCommand {
+	name: string;
+	description?: string;
+	source: string;
+}
 
 interface PendingPartial {
 	message: PimuxMessage;
@@ -209,8 +223,7 @@ class LiveBridgeClient {
 			if (!line) continue;
 
 			try {
-				const command = JSON.parse(line) as AgentToBridgeMessage;
-				if (command.type !== "sendUserMessage") continue;
+					const command = JSON.parse(line) as AgentToBridgeMessage;
 				this.onCommand(command);
 			} catch {
 				// Ignore malformed agent-side commands.
@@ -273,7 +286,32 @@ export default function (pi: ExtensionAPI) {
 		return content;
 	}
 
+	function handleGetCommands(requestId: string, sessionId: string) {
+		try {
+			const slashCommands = pi.getCommands();
+			const commands: PimuxSessionCommand[] = slashCommands.map((cmd) => ({
+				name: cmd.name,
+				description: cmd.description,
+				source: cmd.source,
+			}));
+			bridge.send({ type: "getCommandsResult", requestId, sessionId, commands });
+		} catch (error) {
+			bridge.send({
+				type: "getCommandsResult",
+				requestId,
+				sessionId,
+				commands: [],
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	function handleBridgeCommand(command: AgentToBridgeMessage) {
+		if (command.type === "getCommands") {
+			handleGetCommands(command.requestId, command.sessionId);
+			return;
+		}
+
 		if (command.type !== "sendUserMessage") return;
 
 		if (!state.currentSessionId || command.sessionId !== state.currentSessionId) {
@@ -543,7 +581,8 @@ function agentMessageToPimuxMessage(message: any, fallbackTimestamp?: string): P
 			return pimuxMessageFromBlocks(
 				timestampToIso(message.timestamp, fallbackTimestamp),
 				"toolResult",
-				contentToBlocks(message.content, false)
+				contentToBlocks(message.content, false),
+				typeof message.toolName === "string" ? collapseWhitespace(message.toolName) : undefined
 			);
 		case "bashExecution": {
 			const text = flattenBashExecution(message);
@@ -584,7 +623,12 @@ function pimuxMessageFromText(created_at: string, role: PimuxRole, text: string)
 	};
 }
 
-function pimuxMessageFromBlocks(created_at: string, role: PimuxRole, blocks: PimuxMessageBlock[]): PimuxMessage | undefined {
+function pimuxMessageFromBlocks(
+	created_at: string,
+	role: PimuxRole,
+	blocks: PimuxMessageBlock[],
+	toolName?: string
+): PimuxMessage | undefined {
 	const normalizedBlocks = blocks
 		.map(normalizeBlock)
 		.filter((block): block is PimuxMessageBlock => Boolean(block));
@@ -594,6 +638,7 @@ function pimuxMessageFromBlocks(created_at: string, role: PimuxRole, blocks: Pim
 		created_at,
 		role,
 		body: bodyFromBlocks(role, normalizedBlocks),
+		toolName: toolName || undefined,
 		blocks: normalizedBlocks,
 	};
 }
@@ -612,7 +657,8 @@ function normalizeBlock(block: PimuxMessageBlock | undefined): PimuxMessageBlock
 		case "toolCall": {
 			const toolCallName = collapseWhitespace(block.toolCallName);
 			if (!toolCallName) return undefined;
-			return { type: "toolCall", toolCallName };
+			const text = normalizeDisplayText(block.text);
+			return text ? { type: "toolCall", toolCallName, text } : { type: "toolCall", toolCallName };
 		}
 		case "image": {
 			const mimeType = normalizeMimeType(block.mimeType);
@@ -643,6 +689,81 @@ function bodyFromBlocks(role: PimuxRole, blocks: PimuxMessageBlock[]): string {
 	return "";
 }
 
+function toolCallSummary(toolName: string, args: any): string | undefined {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+
+	switch (toolName) {
+		case "read": {
+			if (typeof args.path !== "string") return undefined;
+			let summary = args.path;
+			const options: string[] = [];
+			if (typeof args.offset === "number") options.push(`offset=${args.offset}`);
+			if (typeof args.limit === "number") options.push(`limit=${args.limit}`);
+			if (options.length > 0) summary += ` (${options.join(", ")})`;
+			return normalizeDisplayText(summary);
+		}
+		case "bash": {
+			if (typeof args.command !== "string") return undefined;
+			let summary = `$ ${args.command}`;
+			if (typeof args.timeout === "number") summary += `\n\ntimeout: ${args.timeout}s`;
+			return normalizeDisplayText(summary);
+		}
+		case "edit": {
+			if (typeof args.path !== "string") return undefined;
+			const lines = [args.path];
+			if (Array.isArray(args.edits)) {
+				lines.push(`${args.edits.length} ${args.edits.length === 1 ? "edit" : "edits"}`);
+			} else if (typeof args.oldText === "string" || typeof args.newText === "string") {
+				lines.push("single replacement");
+			}
+			return normalizeDisplayText(lines.join("\n\n"));
+		}
+		case "write": {
+			if (typeof args.path !== "string") return undefined;
+			const lines = [args.path];
+			if (typeof args.content === "string") {
+				lines.push(`${Math.max(args.content.split("\n").length, 1)} lines`);
+			}
+			return normalizeDisplayText(lines.join("\n\n"));
+		}
+		case "mcp": {
+			const lines: string[] = [];
+			for (const key of ["tool", "server", "connect", "describe", "search", "action"]) {
+				if (typeof args[key] === "string" && args[key].trim()) {
+					lines.push(`${key}: ${args[key].trim()}`);
+				}
+			}
+			if (typeof args.args === "string" && args.args.trim()) {
+				lines.push(`args: ${truncateSummary(args.args, 500)}`);
+			}
+			if (lines.length > 0) return lines.join("\n");
+			return prettyJsonSummary(args);
+		}
+		case "multi_tool_use.parallel": {
+			if (!Array.isArray(args.tool_uses)) return undefined;
+			const count = args.tool_uses.length;
+			return `${count} parallel ${count === 1 ? "tool call" : "tool calls"}`;
+		}
+		default:
+			return prettyJsonSummary(args);
+	}
+}
+
+function prettyJsonSummary(value: any): string | undefined {
+	try {
+		const pretty = JSON.stringify(value, null, 2);
+		return normalizeDisplayText(truncateSummary(pretty, 2000));
+	} catch {
+		return undefined;
+	}
+}
+
+function truncateSummary(value: string, maxChars: number): string {
+	const chars = [...value];
+	if (chars.length <= maxChars) return value;
+	return `${chars.slice(0, maxChars).join("")}…`;
+}
+
 function contentToBlocks(content: any, includeToolCalls: boolean): PimuxMessageBlock[] {
 	if (typeof content === "string") {
 		const text = normalizeDisplayText(content);
@@ -665,9 +786,11 @@ function contentToBlocks(content: any, includeToolCalls: boolean): PimuxMessageB
 				case "toolCall": {
 					if (!includeToolCalls || typeof block.name !== "string") return undefined;
 					const toolCallName = collapseWhitespace(block.name);
-					return toolCallName
-						? ({ type: "toolCall", toolCallName } satisfies PimuxMessageBlock)
-						: undefined;
+					if (!toolCallName) return undefined;
+					const text = toolCallSummary(toolCallName, block.arguments);
+					return text
+						? ({ type: "toolCall", toolCallName, text } satisfies PimuxMessageBlock)
+						: ({ type: "toolCall", toolCallName } satisfies PimuxMessageBlock);
 				}
 				case "image": {
 					const mimeType = normalizeMimeType(block.mimeType);
@@ -705,6 +828,16 @@ function flattenBashExecution(message: any): string | undefined {
 		const output = normalizeDisplayText(message.output);
 		if (output) parts.push(output);
 	}
+
+	const metadata: string[] = [];
+	if (typeof message.exitCode === "number") metadata.push(`exit code: ${message.exitCode}`);
+	if (message.cancelled === true) metadata.push("cancelled");
+	if (message.truncated === true) metadata.push("truncated");
+	if (typeof message.fullOutputPath === "string") {
+		const path = normalizeDisplayText(message.fullOutputPath);
+		if (path) metadata.push(`full output: ${path}`);
+	}
+	if (metadata.length > 0) parts.push(metadata.join("\n"));
 
 	const body = parts.join("\n\n");
 	return body || undefined;

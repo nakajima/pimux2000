@@ -37,7 +37,7 @@ use crate::{
     host::{HostIdentity, HostSessions},
     message::{ImageContent, normalize_mime_type},
     report::VersionResponse,
-    session::{ActiveSession, ListedSession},
+    session::{ActiveSession, ListedSession, SessionCommand},
     transcript::{
         ApiSessionMessagesResponse, SessionMessagesResponse, SessionStreamEvent,
         TranscriptFreshnessState, TranscriptSource,
@@ -94,6 +94,7 @@ struct AppState {
     agent_connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
     inflight_fetches: Arc<Mutex<HashMap<String, InflightFetch>>>,
     inflight_send_messages: Arc<Mutex<HashMap<String, InflightSendMessage>>>,
+    inflight_get_commands: Arc<Mutex<HashMap<String, InflightGetCommands>>>,
     session_subscribers:
         Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<SessionSubscriptionEvent>>>>>,
     next_request_id: Arc<AtomicU64>,
@@ -109,6 +110,7 @@ impl AppState {
             agent_connections: Arc::new(RwLock::new(HashMap::new())),
             inflight_fetches: Arc::new(Mutex::new(HashMap::new())),
             inflight_send_messages: Arc::new(Mutex::new(HashMap::new())),
+            inflight_get_commands: Arc::new(Mutex::new(HashMap::new())),
             session_subscribers: Arc::new(Mutex::new(HashMap::new())),
             next_request_id: Arc::new(AtomicU64::new(1)),
             next_connection_id: Arc::new(AtomicU64::new(1)),
@@ -178,6 +180,13 @@ struct InflightFetch {
 struct InflightSendMessage {
     host_location: String,
     sender: oneshot::Sender<SendResult>,
+}
+
+type GetCommandsResult = Result<Vec<SessionCommand>, String>;
+
+struct InflightGetCommands {
+    host_location: String,
+    sender: oneshot::Sender<GetCommandsResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +280,7 @@ fn app(state: AppState) -> Router {
             get(session_attachment),
         )
         .route("/sessions/{id}/stream", get(session_stream))
+        .route("/sessions/{id}/commands", get(session_commands))
         .route("/agent/connect", get(agent_connect))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
@@ -452,6 +462,68 @@ async fn session_messages(
 ) -> Result<Json<ApiSessionMessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
     let snapshot = resolve_session_snapshot(&state, &session_id).await?;
     Ok(Json(ApiSessionMessagesResponse::from(&snapshot)))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionCommandsResponse {
+    session_id: String,
+    commands: Vec<SessionCommand>,
+}
+
+const GET_COMMANDS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+async fn session_commands(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<SessionCommandsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let Some(host_location) = host_for_session(&state, &session_id).await else {
+        return Err(not_found(format!(
+            "session {session_id} is not known to the server"
+        )));
+    };
+
+    let request_id = next_request_id(&state, "cmds");
+    let (sender, receiver) = oneshot::channel();
+    {
+        let mut inflight = state.inflight_get_commands.lock().await;
+        inflight.insert(
+            request_id.clone(),
+            InflightGetCommands {
+                host_location: host_location.clone(),
+                sender,
+            },
+        );
+    }
+
+    send_to_agent(
+        &state,
+        &host_location,
+        ServerToAgentMessage::GetCommands {
+            request_id: request_id.clone(),
+            session_id: session_id.clone(),
+        },
+    )
+    .await?;
+
+    match tokio::time::timeout(GET_COMMANDS_TIMEOUT, receiver).await {
+        Ok(Ok(Ok(commands))) => Ok(Json(SessionCommandsResponse {
+            session_id,
+            commands,
+        })),
+        Ok(Ok(Err(error))) => Err(bad_gateway(error)),
+        Ok(Err(_)) => Err(bad_gateway(format!(
+            "host {} disconnected before providing commands for session {}",
+            host_location, session_id
+        ))),
+        Err(_) => {
+            state.inflight_get_commands.lock().await.remove(&request_id);
+            Err(gateway_timeout(format!(
+                "timed out waiting for host {} to provide commands for session {}",
+                host_location, session_id
+            )))
+        }
+    }
 }
 
 async fn session_attachment(
@@ -839,6 +911,24 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         };
                         fulfill_send_result(&state, &host.location, &request_id, error).await;
                     }
+                    AgentToServerMessage::GetCommandsResult {
+                        request_id,
+                        commands,
+                        error,
+                    } => {
+                        let Some(host) = current_host.as_ref() else {
+                            eprintln!("received get commands result before hello");
+                            continue;
+                        };
+                        fulfill_get_commands_result(
+                            &state,
+                            &host.location,
+                            &request_id,
+                            commands,
+                            error,
+                        )
+                        .await;
+                    }
                     AgentToServerMessage::Ping => {
                         let _ = sender.send(ServerToAgentMessage::Pong);
                     }
@@ -1220,6 +1310,28 @@ async fn fulfill_send_result(
     }
 }
 
+async fn fulfill_get_commands_result(
+    state: &AppState,
+    _host_location: &str,
+    request_id: &str,
+    commands: Option<Vec<SessionCommand>>,
+    error: Option<String>,
+) {
+    let sender = {
+        let mut inflight = state.inflight_get_commands.lock().await;
+        inflight.remove(request_id)
+    };
+
+    if let Some(inflight) = sender {
+        let result = match (commands, error) {
+            (Some(commands), _) => Ok(commands),
+            (None, Some(error)) => Err(error),
+            (None, None) => Ok(Vec::new()),
+        };
+        let _ = inflight.sender.send(result);
+    }
+}
+
 async fn fail_inflight_for_host(state: &AppState, host_location: &str) {
     let fetch_senders = {
         let mut inflight_fetches = state.inflight_fetches.lock().await;
@@ -1257,6 +1369,26 @@ async fn fail_inflight_for_host(state: &AppState, host_location: &str) {
     for inflight in send_senders {
         let _ = inflight.sender.send(Err(format!(
             "host {} disconnected before confirming message delivery",
+            host_location
+        )));
+    }
+
+    let cmd_senders = {
+        let mut inflight_get_commands = state.inflight_get_commands.lock().await;
+        let request_ids = inflight_get_commands
+            .iter()
+            .filter(|(_, inflight)| inflight.host_location == host_location)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        request_ids
+            .into_iter()
+            .filter_map(|request_id| inflight_get_commands.remove(&request_id))
+            .collect::<Vec<_>>()
+    };
+
+    for inflight in cmd_senders {
+        let _ = inflight.sender.send(Err(format!(
+            "host {} disconnected before providing commands",
             host_location
         )));
     }
@@ -2511,6 +2643,7 @@ mod tests {
                 created_at: timestamp(millis),
                 role: Role::Assistant,
                 body: body.to_string(),
+                tool_name: None,
                 blocks: vec![MessageContentBlock::text(body).unwrap()],
             }],
             freshness: TranscriptFreshness {
@@ -2530,6 +2663,7 @@ mod tests {
                 created_at: timestamp(2_500),
                 role: Role::User,
                 body: "[Image]".to_string(),
+                tool_name: None,
                 blocks: vec![MessageContentBlock::image(
                     Some("image/png"),
                     Some("ZmFrZQ=="),

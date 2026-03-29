@@ -219,7 +219,12 @@ struct PiSessionSync {
 		remoteMessages.enumerated().map { index, remoteMessage in
 			MessagePayload(
 				role: Message.Role(remoteMessage.role),
-				toolName: nil,
+				toolName: {
+					guard let toolName = remoteMessage.toolName?.trimmingCharacters(in: .whitespacesAndNewlines), !toolName.isEmpty else {
+						return nil
+					}
+					return toolName
+				}(),
 				position: index,
 				createdAt: remoteMessage.createdAt,
 				blocks: blockPayloads(from: remoteMessage)
@@ -238,7 +243,7 @@ struct PiSessionSync {
 				guard let toolCallName = block.toolCallName?.trimmingCharacters(in: .whitespacesAndNewlines), !toolCallName.isEmpty else {
 					return nil
 				}
-				return BlockPayload(type: "toolCall", text: nil, toolCallName: toolCallName, mimeType: nil, attachmentID: nil, position: index)
+				return BlockPayload(type: "toolCall", text: normalizedText, toolCallName: toolCallName, mimeType: nil, attachmentID: nil, position: index)
 			case "image":
 				return BlockPayload(
 					type: "image",

@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::{
     message::{
         Message, MessageContentBlock, MessageContentBlockKind, Role, collapse_whitespace,
-        normalized_display_text, truncate_text,
+        normalized_display_text, tool_call_summary, truncate_text,
     },
     transcript::{
         SessionActivity, SessionMessagesResponse, TranscriptFreshness, TranscriptFreshnessState,
@@ -157,7 +157,7 @@ fn nested_message_to_message(entry: &Value) -> Option<Message> {
     };
     let created_at = parse_message_timestamp(entry, message)?;
 
-    match role {
+    let mut parsed = match role {
         Role::User | Role::ToolResult | Role::Custom | Role::Other => Message::from_blocks(
             created_at,
             role,
@@ -185,7 +185,10 @@ fn nested_message_to_message(entry: &Value) -> Option<Message> {
             ),
         ),
         Role::BashExecution => flatten_bash_execution_message(created_at, message),
-    }
+    }?;
+
+    parsed.tool_name = message_tool_name(message);
+    Some(parsed)
 }
 
 fn parse_message_timestamp(entry: &Value, message: &Value) -> Option<DateTime<Utc>> {
@@ -216,6 +219,16 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
         .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
+fn message_tool_name(message: &Value) -> Option<String> {
+    let tool_name = message.get("toolName").and_then(Value::as_str)?;
+    let tool_name = collapse_whitespace(tool_name);
+    if tool_name.is_empty() {
+        None
+    } else {
+        Some(tool_name)
+    }
+}
+
 fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<MessageContentBlock> {
     let Some(content) = content else {
         return Vec::new();
@@ -234,10 +247,11 @@ fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<Mess
                     .get("thinking")
                     .and_then(Value::as_str)
                     .and_then(MessageContentBlock::thinking),
-                Some("toolCall") if include_tool_calls => block
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .and_then(MessageContentBlock::tool_call),
+                Some("toolCall") if include_tool_calls => {
+                    let name = block.get("name").and_then(Value::as_str)?;
+                    let summary = tool_call_summary(name, block.get("arguments"));
+                    MessageContentBlock::tool_call(name, summary.as_deref())
+                }
                 Some("image") => Some(MessageContentBlock::image(
                     block.get("mimeType").and_then(Value::as_str),
                     block.get("data").and_then(Value::as_str),
@@ -286,6 +300,25 @@ fn flatten_bash_execution(message: &Value) -> String {
         parts.push(output);
     }
 
+    let mut metadata = Vec::new();
+    if let Some(exit_code) = message.get("exitCode").and_then(Value::as_i64) {
+        metadata.push(format!("exit code: {exit_code}"));
+    }
+    if message.get("cancelled").and_then(Value::as_bool) == Some(true) {
+        metadata.push("cancelled".to_string());
+    }
+    if message.get("truncated").and_then(Value::as_bool) == Some(true) {
+        metadata.push("truncated".to_string());
+    }
+    if let Some(path) = message.get("fullOutputPath").and_then(Value::as_str)
+        && let Some(path) = normalized_display_text(path)
+    {
+        metadata.push(format!("full output: {path}"));
+    }
+    if !metadata.is_empty() {
+        parts.push(metadata.join("\n"));
+    }
+
     if parts.is_empty() {
         return "bash execution".to_string();
     }
@@ -331,7 +364,11 @@ mod tests {
             },
             {
                 "type": "toolCall",
-                "name": "bash"
+                "name": "bash",
+                "arguments": {
+                    "command": "ls -la",
+                    "timeout": 10
+                }
             }
         ]);
 
@@ -341,6 +378,7 @@ mod tests {
         assert_eq!(blocks[0].text.as_deref(), Some("considering"));
         assert_eq!(blocks[1].kind, MessageContentBlockKind::ToolCall);
         assert_eq!(blocks[1].tool_call_name.as_deref(), Some("bash"));
+        assert_eq!(blocks[1].text.as_deref(), Some("$ ls -la\n\ntimeout: 10s"));
     }
 
     #[test]
@@ -364,10 +402,16 @@ mod tests {
     fn flatten_bash_execution_preserves_multiline_output() {
         let message = json!({
             "command": "printf 'hi\\nthere'",
-            "output": "hi\nthere\n"
+            "output": "hi\nthere\n",
+            "exitCode": 0,
+            "truncated": true,
+            "fullOutputPath": "/tmp/bash-output.txt"
         });
 
         let flattened = flatten_bash_execution(&message);
-        assert_eq!(flattened, "$ printf 'hi\\nthere'\n\nhi\nthere");
+        assert_eq!(
+            flattened,
+            "$ printf 'hi\\nthere'\n\nhi\nthere\n\nexit code: 0\ntruncated\nfull output: /tmp/bash-output.txt"
+        );
     }
 }

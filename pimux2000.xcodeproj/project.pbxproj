@@ -639,10 +639,10 @@
 		};
 		A6E9D0032F76D00000E37016 /* XCRemoteSwiftPackageReference "textual" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/gonzalezreal/textual";
+			repositoryURL = "https://github.com/nakajima/textual";
 			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 0.3.1;
+				branch = bugfix/streaming_crash;
+				kind = branch;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

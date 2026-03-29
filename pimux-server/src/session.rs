@@ -61,6 +61,15 @@ impl ListedSession {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCommand {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub source: String,
+}
+
 pub fn parse_local_date_filter(value: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .map_err(|_| format!("invalid date `{value}`; expected YYYY-MM-DD"))

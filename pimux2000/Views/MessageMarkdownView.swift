@@ -49,6 +49,8 @@ struct MessageMarkdownView: View {
 		let markup = MessageMarkdownRenderer.markdown(for: text, role: role)
 		let usesInlineMarkdown = MessageMarkdownRenderer.usesInlineMarkdown(for: text, role: role)
 
+		let isMonospaced = role == .toolResult || role == .bashExecution
+
 		return Group {
 			if usesInlineMarkdown {
 				StructuredText(markup, parser: .inlineMarkdown())
@@ -56,7 +58,7 @@ struct MessageMarkdownView: View {
 				StructuredText(markdown: markup)
 			}
 		}
-		.font(chatFont(style: .body))
+		.font(isMonospaced ? .system(.body, design: .monospaced) : chatFont(style: .body))
 		.textual.structuredTextStyle(.gitHub)
 		.textual.highlighterTheme(.default)
 		.applyIf(displayMode == .full) { view in
@@ -66,8 +68,10 @@ struct MessageMarkdownView: View {
 	}
 
 	private var collapsedPreview: some View {
-		Text(verbatim: MessageMarkdownRenderer.previewText(for: text))
-			.font(chatFont(style: .body))
+		let isMonospaced = role == .toolResult || role == .bashExecution
+
+		return Text(verbatim: MessageMarkdownRenderer.previewText(for: text))
+			.font(isMonospaced ? .system(.body, design: .monospaced) : chatFont(style: .body))
 			.frame(maxWidth: .infinity, alignment: .leading)
 	}
 

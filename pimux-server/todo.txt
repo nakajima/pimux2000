@@ -1,0 +1,4 @@
+enter should submit messages in ios
+add cwd to ios session cell view
+fix jitteriness caused by streaming tokens in responses
+figure out couldn't load image

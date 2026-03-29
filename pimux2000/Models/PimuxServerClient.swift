@@ -104,19 +104,22 @@ struct PimuxTranscriptMessage: Decodable, Equatable {
 	let createdAt: Date
 	let role: String
 	let body: String
+	let toolName: String?
 	let blocks: [PimuxTranscriptMessageBlock]
 
 	enum CodingKeys: String, CodingKey {
 		case createdAt = "created_at"
 		case role
 		case body
+		case toolName
 		case blocks
 	}
 
-	init(createdAt: Date, role: String, body: String, blocks: [PimuxTranscriptMessageBlock]? = nil) {
+	init(createdAt: Date, role: String, body: String, toolName: String? = nil, blocks: [PimuxTranscriptMessageBlock]? = nil) {
 		self.createdAt = createdAt
 		self.role = role
 		self.body = body
+		self.toolName = toolName
 		if let blocks {
 			self.blocks = blocks
 		} else if !body.isEmpty {
@@ -131,8 +134,9 @@ struct PimuxTranscriptMessage: Decodable, Equatable {
 		let createdAt = try container.decode(Date.self, forKey: .createdAt)
 		let role = try container.decode(String.self, forKey: .role)
 		let body = try container.decodeIfPresent(String.self, forKey: .body) ?? ""
+		let toolName = try container.decodeIfPresent(String.self, forKey: .toolName)
 		let blocks = try container.decodeIfPresent([PimuxTranscriptMessageBlock].self, forKey: .blocks)
-		self.init(createdAt: createdAt, role: role, body: body, blocks: blocks)
+		self.init(createdAt: createdAt, role: role, body: body, toolName: toolName, blocks: blocks)
 	}
 }
 
@@ -150,6 +154,19 @@ struct PimuxTranscriptMessageBlock: Decodable, Equatable {
 		self.mimeType = mimeType
 		self.attachmentId = attachmentId
 	}
+}
+
+struct PimuxSessionCommand: Decodable, Equatable, Identifiable {
+	let name: String
+	let description: String?
+	let source: String
+
+	var id: String { name }
+}
+
+struct PimuxSessionCommandsResponse: Decodable {
+	let sessionId: String
+	let commands: [PimuxSessionCommand]
 }
 
 struct PimuxTranscriptFreshness: Decodable, Equatable {
@@ -302,6 +319,14 @@ struct PimuxServerClient {
 				continue
 			}
 		}
+	}
+
+	func getCommands(sessionID: String) async throws -> [PimuxSessionCommand] {
+		let response = try await requestJSON(
+			PimuxSessionCommandsResponse.self,
+			path: "/sessions/\(sessionID)/commands"
+		)
+		return response.commands
 	}
 
 	func sendMessage(sessionID: String, body: String) async throws {

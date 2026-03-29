@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    host::HostIdentity, message::ImageContent, session::ActiveSession,
+    host::HostIdentity, message::ImageContent, session::{ActiveSession, SessionCommand},
     transcript::SessionMessagesResponse,
 };
 
@@ -27,6 +27,11 @@ pub enum AgentToServerMessage {
         request_id: String,
         error: Option<String>,
     },
+    GetCommandsResult {
+        request_id: String,
+        commands: Option<Vec<SessionCommand>>,
+        error: Option<String>,
+    },
     Ping,
     Pong,
 }
@@ -44,6 +49,10 @@ pub enum ServerToAgentMessage {
         body: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageContent>,
+    },
+    GetCommands {
+        request_id: String,
+        session_id: String,
     },
     Ping,
     Pong,

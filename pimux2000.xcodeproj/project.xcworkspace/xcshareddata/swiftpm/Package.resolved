@@ -1,5 +1,5 @@
 {
-  "originHash" : "f1c296c91366ce00d03d80ef63594d040344bd3323786161b8a788a646454c80",
+  "originHash" : "42442b1a980387103951d7c2474e85dbd8641895edf534217500ad7765962476",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -40,10 +40,10 @@
     {
       "identity" : "textual",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/gonzalezreal/textual",
+      "location" : "https://github.com/nakajima/textual",
       "state" : {
-        "revision" : "5b06b811c0f5313b6b84bbef98c635a630638c38",
-        "version" : "0.3.1"
+        "branch" : "bugfix/streaming_crash",
+        "revision" : "9bf43d8cc45c1ce8c3d3751a22bded1f31d41dd5"
       }
     }
   ],
