@@ -583,29 +583,33 @@ struct MessageView: View {
 	private var message: Message { messageInfo.message }
 
 	var body: some View {
-		VStack(alignment: .leading, spacing: 6) {
-			HStack(spacing: 6) {
-				Image(systemName: roleIcon)
-				Text(verbatim: roleLabel)
-					.font(.caption)
-					.fontWeight(.semibold)
-					.textCase(.uppercase)
-
-				if let toolName = message.toolName {
-					Text(verbatim: "· \(toolName)")
+		HStack(alignment: .firstTextBaseline) {
+			Image(systemName: roleIcon)
+				.foregroundStyle(roleColor)
+			VStack(alignment: .leading, spacing: 6) {
+				HStack(spacing: 6) {
+					
+					Text(verbatim: roleLabel)
 						.font(.caption)
-						.foregroundStyle(.secondary)
+						.fontWeight(.semibold)
+						.textCase(.uppercase)
+					
+					if let toolName = message.toolName {
+						Text(verbatim: "· \(toolName)")
+							.font(.caption)
+							.foregroundStyle(.secondary)
+					}
 				}
-			}
-			.foregroundStyle(roleColor)
-
-			ForEach(messageInfo.contentBlocks, id: \.position) { block in
-				ContentBlockView(
-					block: block,
-					messageRole: message.role,
-					messageTitle: messageTitle,
-					attachmentURL: attachmentURL(for: block)
-				)
+				.foregroundStyle(roleColor)
+				
+				ForEach(messageInfo.contentBlocks, id: \.position) { block in
+					ContentBlockView(
+						block: block,
+						messageRole: message.role,
+						messageTitle: messageTitle,
+						attachmentURL: attachmentURL(for: block)
+					)
+				}
 			}
 		}
 	}
@@ -859,11 +863,7 @@ private struct TranscriptImageView: View {
 			createdAt: now.addingTimeInterval(30),
 			blocks: [
 				(type: "thinking", text: "Inspecting the supported roles and block kinds before updating the fixtures.", toolCallName: nil, mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: nil, toolCallName: "read", mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: nil, toolCallName: "bash", mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: nil, toolCallName: "edit", mimeType: nil, attachmentID: nil),
-				(type: "text", text: "Sure — this preview now includes tool calls, summaries, shell output, image attachments, and fallback cases.", toolCallName: nil, mimeType: nil, attachmentID: nil),
-				(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: "img-preview")
+				(type: "toolCall", text: nil, toolCallName: "read", mimeType: nil, attachmentID: nil)
 			]
 		)
 
@@ -874,25 +874,70 @@ private struct TranscriptImageView: View {
 			position: 2,
 			createdAt: now.addingTimeInterval(60),
 			blocks: [
-				(type: "text", text: "Found the preview block at the bottom of `PiSessionView.swift` and confirmed it only covered a subset of transcript content.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				(type: "text", text: "Found the preview block at the bottom of `PiSessionView.swift`:\n\n```swift\nprivate var displayedMessagesScrollSignature: String {\n    ...\n}\n```\n\nIt currently renders text, thinking, tool calls, images, and fallback blocks.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .assistant,
+			position: 3,
+			createdAt: now.addingTimeInterval(90),
+			blocks: [
+				(type: "toolCall", text: nil, toolCallName: "bash", mimeType: nil, attachmentID: nil)
 			]
 		)
 
 		try insertMessage(
 			for: sessionRowID,
 			role: .bashExecution,
-			position: 3,
-			createdAt: now.addingTimeInterval(90),
+			position: 4,
+			createdAt: now.addingTimeInterval(120),
 			blocks: [
-				(type: "text", text: "$ xcodebuild -scheme pimux2000 ENABLE_PREVIEWS=YES\n** BUILD SUCCEEDED **", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				(type: "text", text: "$ xcodebuild -scheme pimux2000 ENABLE_PREVIEWS=YES\nSwiftCompile PiSessionView.swift\n** BUILD SUCCEEDED **", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .assistant,
+			position: 5,
+			createdAt: now.addingTimeInterval(150),
+			blocks: [
+				(type: "toolCall", text: nil, toolCallName: "edit", mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .toolResult,
+			toolName: "edit",
+			position: 6,
+			createdAt: now.addingTimeInterval(180),
+			blocks: [
+				(type: "text", text: "Applied 1 edit to `pimux2000/Views/PiSessionView.swift`:\n\n- split the scroll signature into smaller helper functions\n- expanded preview fixtures to cover tool calls and summary roles\n- kept the image attachment placeholder in place", toolCallName: nil, mimeType: nil, attachmentID: nil)
+			]
+		)
+
+		try insertMessage(
+			for: sessionRowID,
+			role: .assistant,
+			position: 7,
+			createdAt: now.addingTimeInterval(210),
+			blocks: [
+				(type: "toolCall", text: nil, toolCallName: "read", mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: nil, toolCallName: "bash", mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: nil, toolCallName: "edit", mimeType: nil, attachmentID: nil),
+				(type: "text", text: "Done — this preview now shows tool calls alongside realistic outputs, plus summaries, shell output, image attachments, and fallback cases.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: "img-preview")
 			]
 		)
 
 		try insertMessage(
 			for: sessionRowID,
 			role: .custom,
-			position: 4,
-			createdAt: now.addingTimeInterval(120),
+			position: 8,
+			createdAt: now.addingTimeInterval(240),
 			blocks: [
 				(type: "other", text: "Custom extension note: the live stream briefly detached, so the app fell back to a persisted snapshot.", toolCallName: nil, mimeType: nil, attachmentID: nil)
 			]
@@ -901,8 +946,8 @@ private struct TranscriptImageView: View {
 		try insertMessage(
 			for: sessionRowID,
 			role: .branchSummary,
-			position: 5,
-			createdAt: now.addingTimeInterval(150),
+			position: 9,
+			createdAt: now.addingTimeInterval(270),
 			blocks: [
 				(type: "text", text: "Created branch `preview-message-fixtures` from `main` and staged the updated transcript preview data.", toolCallName: nil, mimeType: nil, attachmentID: nil)
 			]
@@ -911,8 +956,8 @@ private struct TranscriptImageView: View {
 		try insertMessage(
 			for: sessionRowID,
 			role: .compactionSummary,
-			position: 6,
-			createdAt: now.addingTimeInterval(180),
+			position: 10,
+			createdAt: now.addingTimeInterval(300),
 			blocks: [
 				(type: "text", text: "Earlier setup discussion was compacted into a shorter summary so the preview still shows long-running session behavior.", toolCallName: nil, mimeType: nil, attachmentID: nil)
 			]
@@ -921,8 +966,8 @@ private struct TranscriptImageView: View {
 		try insertMessage(
 			for: sessionRowID,
 			role: .other("systemNote"),
-			position: 7,
-			createdAt: now.addingTimeInterval(210),
+			position: 11,
+			createdAt: now.addingTimeInterval(330),
 			blocks: [
 				(type: "text", text: "Unknown roles render with fallback styling so future transcript events remain visible.", toolCallName: nil, mimeType: nil, attachmentID: nil)
 			]

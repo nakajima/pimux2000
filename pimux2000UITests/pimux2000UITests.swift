@@ -8,18 +8,6 @@ final class pimux2000UITests: XCTestCase {
 	override func tearDownWithError() throws {}
 
 	@MainActor
-	func testFixtureDataShowsConnectedServerAndSessions() throws {
-		let app = configuredApp()
-		app.launch()
-
-		XCTAssertTrue(app.staticTexts["Connected server"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.staticTexts["http://fixture.local:3000"].exists)
-		XCTAssertTrue(app.staticTexts["demo@fixture"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.staticTexts["Shell session health"].waitForExistence(timeout: 5))
-		XCTAssertTrue(app.staticTexts["Watching logs"].waitForExistence(timeout: 5))
-	}
-
-	@MainActor
 	func testSelectingFixtureSessionShowsTranscript() throws {
 		let app = configuredApp()
 		app.launch()

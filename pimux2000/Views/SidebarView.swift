@@ -1,26 +1,14 @@
-import Foundation
 import GRDB
 import GRDBQuery
 import SwiftUI
 
-struct HostsRequest: ValueObservationQueryable {
-	static var defaultValue: [Host] { [] }
-
-	func fetch(_ db: Database) throws -> [Host] {
-		try Host.order(Column("updatedAt").desc).fetchAll(db)
-	}
-}
-
 struct SidebarView: View {
 	@Environment(\.databaseContext) private var dbContext
 	@Query(PiSessionsRequest()) private var sessions: [SessionInfo]
-	@Query(HostsRequest()) private var hosts: [Host]
 	@Query(CurrentServerConfigurationRequest()) private var serverConfiguration: ServerConfiguration?
 	@Binding var selectedSessionID: String?
 	@State private var isShowingServerSheet = false
-	@State private var isShowingAddHostSheet = false
 	@State private var isShowingSettings = false
-	@State private var hostMutationErrorMessage: String?
 
 	var body: some View {
 		List(selection: $selectedSessionID) {
@@ -62,28 +50,6 @@ struct SidebarView: View {
 				}
 			}
 
-			if serverConfiguration != nil || !hosts.isEmpty {
-				Section("Hosts") {
-					ForEach(hosts) { host in
-						Text(verbatim: host.displayName)
-							.bold()
-							.swipeActions {
-								Button(role: .destructive) {
-									Task { await deleteHost(host) }
-								} label: {
-									Label("Delete", systemImage: "trash")
-								}
-							}
-					}
-
-					Button {
-						isShowingAddHostSheet = true
-					} label: {
-						Label("Add Host", systemImage: "plus")
-					}
-					.disabled(serverConfiguration == nil)
-				}
-			}
 		}
 		.refreshable {
 			let syncer = PiSessionSync(dbContext: dbContext)
@@ -114,19 +80,6 @@ struct SidebarView: View {
 		.sheet(isPresented: $isShowingServerSheet) {
 			ServerConnectionSheet(initialServerURL: serverConfiguration?.serverURL ?? "")
 		}
-		.sheet(isPresented: $isShowingAddHostSheet) {
-			AddHostSheet { location in
-				try await addHost(location: location)
-			}
-		}
-		.alert("Host Error", isPresented: Binding(
-			get: { hostMutationErrorMessage != nil },
-			set: { if !$0 { hostMutationErrorMessage = nil } }
-		)) {
-			Button("OK", role: .cancel) {}
-		} message: {
-			Text(verbatim: hostMutationErrorMessage ?? "")
-		}
 		.sheet(isPresented: $isShowingSettings) {
 			NavigationStack {
 				FontPickerView()
@@ -139,40 +92,6 @@ struct SidebarView: View {
 		}
 	}
 
-	private func addHost(location: String) async throws {
-		guard let serverConfiguration else {
-			throw PimuxServerError.serverError("No pimux server configured.", statusCode: 0)
-		}
-
-		let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-		try await client.addHost(location: location)
-		let syncer = PiSessionSync(dbContext: dbContext)
-		await syncer.sync()
-	}
-
-	private func deleteHost(_ host: Host) async {
-		guard let serverConfiguration else {
-			hostMutationErrorMessage = "No pimux server configured."
-			return
-		}
-
-		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			try await client.deleteHost(location: host.location)
-		} catch let error as PimuxServerError {
-			// If the server says the host is unknown, treat it as already gone.
-			if !error.isNotFound {
-				hostMutationErrorMessage = error.localizedDescription
-				return
-			}
-		} catch {
-			hostMutationErrorMessage = error.localizedDescription
-			return
-		}
-
-		let syncer = PiSessionSync(dbContext: dbContext)
-		await syncer.sync()
-	}
 }
 
 private struct SessionActivityBadge: View {

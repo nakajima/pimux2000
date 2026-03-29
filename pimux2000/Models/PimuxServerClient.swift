@@ -211,9 +211,6 @@ private struct PimuxSendMessageRequest: Encodable {
 	let body: String
 }
 
-private struct PimuxAddHostRequest: Encodable {
-	let location: String
-}
 
 struct PimuxServerClient {
 	private let baseURL: URL
@@ -235,31 +232,6 @@ struct PimuxServerClient {
 		try await requestJSON([PimuxHostSessions].self, path: "/hosts")
 	}
 
-	func addHost(location: String) async throws {
-		let requestData: Data
-		do {
-			requestData = try JSONEncoder().encode(PimuxAddHostRequest(location: location))
-		} catch {
-			throw PimuxServerError.invalidResponse("Couldn’t encode the host request.")
-		}
-
-		_ = try await performRequest(
-			path: "/hosts",
-			queryItems: [],
-			method: "POST",
-			bodyData: requestData,
-			contentType: "application/json"
-		)
-	}
-
-	func deleteHost(location: String) async throws {
-		let encodedLocation = Self.percentEncodedPathComponent(location)
-		_ = try await performRequest(
-			path: "/hosts/\(encodedLocation)",
-			queryItems: [],
-			method: "DELETE"
-		)
-	}
 
 	func listSessions(count: Int? = nil, beforeID: String? = nil) async throws -> [PimuxListedSession] {
 		var queryItems: [URLQueryItem] = []
@@ -326,7 +298,7 @@ struct PimuxServerClient {
 				await onEvent(event)
 			} catch {
 				let preview = String(trimmed.prefix(200))
-				print("Skipping undecodable stream event: \(error) — raw: \(preview)")
+				print("Skipping undecodable stream event: \(error) - raw: \(preview)")
 				continue
 			}
 		}
@@ -337,7 +309,7 @@ struct PimuxServerClient {
 		do {
 			requestData = try JSONEncoder().encode(PimuxSendMessageRequest(body: body))
 		} catch {
-			throw PimuxServerError.invalidResponse("Couldn’t encode the message request.")
+			throw PimuxServerError.invalidResponse("Couldn't encode the message request.")
 		}
 
 		_ = try await performRequest(

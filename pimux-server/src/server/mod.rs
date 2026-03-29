@@ -18,11 +18,11 @@ use axum::{
     },
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{delete, get},
+    routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Utc};
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceInfo};
 use serde::{Deserialize, Serialize};
@@ -211,13 +211,6 @@ struct SendMessageRequest {
     images: Vec<ImageContent>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct UpsertHostRequest {
-    location: String,
-    #[serde(default)]
-    auth: crate::host::HostAuth,
-}
 
 pub async fn start() -> Result<(), BoxError> {
     let app = app(AppState::with_persistent_hosts()?);
@@ -267,8 +260,7 @@ fn app(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/version", get(version))
-        .route("/hosts", get(hosts).post(add_host))
-        .route("/hosts/{location}", delete(delete_host))
+        .route("/hosts", get(hosts))
         .route("/sessions", get(sessions))
         .route(
             "/sessions/{id}/messages",
@@ -423,72 +415,7 @@ async fn hosts(State(state): State<AppState>) -> Json<Vec<HostSessions>> {
     Json(response)
 }
 
-async fn add_host(
-    State(state): State<AppState>,
-    Json(request): Json<UpsertHostRequest>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let location = request.location.trim().to_string();
-    if location.is_empty() {
-        return Err(bad_request("host location must not be empty".to_string()));
-    }
 
-    {
-        let mut hosts = state.hosts.write().await;
-        let record = hosts.entry(location.clone()).or_insert_with(|| HostRecord {
-            host: HostIdentity {
-                location: location.clone(),
-                auth: request.auth,
-            },
-            sessions: Vec::new(),
-            connected: false,
-            last_seen_at: None,
-        });
-        record.host = HostIdentity {
-            location,
-            auth: request.auth,
-        };
-    }
-
-    persist_hosts(&state).await;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn delete_host(
-    State(state): State<AppState>,
-    Path(location): Path<String>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let location = location.trim().to_string();
-    if location.is_empty() {
-        return Err(bad_request("host location must not be empty".to_string()));
-    }
-
-    let removed_session_ids = {
-        let mut hosts = state.hosts.write().await;
-        let Some(_existing) = hosts.get(&location) else {
-            return Err(not_found(format!(
-                "host {location} is not known to the server"
-            )));
-        };
-
-        hosts
-            .remove(&location)
-            .into_iter()
-            .flat_map(|record| record.sessions.into_iter().map(|session| session.id))
-            .collect::<Vec<_>>()
-    };
-
-    if !removed_session_ids.is_empty() {
-        let mut transcripts = state.transcripts.write().await;
-        for session_id in &removed_session_ids {
-            transcripts.remove(session_id);
-        }
-    }
-
-    persist_hosts(&state).await;
-    disconnect_host_connection(&state, &location).await;
-    fail_inflight_for_host(&state, &location).await;
-    Ok(StatusCode::NO_CONTENT)
-}
 
 async fn sessions(
     State(state): State<AppState>,
@@ -868,13 +795,6 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             eprintln!("received host snapshot before hello");
                             continue;
                         };
-                        if !host_is_allowed(&state, &host.location).await {
-                            eprintln!(
-                                "dropping host snapshot from deleted or unknown host {}",
-                                host.location
-                            );
-                            break;
-                        }
                         update_host_snapshot(&state, host, sessions).await;
                     }
                     AgentToServerMessage::LiveSessionUpdate {
@@ -885,13 +805,6 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             eprintln!("received live session update before hello");
                             continue;
                         };
-                        if !host_is_allowed(&state, &host.location).await {
-                            eprintln!(
-                                "dropping live session update from deleted or unknown host {}",
-                                host.location
-                            );
-                            break;
-                        }
                         let changed = {
                             let mut transcripts = state.transcripts.write().await;
                             upsert_cached_transcript(
@@ -916,13 +829,6 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             eprintln!("received transcript result before hello");
                             continue;
                         };
-                        if !host_is_allowed(&state, &host.location).await {
-                            eprintln!(
-                                "dropping transcript result from deleted or unknown host {}",
-                                host.location
-                            );
-                            break;
-                        }
                         fulfill_fetch_result(&state, &host.location, &request_id, session, error)
                             .await;
                     }
@@ -931,13 +837,6 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             eprintln!("received send message result before hello");
                             continue;
                         };
-                        if !host_is_allowed(&state, &host.location).await {
-                            eprintln!(
-                                "dropping send message result from deleted or unknown host {}",
-                                host.location
-                            );
-                            break;
-                        }
                         fulfill_send_result(&state, &host.location, &request_id, error).await;
                     }
                     AgentToServerMessage::Ping => {
@@ -965,15 +864,6 @@ async fn register_agent_connection(
     sender: mpsc::UnboundedSender<ServerToAgentMessage>,
     close_sender: mpsc::UnboundedSender<()>,
 ) -> bool {
-    if !host_is_allowed(state, &host.location).await {
-        eprintln!(
-            "rejecting agent connection for unknown host {}; add it first via POST /hosts",
-            host.location
-        );
-        let _ = close_sender.send(());
-        return false;
-    }
-
     {
         let mut connections = state.agent_connections.write().await;
         connections.insert(
@@ -1109,26 +999,7 @@ async fn disconnect_agent(state: &AppState, host_location: &str, connection_id: 
     fail_inflight_for_host(state, host_location).await;
 }
 
-async fn disconnect_host_connection(state: &AppState, host_location: &str) {
-    let close_sender = {
-        let connections = state.agent_connections.read().await;
-        connections
-            .get(host_location)
-            .map(|connection| connection.close_sender.clone())
-    };
 
-    if let Some(close_sender) = close_sender {
-        let _ = close_sender.send(());
-    }
-}
-
-async fn host_is_allowed(state: &AppState, host_location: &str) -> bool {
-    if state.host_registry_path.is_none() {
-        return true;
-    }
-
-    state.hosts.read().await.contains_key(host_location)
-}
 
 async fn send_to_agent(
     state: &AppState,
@@ -1928,7 +1799,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{Method, Request, header},
     };
-    use chrono::{TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
     use serde::{Serialize, de::DeserializeOwned};
     use tower::util::ServiceExt;
 
@@ -2008,148 +1879,6 @@ mod tests {
         assert_eq!(hosts[0].sessions[0].id, "session-1");
     }
 
-    #[tokio::test]
-    async fn adds_missing_host_to_persisted_registry() {
-        let path = unique_test_path("expected-hosts.json");
-        let state = AppState::new(HashMap::new(), Some(path.clone()));
-        let app = app(state.clone());
-
-        let response = app
-            .clone()
-            .oneshot(json_request(
-                Method::POST,
-                "/hosts",
-                &UpsertHostRequest {
-                    location: "dev@mac".to_string(),
-                    auth: HostAuth::Pk,
-                },
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        let response = app
-            .oneshot(empty_request(Method::GET, "/hosts"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let hosts: Vec<HostSessions> = json_response(response).await;
-        assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].location, "dev@mac");
-        assert_eq!(hosts[0].auth, HostAuth::Pk);
-        assert!(!hosts[0].connected);
-        assert!(hosts[0].missing);
-        assert!(hosts[0].sessions.is_empty());
-
-        let persisted = load_host_registry(&path).unwrap();
-        let record = persisted.get("dev@mac").unwrap();
-        assert_eq!(record.host.auth, HostAuth::Pk);
-        assert!(record.sessions.is_empty());
-
-        let _ = std::fs::remove_file(&path);
-        let _ = path.parent().map(std::fs::remove_dir_all);
-    }
-
-    #[tokio::test]
-    async fn deletes_missing_host_from_persisted_registry() {
-        let path = unique_test_path("expected-hosts.json");
-        let host = HostIdentity {
-            location: "dev@mac".to_string(),
-            auth: HostAuth::None,
-        };
-        let mut initial_hosts = HashMap::new();
-        initial_hosts.insert(
-            host.location.clone(),
-            HostRecord {
-                host: host.clone(),
-                sessions: vec![sample_active_session("session-1")],
-                connected: false,
-                last_seen_at: Some(timestamp(5_000)),
-            },
-        );
-        persist_host_registry(&path, &initial_hosts).unwrap();
-
-        let state = AppState::new(initial_hosts, Some(path.clone()));
-        let app = app(state);
-        let response = app
-            .oneshot(empty_request(Method::DELETE, "/hosts/dev@mac"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        let persisted = load_host_registry(&path).unwrap();
-        assert!(persisted.is_empty());
-
-        let _ = std::fs::remove_file(&path);
-        let _ = path.parent().map(std::fs::remove_dir_all);
-    }
-
-    #[tokio::test]
-    async fn deletes_connected_host_from_persisted_registry() {
-        let path = unique_test_path("expected-hosts.json");
-        let host = HostIdentity {
-            location: "dev@mac".to_string(),
-            auth: HostAuth::None,
-        };
-        let mut initial_hosts = HashMap::new();
-        initial_hosts.insert(
-            host.location.clone(),
-            HostRecord {
-                host: host.clone(),
-                sessions: vec![sample_active_session("session-1")],
-                connected: false,
-                last_seen_at: Some(timestamp(5_000)),
-            },
-        );
-        persist_host_registry(&path, &initial_hosts).unwrap();
-
-        let state = AppState::new(initial_hosts, Some(path.clone()));
-        let _receiver = register_test_agent(&state, host.clone()).await;
-        let app = app(state.clone());
-        let response = app
-            .oneshot(empty_request(Method::DELETE, "/hosts/dev@mac"))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-
-        let persisted = load_host_registry(&path).unwrap();
-        assert!(persisted.is_empty());
-        assert!(!host_is_allowed(&state, &host.location).await);
-
-        let (sender, _receiver) = mpsc::unbounded_channel();
-        let (close_sender, _close_receiver) = mpsc::unbounded_channel();
-        let accepted = register_agent_connection(&state, &host, 2, sender, close_sender).await;
-        assert!(!accepted);
-
-        let _ = std::fs::remove_file(&path);
-        let _ = path.parent().map(std::fs::remove_dir_all);
-    }
-
-    #[tokio::test]
-    async fn rejects_unknown_agent_when_persistent_registry_is_enabled() {
-        let path = unique_test_path("expected-hosts.json");
-        let state = AppState::new(HashMap::new(), Some(path.clone()));
-        let host = HostIdentity {
-            location: "dev@mac".to_string(),
-            auth: HostAuth::None,
-        };
-
-        let (sender, _receiver) = mpsc::unbounded_channel();
-        let (close_sender, _close_receiver) = mpsc::unbounded_channel();
-        let accepted = register_agent_connection(&state, &host, 1, sender, close_sender).await;
-        assert!(!accepted);
-
-        let response = app(state)
-            .oneshot(empty_request(Method::GET, "/hosts"))
-            .await
-            .unwrap();
-        let hosts: Vec<HostSessions> = json_response(response).await;
-        assert!(hosts.is_empty());
-
-        let _ = std::fs::remove_file(&path);
-        let _ = path.parent().map(std::fs::remove_dir_all);
-    }
 
     #[tokio::test]
     async fn returns_default_page_of_sessions() {
