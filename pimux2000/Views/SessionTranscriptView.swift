@@ -265,28 +265,21 @@ struct SessionTranscriptView: UIViewRepresentable {
 
 		private func loadOlderMessages(_ collectionView: UICollectionView) {
 			guard windowStart > 0 else { return }
+			let newStart = max(0, windowStart - Self.pageSize)
+			guard newStart < windowStart else { return }
 
-			let oldStart = windowStart
-			let newStart = max(0, oldStart - Self.pageSize)
-			guard newStart < oldStart else { return }
-
-			let oldContentHeight = collectionView.contentSize.height
-			let oldOffset = collectionView.contentOffset
-			let prependedMessages = Array(allMessages[newStart..<oldStart])
-			let paths = (0..<prependedMessages.count).map { IndexPath(item: $0, section: 0) }
-
+			let anchor = captureAnchor(in: collectionView)
 			isAdjustingScroll = true
+			windowStart = newStart
+			visibleMessages = Array(allMessages[windowStart...])
+			visibleFingerprints = buildFingerprintMap(visibleMessages)
 			UIView.performWithoutAnimation {
-				collectionView.performBatchUpdates {
-					self.windowStart = newStart
-					self.visibleMessages = prependedMessages + self.visibleMessages
-					self.visibleFingerprints = self.buildFingerprintMap(self.visibleMessages)
-					collectionView.insertItems(at: paths)
-				}
+				collectionView.reloadData()
 				collectionView.layoutIfNeeded()
 			}
-			let heightDelta = collectionView.contentSize.height - oldContentHeight
-			collectionView.contentOffset = CGPoint(x: oldOffset.x, y: oldOffset.y + heightDelta)
+			if let anchor {
+				restoreAnchor(anchor, in: collectionView)
+			}
 			isAdjustingScroll = false
 		}
 
