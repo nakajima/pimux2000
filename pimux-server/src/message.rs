@@ -63,6 +63,8 @@ pub struct MessageContentBlock {
     pub mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +155,7 @@ impl MessageContentBlock {
             tool_call_name: None,
             mime_type: None,
             data: None,
+            attachment_id: None,
         })
     }
 
@@ -163,6 +166,7 @@ impl MessageContentBlock {
             tool_call_name: None,
             mime_type: None,
             data: None,
+            attachment_id: None,
         })
     }
 
@@ -178,6 +182,7 @@ impl MessageContentBlock {
             tool_call_name: Some(name),
             mime_type: None,
             data: None,
+            attachment_id: None,
         })
     }
 
@@ -188,14 +193,44 @@ impl MessageContentBlock {
             tool_call_name: None,
             mime_type: mime_type.and_then(normalize_mime_type),
             data: data.and_then(normalize_image_data),
+            attachment_id: None,
         }
     }
 
     pub fn attachment_id(&self) -> Option<String> {
+        if let Some(attachment_id) = self.attachment_id.as_deref()
+            && !attachment_id.is_empty()
+        {
+            return Some(attachment_id.to_string());
+        }
+
         let mime_type = self.mime_type.as_deref()?;
         let data = self.data.as_deref()?;
         Some(image_attachment_id(mime_type, data))
     }
+}
+
+pub fn strip_inline_image_data(message: &mut Message) {
+    for block in &mut message.blocks {
+        if block.kind != MessageContentBlockKind::Image {
+            continue;
+        }
+
+        block.attachment_id = block.attachment_id();
+        block.data = None;
+    }
+}
+
+pub fn attachment_payload(messages: &[Message], attachment_id: &str) -> Option<(String, String)> {
+    messages.iter().find_map(|message| {
+        message.blocks.iter().find_map(|block| {
+            let mime_type = block.mime_type.as_deref()?;
+            let data = block.data.as_deref()?;
+            let block_attachment_id = block.attachment_id()?;
+            (block_attachment_id == attachment_id)
+                .then_some((mime_type.to_string(), data.to_string()))
+        })
+    })
 }
 
 impl From<&MessageContentBlock> for ApiMessageContentBlock {
@@ -346,7 +381,10 @@ pub fn tool_call_summary(name: &str, arguments: Option<&Value>) -> Option<String
             if let Some(args) = arguments.get("args")
                 && !args.is_null()
             {
-                lines.push(format!("args: {}", truncate_text(&value_to_summary(args), 500)));
+                lines.push(format!(
+                    "args: {}",
+                    truncate_text(&value_to_summary(args), 500)
+                ));
             }
             if lines.is_empty() {
                 pretty_json_summary(arguments)
@@ -359,7 +397,11 @@ pub fn tool_call_summary(name: &str, arguments: Option<&Value>) -> Option<String
                 .get("tool_uses")
                 .and_then(Value::as_array)
                 .map(Vec::len)?;
-            let label = if count == 1 { "tool call" } else { "tool calls" };
+            let label = if count == 1 {
+                "tool call"
+            } else {
+                "tool calls"
+            };
             Some(format!("{count} parallel {label}"))
         }
         _ => pretty_json_summary(arguments),
@@ -404,6 +446,7 @@ fn normalize_block(mut block: MessageContentBlock) -> Option<MessageContentBlock
             block.tool_call_name = None;
             block.mime_type = None;
             block.data = None;
+            block.attachment_id = None;
         }
         MessageContentBlockKind::ToolCall => {
             block.tool_call_name = block.tool_call_name.as_deref().map(collapse_whitespace);
@@ -418,12 +461,23 @@ fn normalize_block(mut block: MessageContentBlock) -> Option<MessageContentBlock
             block.text = block.text.as_deref().and_then(normalized_display_text);
             block.mime_type = None;
             block.data = None;
+            block.attachment_id = None;
         }
         MessageContentBlockKind::Image => {
             block.text = None;
             block.tool_call_name = None;
             block.mime_type = block.mime_type.as_deref().and_then(normalize_mime_type);
             block.data = block.data.as_deref().and_then(normalize_image_data);
+            block.attachment_id = block
+                .attachment_id
+                .as_deref()
+                .and_then(normalized_display_text)
+                .or_else(
+                    || match (block.mime_type.as_deref(), block.data.as_deref()) {
+                        (Some(mime_type), Some(data)) => Some(image_attachment_id(mime_type, data)),
+                        _ => None,
+                    },
+                );
         }
     }
 
@@ -464,7 +518,7 @@ mod tests {
 
     use super::{
         Message, MessageContentBlock, MessageContentBlockKind, Role, image_attachment_id,
-        normalize_image_data, normalize_mime_type,
+        normalize_image_data, normalize_mime_type, strip_inline_image_data,
     };
 
     #[test]
@@ -548,5 +602,27 @@ mod tests {
         assert_eq!(api.blocks[0].kind, MessageContentBlockKind::Image);
         assert_eq!(api.blocks[0].mime_type.as_deref(), Some("image/png"));
         assert!(api.blocks[0].attachment_id.is_some());
+    }
+
+    #[test]
+    fn stripping_inline_image_data_preserves_attachment_id_for_api() {
+        let mut message = Message::from_blocks(
+            Utc::now(),
+            Role::Assistant,
+            vec![MessageContentBlock::image(
+                Some("image/png"),
+                Some("ZmFrZQ=="),
+            )],
+        )
+        .unwrap();
+        let expected_attachment_id = message.blocks[0].attachment_id();
+
+        strip_inline_image_data(&mut message);
+
+        assert_eq!(message.blocks[0].data, None);
+        assert_eq!(message.blocks[0].attachment_id(), expected_attachment_id);
+
+        let api = message.to_api();
+        assert_eq!(api.blocks[0].attachment_id, expected_attachment_id);
     }
 }

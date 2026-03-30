@@ -23,13 +23,11 @@ use tokio::{
 use crate::{
     channel::{AgentToServerMessage, ServerToAgentMessage},
     host::{HostAuth, HostIdentity},
-    message::ImageContent,
+    message::{ImageContent, attachment_payload, strip_inline_image_data},
     report::{ReportPayload, VersionResponse},
     session::{parse_local_date_filter, utc_range_for_local_date},
-    transcript::TranscriptFetchFulfillment,
+    transcript::{SessionMessagesResponse, TranscriptFetchFulfillment},
 };
-
-
 
 pub use summarizer::DEFAULT_SUMMARY_MODEL;
 
@@ -349,7 +347,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                 if let Some(live_update) = live_update {
                     if connected {
                         let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
-                            session: live_update.snapshot,
+                            session: session_for_transport(live_update.snapshot),
                             active_session: live_update.active_session,
                         });
                     }
@@ -409,7 +407,7 @@ async fn send_current_state(
             .listed_session_for_session(&snapshot.session_id)
             .await;
         let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
-            session: snapshot,
+            session: session_for_transport(snapshot),
             active_session,
         });
     }
@@ -503,7 +501,28 @@ async fn handle_server_message(
                     .await;
             let _ = channel_tx.send(AgentToServerMessage::FetchTranscriptResult {
                 request_id: fulfillment.request_id,
-                session: fulfillment.session,
+                session: fulfillment.session.map(session_for_transport),
+                error: fulfillment.error,
+            });
+        }
+        ServerToAgentMessage::FetchAttachment {
+            request_id,
+            session_id,
+            attachment_id,
+        } => {
+            let fulfillment = build_attachment_fulfillment(
+                request_id,
+                session_id,
+                attachment_id,
+                pi_agent_dir,
+                host,
+                live_store,
+            )
+            .await;
+            let _ = channel_tx.send(AgentToServerMessage::FetchAttachmentResult {
+                request_id: fulfillment.request_id,
+                mime_type: fulfillment.mime_type,
+                data: fulfillment.data,
                 error: fulfillment.error,
             });
         }
@@ -529,7 +548,7 @@ async fn handle_server_message(
                 // Push the latest transcript snapshot before the send acknowledgement so
                 // the server cache is updated before the iOS app follows up with GET /messages.
                 let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
-                    session: snapshot,
+                    session: session_for_transport(snapshot),
                     active_session: None,
                 });
             }
@@ -561,6 +580,20 @@ async fn handle_server_message(
     }
 
     Ok(())
+}
+
+struct AttachmentFetchFulfillment {
+    request_id: String,
+    mime_type: Option<String>,
+    data: Option<String>,
+    error: Option<String>,
+}
+
+fn session_for_transport(mut session: SessionMessagesResponse) -> SessionMessagesResponse {
+    for message in &mut session.messages {
+        strip_inline_image_data(message);
+    }
+    session
 }
 
 async fn build_fetch_fulfillment(
@@ -621,6 +654,82 @@ async fn build_fetch_fulfillment(
             error: Some(format!(
                 "session {} was not found on host {}",
                 session_id, host.location
+            )),
+        },
+    }
+}
+
+async fn build_attachment_fulfillment(
+    request_id: String,
+    session_id: String,
+    attachment_id: String,
+    pi_agent_dir: &Path,
+    host: &HostIdentity,
+    live_store: &live::LiveSessionStoreHandle,
+) -> AttachmentFetchFulfillment {
+    if let Some(session) = live_store.snapshot_for_session(&session_id).await
+        && let Some((mime_type, data)) = attachment_payload(&session.messages, &attachment_id)
+    {
+        return AttachmentFetchFulfillment {
+            request_id,
+            mime_type: Some(mime_type),
+            data: Some(data),
+            error: None,
+        };
+    }
+
+    let discovered_sessions = match discovery::discover_sessions(pi_agent_dir) {
+        Ok(discovered_sessions) => discovered_sessions,
+        Err(error) => {
+            return AttachmentFetchFulfillment {
+                request_id,
+                mime_type: None,
+                data: None,
+                error: Some(format!("failed to discover sessions: {error}")),
+            };
+        }
+    };
+
+    let Some(discovered_session) = discovered_sessions
+        .iter()
+        .find(|session| session.id == session_id)
+    else {
+        return AttachmentFetchFulfillment {
+            request_id,
+            mime_type: None,
+            data: None,
+            error: Some(format!(
+                "session {} was not found on host {}",
+                session_id, host.location
+            )),
+        };
+    };
+
+    match transcript::build_persisted_snapshot(discovered_session) {
+        Ok(session) => match attachment_payload(&session.messages, &attachment_id) {
+            Some((mime_type, data)) => AttachmentFetchFulfillment {
+                request_id,
+                mime_type: Some(mime_type),
+                data: Some(data),
+                error: None,
+            },
+            None => AttachmentFetchFulfillment {
+                request_id,
+                mime_type: None,
+                data: None,
+                error: Some(format!(
+                    "attachment {} was not found for session {}",
+                    attachment_id, session_id
+                )),
+            },
+        },
+        Err(error) => AttachmentFetchFulfillment {
+            request_id,
+            mime_type: None,
+            data: None,
+            error: Some(format!(
+                "failed to reconstruct transcript for session {}: {error}",
+                session_id
             )),
         },
     }

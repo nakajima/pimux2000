@@ -35,7 +35,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::{
     channel::{AgentToServerMessage, ServerToAgentMessage},
     host::{HostIdentity, HostSessions},
-    message::{ImageContent, normalize_mime_type},
+    message::{ImageContent, attachment_payload, normalize_mime_type},
     report::VersionResponse,
     session::{ActiveSession, ListedSession, SessionCommand},
     transcript::{
@@ -46,6 +46,7 @@ use crate::{
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type FetchResult = Result<SessionMessagesResponse, String>;
+type AttachmentFetchResult = Result<(String, String), String>;
 type SendResult = Result<(), String>;
 const ON_DEMAND_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SEND_MESSAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -54,6 +55,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SEND_MESSAGE_IMAGES: usize = 8;
 const MAX_SEND_MESSAGE_IMAGE_BASE64_CHARS: usize = 8 * 1024 * 1024;
 const MAX_SEND_MESSAGE_TOTAL_IMAGE_BASE64_CHARS: usize = 12 * 1024 * 1024;
+const MAX_AGENT_WEBSOCKET_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const SYSTEMD_UNIT_NAME: &str = "pimux-server.service";
 const LAUNCH_AGENT_LABEL: &str = "dev.pimux.server";
 const LAUNCH_AGENT_FILE_NAME: &str = "dev.pimux.server.plist";
@@ -93,6 +95,7 @@ struct AppState {
     transcripts: Arc<RwLock<HashMap<String, CachedTranscript>>>,
     agent_connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
     inflight_fetches: Arc<Mutex<HashMap<String, InflightFetch>>>,
+    inflight_attachment_fetches: Arc<Mutex<HashMap<String, InflightAttachmentFetch>>>,
     inflight_send_messages: Arc<Mutex<HashMap<String, InflightSendMessage>>>,
     inflight_get_commands: Arc<Mutex<HashMap<String, InflightGetCommands>>>,
     session_subscribers:
@@ -109,6 +112,7 @@ impl AppState {
             transcripts: Arc::new(RwLock::new(HashMap::new())),
             agent_connections: Arc::new(RwLock::new(HashMap::new())),
             inflight_fetches: Arc::new(Mutex::new(HashMap::new())),
+            inflight_attachment_fetches: Arc::new(Mutex::new(HashMap::new())),
             inflight_send_messages: Arc::new(Mutex::new(HashMap::new())),
             inflight_get_commands: Arc::new(Mutex::new(HashMap::new())),
             session_subscribers: Arc::new(Mutex::new(HashMap::new())),
@@ -177,6 +181,11 @@ struct InflightFetch {
     sender: oneshot::Sender<FetchResult>,
 }
 
+struct InflightAttachmentFetch {
+    host_location: String,
+    sender: oneshot::Sender<AttachmentFetchResult>,
+}
+
 struct InflightSendMessage {
     host_location: String,
     sender: oneshot::Sender<SendResult>,
@@ -219,7 +228,6 @@ struct SendMessageRequest {
     #[serde(default)]
     images: Vec<ImageContent>,
 }
-
 
 pub async fn start() -> Result<(), BoxError> {
     let app = app(AppState::with_persistent_hosts()?);
@@ -425,8 +433,6 @@ async fn hosts(State(state): State<AppState>) -> Json<Vec<HostSessions>> {
     Json(response)
 }
 
-
-
 async fn sessions(
     State(state): State<AppState>,
     Query(query): Query<SessionsQuery>,
@@ -531,13 +537,12 @@ async fn session_attachment(
     Path((session_id, attachment_id)): Path<(String, String)>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let snapshot = resolve_session_snapshot(&state, &session_id).await?;
-    let Some((mime_type, base64_data)) = attachment_payload(&snapshot, &attachment_id) else {
-        return Err(not_found(format!(
-            "attachment {attachment_id} was not found for session {session_id}"
-        )));
+    let (mime_type, base64_data) = match attachment_payload(&snapshot.messages, &attachment_id) {
+        Some(payload) => payload,
+        None => fetch_attachment_from_host(&state, &session_id, &attachment_id).await?,
     };
 
-    let bytes = BASE64_STANDARD.decode(base64_data).map_err(|error| {
+    let bytes = BASE64_STANDARD.decode(&base64_data).map_err(|error| {
         bad_gateway(format!(
             "attachment {attachment_id} for session {session_id} could not be decoded: {error}"
         ))
@@ -546,7 +551,7 @@ async fn session_attachment(
     let mut response = Response::new(Body::from(bytes));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(mime_type)
+        HeaderValue::from_str(&mime_type)
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
     );
     response.headers_mut().insert(
@@ -662,20 +667,6 @@ async fn session_stream(
         .headers_mut()
         .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
     Ok(response)
-}
-
-fn attachment_payload<'a>(
-    snapshot: &'a SessionMessagesResponse,
-    attachment_id: &str,
-) -> Option<(&'a str, &'a str)> {
-    snapshot.messages.iter().find_map(|message| {
-        message.blocks.iter().find_map(|block| {
-            let mime_type = block.mime_type.as_deref()?;
-            let data = block.data.as_deref()?;
-            let block_attachment_id = block.attachment_id()?;
-            (block_attachment_id == attachment_id).then_some((mime_type, data))
-        })
-    })
 }
 
 fn normalize_image_base64(data: &str) -> String {
@@ -794,7 +785,9 @@ async fn send_session_message(
 }
 
 async fn agent_connect(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_agent_socket(state, socket))
+    ws.max_message_size(MAX_AGENT_WEBSOCKET_MESSAGE_BYTES)
+        .max_frame_size(MAX_AGENT_WEBSOCKET_MESSAGE_BYTES)
+        .on_upgrade(move |socket| handle_agent_socket(state, socket))
 }
 
 async fn handle_agent_socket(state: AppState, socket: WebSocket) {
@@ -903,6 +896,26 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         };
                         fulfill_fetch_result(&state, &host.location, &request_id, session, error)
                             .await;
+                    }
+                    AgentToServerMessage::FetchAttachmentResult {
+                        request_id,
+                        mime_type,
+                        data,
+                        error,
+                    } => {
+                        let Some(host) = current_host.as_ref() else {
+                            eprintln!("received attachment result before hello");
+                            continue;
+                        };
+                        fulfill_attachment_fetch_result(
+                            &state,
+                            &host.location,
+                            &request_id,
+                            mime_type,
+                            data,
+                            error,
+                        )
+                        .await;
                     }
                     AgentToServerMessage::SendMessageResult { request_id, error } => {
                         let Some(host) = current_host.as_ref() else {
@@ -1089,8 +1102,6 @@ async fn disconnect_agent(state: &AppState, host_location: &str, connection_id: 
     fail_inflight_for_host(state, host_location).await;
 }
 
-
-
 async fn send_to_agent(
     state: &AppState,
     host_location: &str,
@@ -1169,6 +1180,61 @@ async fn resolve_session_snapshot(
             Err(gateway_timeout(format!(
                 "timed out waiting for host {} to provide transcript for session {}",
                 host_location, session_id
+            )))
+        }
+    }
+}
+
+async fn fetch_attachment_from_host(
+    state: &AppState,
+    session_id: &str,
+    attachment_id: &str,
+) -> Result<(String, String), (StatusCode, Json<ErrorResponse>)> {
+    let Some(host_location) = host_for_session(state, session_id).await else {
+        return Err(not_found(format!(
+            "session {session_id} is not known to the server"
+        )));
+    };
+
+    let request_id = next_request_id(state, "attachment");
+    let (sender, receiver) = oneshot::channel();
+    {
+        let mut inflight = state.inflight_attachment_fetches.lock().await;
+        inflight.insert(
+            request_id.clone(),
+            InflightAttachmentFetch {
+                host_location: host_location.clone(),
+                sender,
+            },
+        );
+    }
+
+    send_to_agent(
+        state,
+        &host_location,
+        ServerToAgentMessage::FetchAttachment {
+            request_id: request_id.clone(),
+            session_id: session_id.to_string(),
+            attachment_id: attachment_id.to_string(),
+        },
+    )
+    .await?;
+
+    match tokio::time::timeout(ON_DEMAND_FETCH_TIMEOUT, receiver).await {
+        Ok(Ok(Ok(attachment))) => Ok(attachment),
+        Ok(Ok(Err(error))) => Err((
+            status_for_fetch_error(&error),
+            Json(ErrorResponse { error }),
+        )),
+        Ok(Err(_)) => Err(bad_gateway(format!(
+            "host {} disconnected before providing attachment {} for session {}",
+            host_location, attachment_id, session_id
+        ))),
+        Err(_) => {
+            cancel_attachment_fetch(state, &request_id).await;
+            Err(gateway_timeout(format!(
+                "timed out waiting for host {} to provide attachment {} for session {}",
+                host_location, attachment_id, session_id
             )))
         }
     }
@@ -1290,6 +1356,29 @@ async fn fulfill_fetch_result(
     }
 }
 
+async fn fulfill_attachment_fetch_result(
+    state: &AppState,
+    _host_location: &str,
+    request_id: &str,
+    mime_type: Option<String>,
+    data: Option<String>,
+    error: Option<String>,
+) {
+    let sender = {
+        let mut inflight = state.inflight_attachment_fetches.lock().await;
+        inflight.remove(request_id)
+    };
+
+    if let Some(inflight) = sender {
+        let result = match (mime_type, data, error) {
+            (Some(mime_type), Some(data), _) => Ok((mime_type, data)),
+            (_, _, Some(error)) => Err(error),
+            _ => Err("agent returned an empty attachment response".to_string()),
+        };
+        let _ = inflight.sender.send(result);
+    }
+}
+
 async fn fulfill_send_result(
     state: &AppState,
     _host_location: &str,
@@ -1349,6 +1438,26 @@ async fn fail_inflight_for_host(state: &AppState, host_location: &str) {
     for inflight in fetch_senders {
         let _ = inflight.sender.send(Err(format!(
             "host {} disconnected before fulfilling transcript fetch",
+            host_location
+        )));
+    }
+
+    let attachment_senders = {
+        let mut inflight = state.inflight_attachment_fetches.lock().await;
+        let request_ids = inflight
+            .iter()
+            .filter(|(_, inflight)| inflight.host_location == host_location)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        request_ids
+            .into_iter()
+            .filter_map(|request_id| inflight.remove(&request_id))
+            .collect::<Vec<_>>()
+    };
+
+    for inflight in attachment_senders {
+        let _ = inflight.sender.send(Err(format!(
+            "host {} disconnected before providing attachment bytes",
             host_location
         )));
     }
@@ -1475,6 +1584,14 @@ async fn host_for_session(state: &AppState, session_id: &str) -> Option<String> 
 
 async fn cancel_fetch(state: &AppState, request_id: &str) {
     state.inflight_fetches.lock().await.remove(request_id);
+}
+
+async fn cancel_attachment_fetch(state: &AppState, request_id: &str) {
+    state
+        .inflight_attachment_fetches
+        .lock()
+        .await
+        .remove(request_id);
 }
 
 async fn cancel_send_message(state: &AppState, request_id: &str) {
@@ -2013,7 +2130,6 @@ mod tests {
         assert_eq!(hosts[0].sessions.len(), 1);
         assert_eq!(hosts[0].sessions[0].id, "session-1");
     }
-
 
     #[tokio::test]
     async fn returns_default_page_of_sessions() {

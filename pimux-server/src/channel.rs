@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    host::HostIdentity, message::ImageContent, session::{ActiveSession, SessionCommand},
+    host::HostIdentity,
+    message::ImageContent,
+    session::{ActiveSession, SessionCommand},
     transcript::SessionMessagesResponse,
 };
 
@@ -23,6 +25,12 @@ pub enum AgentToServerMessage {
         session: Option<SessionMessagesResponse>,
         error: Option<String>,
     },
+    FetchAttachmentResult {
+        request_id: String,
+        mime_type: Option<String>,
+        data: Option<String>,
+        error: Option<String>,
+    },
     SendMessageResult {
         request_id: String,
         error: Option<String>,
@@ -42,6 +50,11 @@ pub enum ServerToAgentMessage {
     FetchTranscript {
         request_id: String,
         session_id: String,
+    },
+    FetchAttachment {
+        request_id: String,
+        session_id: String,
+        attachment_id: String,
     },
     SendMessage {
         request_id: String,
