@@ -8,5 +8,7 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>pimux uses your local network to discover nearby pimux servers.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>pimux uses the camera to capture images to send to coding sessions.</string>
 </dict>
 </plist>

@@ -40,40 +40,14 @@ struct ContentView: View {
 	@Query(PiSessionsRequest()) private var sessions: [SessionInfo]
 	@Query(CurrentServerConfigurationRequest()) private var serverConfiguration: ServerConfiguration?
 	@State private var selectedSessionID: String?
+	@State private var columnVisibility: NavigationSplitViewVisibility = .automatic
 
 	var body: some View {
-		NavigationSplitView(
-			sidebar: {
-				SidebarView(selectedSessionID: $selectedSessionID)
-			},
-			detail: {
-				NavigationStack {
-					Group {
-						if serverConfiguration == nil {
-							ContentUnavailableView(
-								"No Server Configured",
-								systemImage: "network.slash",
-								description: Text("Connect this app to a pimux server from the sidebar.")
-							)
-						} else if let selectedSession {
-							PiSessionView(session: selectedSession)
-								.id(selectedSession.sessionID)
-						} else if sessions.isEmpty {
-							ContentUnavailableView(
-								"No Recent Sessions",
-								systemImage: "bubble.left.and.bubble.right"
-							)
-						} else {
-							ContentUnavailableView(
-								"No Session Selected",
-								systemImage: "questionmark.message"
-							)
-						}
-					}
-					.navigationDestination(for: Route.self, destination: destination)
-				}
-			}
-		)
+		NavigationSplitView(columnVisibility: $columnVisibility) {
+			SidebarView(selectedSessionID: $selectedSessionID)
+		} detail: {
+			detailView
+		}
 		.task(id: serverConfiguration?.serverURL ?? "") {
 			guard serverConfiguration != nil else { return }
 			let syncer = PiSessionSync(dbContext: dbContext)
@@ -90,6 +64,18 @@ struct ContentView: View {
 				source: "ContentView.selectedSessionID"
 			)
 		}
+		.toolbar {
+			ToolbarItem(placement: .navigation) {
+				Button {
+					withAnimation {
+						columnVisibility = columnVisibility == .detailOnly ? .automatic : .detailOnly
+					}
+				} label: {
+					Label("Toggle Sidebar", systemImage: "sidebar.left")
+				}
+				.keyboardShortcut("l", modifiers: [.command, .shift])
+			}
+		}
 		.onChange(of: sessions.map(\.session.sessionID)) {
 			guard !sessions.isEmpty else {
 				selectedSessionID = nil
@@ -102,6 +88,35 @@ struct ContentView: View {
 			}
 
 			self.selectedSessionID = sessions.first?.session.sessionID
+		}
+	}
+
+	@ViewBuilder
+	private var detailView: some View {
+		NavigationStack {
+			Group {
+				if serverConfiguration == nil {
+					ContentUnavailableView(
+						"No Server Configured",
+						systemImage: "network.slash",
+						description: Text("Connect this app to a pimux server from the sidebar.")
+					)
+				} else if let selectedSession {
+					PiSessionView(session: selectedSession)
+						.id(selectedSession.sessionID)
+				} else if sessions.isEmpty {
+					ContentUnavailableView(
+						"No Recent Sessions",
+						systemImage: "bubble.left.and.bubble.right"
+					)
+				} else {
+					ContentUnavailableView(
+						"No Session Selected",
+						systemImage: "questionmark.message"
+					)
+				}
+			}
+			.navigationDestination(for: Route.self, destination: destination)
 		}
 	}
 

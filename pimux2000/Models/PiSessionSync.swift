@@ -90,6 +90,13 @@ struct PiSessionSync {
 			_ = try Host.filter(staleHostIDs.contains(Column("id"))).deleteAll(db)
 		}
 
+		let activeSessionIDs = Set(
+			remoteHosts
+				.filter(\.connected)
+				.flatMap(\.sessions)
+				.map(\.id)
+		)
+
 		let canonicalRemoteSessions = canonicalRemoteSessions(from: remoteSessions)
 		let existingSessions = try PiSession.fetchAll(db)
 		var existingSessionsByID = Dictionary(uniqueKeysWithValues: existingSessions.map { ($0.sessionID, $0) })
@@ -112,11 +119,10 @@ struct PiSessionSync {
 				session.lastUserMessageAt = remoteSession.lastUserMessageAt
 				session.lastMessageAt = lastMessageAt
 				session.lastMessageRole = lastMessageRole
-				if !remoteSession.hostConnected {
-					session.isCliActive = false
-				}
+				session.isCliActive = activeSessionIDs.contains(remoteSession.id)
 				session.contextTokensUsed = remoteSession.contextUsage?.usedTokens
 				session.contextTokensMax = remoteSession.contextUsage?.maxTokens
+				session.supportsImages = remoteSession.supportsImages
 				session.startedAt = remoteSession.createdAt
 				session.lastSeenAt = remoteSession.updatedAt
 				try session.update(db)
@@ -136,9 +142,11 @@ struct PiSessionSync {
 					lastReadMessageAt: lastMessageAt,
 					contextTokensUsed: remoteSession.contextUsage?.usedTokens,
 					contextTokensMax: remoteSession.contextUsage?.maxTokens,
+					supportsImages: remoteSession.supportsImages,
 					startedAt: remoteSession.createdAt,
 					lastSeenAt: remoteSession.updatedAt
 				)
+				session.isCliActive = activeSessionIDs.contains(remoteSession.id)
 				try session.insert(db)
 			}
 		}

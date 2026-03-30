@@ -23,6 +23,8 @@ pub struct ActiveSession {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<SessionContextUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_images: Option<bool>,
 }
 
 impl ActiveSession {

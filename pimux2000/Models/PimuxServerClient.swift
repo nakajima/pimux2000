@@ -28,6 +28,7 @@ struct PimuxActiveSession: Decodable, Equatable, Sendable {
 	let cwd: String
 	let model: String
 	let contextUsage: PimuxSessionContextUsage?
+	let supportsImages: Bool?
 
 	init(
 		id: String,
@@ -38,7 +39,8 @@ struct PimuxActiveSession: Decodable, Equatable, Sendable {
 		lastAssistantMessageAt: Date,
 		cwd: String,
 		model: String,
-		contextUsage: PimuxSessionContextUsage? = nil
+		contextUsage: PimuxSessionContextUsage? = nil,
+		supportsImages: Bool? = nil
 	) {
 		self.id = id
 		self.summary = summary
@@ -49,6 +51,7 @@ struct PimuxActiveSession: Decodable, Equatable, Sendable {
 		self.cwd = cwd
 		self.model = model
 		self.contextUsage = contextUsage
+		self.supportsImages = supportsImages
 	}
 }
 
@@ -64,6 +67,7 @@ struct PimuxListedSession: Decodable, Equatable, Sendable {
 	let cwd: String
 	let model: String
 	let contextUsage: PimuxSessionContextUsage?
+	let supportsImages: Bool?
 
 	init(
 		hostLocation: String,
@@ -76,7 +80,8 @@ struct PimuxListedSession: Decodable, Equatable, Sendable {
 		lastAssistantMessageAt: Date,
 		cwd: String,
 		model: String,
-		contextUsage: PimuxSessionContextUsage? = nil
+		contextUsage: PimuxSessionContextUsage? = nil,
+		supportsImages: Bool? = nil
 	) {
 		self.hostLocation = hostLocation
 		self.hostConnected = hostConnected
@@ -89,6 +94,7 @@ struct PimuxListedSession: Decodable, Equatable, Sendable {
 		self.cwd = cwd
 		self.model = model
 		self.contextUsage = contextUsage
+		self.supportsImages = supportsImages
 	}
 }
 
@@ -340,6 +346,14 @@ struct PimuxServerClient {
 			path: "/sessions/\(sessionID)/commands"
 		)
 		return response.commands
+	}
+
+	func interruptSession(sessionID: String) async throws {
+		_ = try await performRequest(
+			path: "/sessions/\(sessionID)/interrupt",
+			queryItems: [],
+			method: "POST"
+		)
 	}
 
 	func sendMessage(sessionID: String, body: String, images: [PimuxInputImage] = []) async throws {

@@ -30,6 +30,7 @@ struct PiSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiab
 	var isCliActive: Bool = false
 	var contextTokensUsed: Int? = nil
 	var contextTokensMax: Int? = nil
+	var supportsImages: Bool? = nil
 	var startedAt: Date
 	var lastSeenAt: Date
 

@@ -147,6 +147,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 				}
 				collectionView.isPinnedToBottom = true
 				collectionView.scrollToBottom()
+				collectionView.animateScrolling = true
 				return
 			}
 
@@ -168,7 +169,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 						collectionView.layoutIfNeeded()
 					}
 					if collectionView.isPinnedToBottom {
-						collectionView.scrollToBottom()
+						collectionView.scrollToBottom(animated: true)
 					}
 				} else {
 					reloadChangedItems(old: visibleMessages, new: newVisible, collectionView: collectionView)
@@ -185,6 +186,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 			windowStart = max(0, allMessages.count - Self.initialWindowSize)
 			visibleMessages = allMessages.isEmpty ? [] : Array(allMessages[windowStart...])
 			visibleFingerprints = buildFingerprintMap(visibleMessages)
+			collectionView.animateScrolling = false
 			collectionView.isPinnedToBottom = true
 			lastForcePinToken = parent.forcePinToken
 			isAdjustingScroll = false
@@ -193,6 +195,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 				collectionView.layoutIfNeeded()
 			}
 			collectionView.scrollToBottom()
+			collectionView.animateScrolling = true
 			updateEmptyState(on: collectionView)
 		}
 
@@ -228,7 +231,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 			}
 			if collectionView.isPinnedToBottom || forcePinRequested {
 				collectionView.isPinnedToBottom = true
-				collectionView.scrollToBottom()
+				collectionView.scrollToBottom(animated: collectionView.animateScrolling)
 			} else if let anchor {
 				restoreAnchor(anchor, in: collectionView)
 			}
@@ -406,6 +409,7 @@ private final class TranscriptCell: UICollectionViewCell {
 
 final class TranscriptCollectionView: UICollectionView {
 	var isPinnedToBottom = true
+	var animateScrolling = false
 	private var lastContentSize: CGSize = .zero
 
 	override func layoutSubviews() {
@@ -418,16 +422,28 @@ final class TranscriptCollectionView: UICollectionView {
 		   !isDecelerating, !isDragging, !isTracking {
 			let maxOffset = contentSize.height - bounds.height + adjustedContentInset.bottom
 			if maxOffset > -adjustedContentInset.top {
-				contentOffset = CGPoint(x: 0, y: maxOffset)
+				if animateScrolling {
+					UIView.animate(withDuration: 0.2, delay: 0, options: [.allowUserInteraction, .curveEaseOut]) {
+						self.contentOffset = CGPoint(x: 0, y: maxOffset)
+					}
+				} else {
+					contentOffset = CGPoint(x: 0, y: maxOffset)
+				}
 			}
 		}
 	}
 
-	func scrollToBottom() {
+	func scrollToBottom(animated: Bool = false) {
 		guard bounds.height > 0, contentSize.height > 0 else { return }
 		let maxOffset = contentSize.height - bounds.height + adjustedContentInset.bottom
 		guard maxOffset > -adjustedContentInset.top else { return }
-		contentOffset = CGPoint(x: 0, y: maxOffset)
+		if animated {
+			UIView.animate(withDuration: 0.2, delay: 0, options: [.allowUserInteraction, .curveEaseOut]) {
+				self.contentOffset = CGPoint(x: 0, y: maxOffset)
+			}
+		} else {
+			contentOffset = CGPoint(x: 0, y: maxOffset)
+		}
 	}
 
 	private func updateBottomAlignment() {

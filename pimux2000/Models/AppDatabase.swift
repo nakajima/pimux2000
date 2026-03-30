@@ -127,6 +127,13 @@ struct AppDatabase {
 			}
 		}
 
+		migrator.registerMigration("addPiSessionSupportsImages") { db in
+			let columnNames = try Self.columnNames(in: "piSessions", db: db)
+			if !columnNames.contains("supportsImages") {
+				try db.execute(sql: "ALTER TABLE piSessions ADD COLUMN supportsImages BOOLEAN")
+			}
+		}
+
 		migrator.registerMigration("addPiSessionCwd") { db in
 			let columnNames = try Self.columnNames(in: "piSessions", db: db)
 			if !columnNames.contains("cwd") {

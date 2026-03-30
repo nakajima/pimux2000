@@ -2741,6 +2741,7 @@ mod tests {
             cwd: "/tmp/project".to_string(),
             model: "anthropic/claude-sonnet-4-5".to_string(),
             context_usage: None,
+            supports_images: None,
         }
     }
 

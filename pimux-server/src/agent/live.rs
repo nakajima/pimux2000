@@ -1364,6 +1364,7 @@ impl LiveSessionState {
             cwd: metadata.cwd.clone(),
             model: metadata.model.clone(),
             context_usage: metadata.context_usage.clone(),
+            supports_images: None,
         })
     }
 }
@@ -1410,6 +1411,7 @@ impl DetachedSessionState {
             cwd: metadata.cwd.clone(),
             model: metadata.model.clone(),
             context_usage: metadata.context_usage.clone(),
+            supports_images: None,
         })
     }
 }

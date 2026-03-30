@@ -37,6 +37,7 @@ pub struct DiscoveredSession {
     pub cwd: String,
     pub model: String,
     pub context_usage: Option<SessionContextUsage>,
+    pub supports_images: Option<bool>,
 }
 
 impl DiscoveredSession {
@@ -56,6 +57,7 @@ impl DiscoveredSession {
             cwd: self.cwd,
             model: self.model,
             context_usage: self.context_usage,
+            supports_images: self.supports_images,
         }
     }
 }
@@ -243,8 +245,9 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
         last_user_message_at: last_user_message_at.unwrap_or(header.created_at),
         last_assistant_message_at: last_assistant_message_at.unwrap_or(header.created_at),
         cwd: header.cwd,
-        model,
+        model: model.clone(),
         context_usage,
+        supports_images: model_supports_images(&model),
     })
 }
 
@@ -333,22 +336,36 @@ fn positive_u64(value: &Value) -> Option<u64> {
         .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
 }
 
-fn model_context_window_tokens(model: &str) -> Option<u64> {
-    static CONTEXT_WINDOWS: OnceLock<HashMap<String, u64>> = OnceLock::new();
+#[derive(Debug, Clone)]
+struct ModelCapabilities {
+    context_window: u64,
+    supports_images: bool,
+}
 
-    CONTEXT_WINDOWS
-        .get_or_init(|| match load_model_context_windows() {
-            Ok(context_windows) => context_windows,
+fn model_context_window_tokens(model: &str) -> Option<u64> {
+    model_capabilities(model).map(|cap| cap.context_window)
+}
+
+fn model_supports_images(model: &str) -> Option<bool> {
+    model_capabilities(model).map(|cap| cap.supports_images)
+}
+
+fn model_capabilities(model: &str) -> Option<ModelCapabilities> {
+    static CAPABILITIES: OnceLock<HashMap<String, ModelCapabilities>> = OnceLock::new();
+
+    CAPABILITIES
+        .get_or_init(|| match load_model_capabilities() {
+            Ok(caps) => caps,
             Err(error) => {
-                eprintln!("warning: failed to load pi model context windows: {error}");
+                eprintln!("warning: failed to load pi model capabilities: {error}");
                 HashMap::new()
             }
         })
         .get(model)
-        .copied()
+        .cloned()
 }
 
-fn load_model_context_windows() -> Result<HashMap<String, u64>, BoxError> {
+fn load_model_capabilities() -> Result<HashMap<String, ModelCapabilities>, BoxError> {
     let output = Command::new("pi").arg("--list-models").output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -361,11 +378,11 @@ fn load_model_context_windows() -> Result<HashMap<String, u64>, BoxError> {
     }
 
     let stdout = String::from_utf8(output.stdout)?;
-    Ok(parse_model_context_windows(&stdout))
+    Ok(parse_model_capabilities(&stdout))
 }
 
-fn parse_model_context_windows(output: &str) -> HashMap<String, u64> {
-    let mut context_windows = HashMap::new();
+fn parse_model_capabilities(output: &str) -> HashMap<String, ModelCapabilities> {
+    let mut capabilities = HashMap::new();
 
     for line in output.lines() {
         let columns = line.split_whitespace().collect::<Vec<_>>();
@@ -377,10 +394,19 @@ fn parse_model_context_windows(output: &str) -> HashMap<String, u64> {
             continue;
         };
 
-        context_windows.insert(format!("{}/{}", columns[0], columns[1]), context_window);
+        let supports_images = columns.get(5).map_or(false, |col| *col == "yes");
+        let key = format!("{}/{}", columns[0], columns[1]);
+        capabilities.insert(key, ModelCapabilities { context_window, supports_images });
     }
 
-    context_windows
+    capabilities
+}
+
+fn parse_model_context_windows(output: &str) -> HashMap<String, u64> {
+    parse_model_capabilities(output)
+        .into_iter()
+        .map(|(key, cap)| (key, cap.context_window))
+        .collect()
 }
 
 fn parse_token_count(value: &str) -> Option<u64> {
@@ -609,5 +635,21 @@ mod tests {
             context_windows.get("anthropic/claude-haiku-4-5"),
             Some(&200_000)
         );
+    }
+
+    #[test]
+    fn parse_model_capabilities_extracts_image_support() {
+        let output = [
+            "provider      model              context  max-out  thinking  images",
+            "anthropic     claude-opus-4-6    1M       128K     yes       yes",
+            "openai-codex  gpt-5.4            272K     128K     yes       no",
+            "anthropic     claude-haiku-4-5   200K     64K      yes       yes",
+        ]
+        .join("\n");
+
+        let caps = parse_model_capabilities(&output);
+        assert!(caps.get("anthropic/claude-opus-4-6").unwrap().supports_images);
+        assert!(!caps.get("openai-codex/gpt-5.4").unwrap().supports_images);
+        assert!(caps.get("anthropic/claude-haiku-4-5").unwrap().supports_images);
     }
 }

@@ -1,6 +1,9 @@
 import GRDB
 import GRDBQuery
+import PhotosUI
+import QuickLook
 import SwiftUI
+import UIKit
 
 // MARK: - Query types
 
@@ -124,6 +127,7 @@ struct PiSessionView: View {
 	@Query<MessagesRequest> private var storedMessages: [MessageInfo]
 	@State private var streamedMessages: [MessageInfo]?
 	@State private var draftMessage = ""
+	@State private var draftImages: [ComposerImage] = []
 	@State private var pendingMessages: [PendingLocalMessage] = []
 	@State private var isSendingMessage = false
 	@State private var sendError: String?
@@ -137,6 +141,8 @@ struct PiSessionView: View {
 	@State private var customCommands: [PimuxSessionCommand] = []
 	@State private var requestedMessageContext: MessageContextRoute?
 	@State private var transcriptForcePinToken = 0
+	@State private var isAgentBusy = false
+	@State private var agentIdleTask: Task<Void, Never>?
 	@State private var deferredStartupGeneration = 0
 	@State private var deferredStartupRequestID = 0
 
@@ -151,17 +157,25 @@ struct PiSessionView: View {
 
 			MessageComposerView(
 				text: $draftMessage,
+				attachments: draftImages,
 				customCommands: customCommands,
+				canAttachImages: session.supportsImages ?? true,
 				isEnabled: serverConfiguration != nil,
 				isSending: isSendingMessage,
+				isAgentActive: isAgentBusy,
 				errorMessage: sendError,
-				onSend: { Task { await sendMessage() } }
+				onSend: { Task { await sendMessage() } },
+				onStop: { Task { await interruptSession() } },
+				onRemoveAttachment: { id in draftImages.removeAll { $0.id == id } },
+				onPhotosSelected: { importPhotos($0) },
+				onImportImageData: { data, source in importImageData(data, source: source) }
 			)
 			.onChange(of: draftMessage) {
 				sendError = nil
 			}
 		}
 		.navigationTitle(session.summary)
+		.toolbarVisibility(.hidden, for: .navigationBar)
 		.onAppear {
 			SessionSelectionPerformanceTrace.emitEvent(
 				sessionID: session.sessionID,
@@ -213,6 +227,16 @@ struct PiSessionView: View {
 		streamedMessages ?? storedMessages
 	}
 
+	private func markAgentBusy() {
+		isAgentBusy = true
+		agentIdleTask?.cancel()
+		agentIdleTask = Task {
+			try? await Task.sleep(for: .seconds(3))
+			guard !Task.isCancelled else { return }
+			isAgentBusy = false
+		}
+	}
+
 	private var displayedMessages: [DisplayedSessionMessage] {
 		renderedMessages.map(DisplayedSessionMessage.confirmed) + pendingMessages.map(DisplayedSessionMessage.pending)
 	}
@@ -235,41 +259,16 @@ struct PiSessionView: View {
 	@ViewBuilder
 	private var transcriptView: some View {
 		#if canImport(UIKit) && !os(macOS)
-		VStack(spacing: 0) {
-			if transcriptStatusText != nil || !transcriptWarnings.isEmpty {
-				VStack(spacing: 0) {
-					if let text = transcriptStatusText {
-						Label(text, systemImage: "dot.radiowaves.left.and.right")
-							.font(.caption)
-							.foregroundStyle(.secondary)
-							.padding(.horizontal)
-							.padding(.vertical, 6)
-							.frame(maxWidth: .infinity, alignment: .leading)
-					}
-					ForEach(transcriptWarnings, id: \.self) { warning in
-						Label(warning, systemImage: "exclamationmark.triangle.fill")
-							.font(.caption)
-							.foregroundStyle(.yellow)
-							.padding(.horizontal)
-							.padding(.vertical, 6)
-							.frame(maxWidth: .infinity, alignment: .leading)
-							.background(.yellow.opacity(0.1))
-					}
-				}
-				.background(.ultraThinMaterial)
-			}
-
-			SessionTranscriptView(
-				messages: transcriptMessages,
-				sessionID: session.sessionID,
-				serverURL: serverConfiguration?.serverURL,
-				emptyState: transcriptEmptyState,
-				forcePinToken: transcriptForcePinToken,
-				onRefresh: { await loadMessages() },
-				onRetry: { Task { await loadMessages() } },
-				onOpenMessageContext: { requestedMessageContext = $0 }
-			)
-		}
+		SessionTranscriptView(
+			messages: transcriptMessages,
+			sessionID: session.sessionID,
+			serverURL: serverConfiguration?.serverURL,
+			emptyState: transcriptEmptyState,
+			forcePinToken: transcriptForcePinToken,
+			onRefresh: { await loadMessages() },
+			onRetry: { Task { await loadMessages() } },
+			onOpenMessageContext: { requestedMessageContext = $0 }
+		)
 		#else
 		ScrollViewReader { proxy in
 			ScrollView {
@@ -442,10 +441,16 @@ struct PiSessionView: View {
 		case .snapshot(let sequence, let sessionResponse):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
-			streamedMessages = streamMessageInfos(
+			let newMessages = streamMessageInfos(
 				from: sessionResponse.messages,
 				piSessionID: session.id ?? 0
 			)
+			let contentChanged = streamedMessages != nil
+				&& newMessages.map(\.contentFingerprint) != streamedMessages?.map(\.contentFingerprint)
+			streamedMessages = newMessages
+			if contentChanged {
+				markAgentBusy()
+			}
 			reconcilePendingMessages(using: sessionResponse.messages)
 			transcriptWarnings = sessionResponse.warnings
 			transcriptFreshness = sessionResponse.freshness
@@ -506,28 +511,97 @@ struct PiSessionView: View {
 		}
 
 		let body = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-		guard !body.isEmpty else { return }
+		let readyImages = draftImages.filter(\.isReady)
+		guard !body.isEmpty || !readyImages.isEmpty else { return }
 
 		let pendingMessage = PendingLocalMessage(
 			body: body,
+			images: readyImages,
 			confirmedUserMessageBaseline: confirmedUserMessageCount
 		)
 		transcriptForcePinToken &+= 1
 		pendingMessages.append(pendingMessage)
+		let savedDraftImages = draftImages
 		draftMessage = ""
+		draftImages = []
 		isSendingMessage = true
 		sendError = nil
 		defer { isSendingMessage = false }
 
 		do {
+			let inputImages = readyImages.compactMap(\.inputImage)
 			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			try await client.sendMessage(sessionID: session.sessionID, body: body)
+			try await client.sendMessage(sessionID: session.sessionID, body: body, images: inputImages)
+			markAgentBusy()
 			await loadMessages()
 		} catch {
 			pendingMessages.removeAll { $0.id == pendingMessage.id }
 			draftMessage = body
+			draftImages = savedDraftImages
 			sendError = error.localizedDescription
 			print("Error sending message for \(session.sessionID): \(error)")
+		}
+	}
+
+	private func interruptSession() async {
+		guard let serverConfiguration else { return }
+		agentIdleTask?.cancel()
+		isAgentBusy = false
+		do {
+			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+			try await client.interruptSession(sessionID: session.sessionID)
+		} catch {
+			print("Error interrupting session \(session.sessionID): \(error)")
+		}
+	}
+
+	private func importPhotos(_ items: [PhotosPickerItem]) {
+		let slotsAvailable = max(0, 8 - draftImages.count)
+		for item in items.prefix(slotsAvailable) {
+			let imageID = UUID()
+			draftImages.append(ComposerImage(id: imageID, source: .library))
+
+			Task {
+				do {
+					guard let data = try await item.loadTransferable(type: Data.self) else {
+						markDraftImageFailed(id: imageID, error: "Couldn't load this image.")
+						return
+					}
+					let result = try await OutgoingImageProcessor.process(data)
+					completeDraftImage(id: imageID, with: result)
+				} catch {
+					markDraftImageFailed(id: imageID, error: error.localizedDescription)
+				}
+			}
+		}
+	}
+
+	private func completeDraftImage(id: UUID, with result: ProcessedImageResult) {
+		guard let index = draftImages.firstIndex(where: { $0.id == id }) else { return }
+		draftImages[index].processingState = .ready
+		draftImages[index].mimeType = result.mimeType
+		draftImages[index].base64Data = result.base64Data
+		draftImages[index].predictedAttachmentID = result.predictedAttachmentID
+		draftImages[index].previewData = result.previewData
+	}
+
+	private func markDraftImageFailed(id: UUID, error: String) {
+		guard let index = draftImages.firstIndex(where: { $0.id == id }) else { return }
+		draftImages[index].processingState = .failed(error)
+	}
+
+	private func importImageData(_ data: Data, source: ComposerImage.Source) {
+		guard draftImages.count < 8 else { return }
+		let imageID = UUID()
+		draftImages.append(ComposerImage(id: imageID, source: source))
+
+		Task {
+			do {
+				let result = try await OutgoingImageProcessor.process(data)
+				completeDraftImage(id: imageID, with: result)
+			} catch {
+				markDraftImageFailed(id: imageID, error: error.localizedDescription)
+			}
 		}
 	}
 
@@ -737,8 +811,33 @@ struct PendingLocalMessageView: View {
 			}
 			.foregroundStyle(.secondary)
 
-			MessageMarkdownView(text: message.body, role: .user, title: "You")
-				.opacity(0.55)
+			if !message.previewImages.isEmpty {
+				PendingImageStrip(images: message.previewImages)
+					.opacity(0.55)
+			}
+
+			if !message.body.isEmpty {
+				MessageMarkdownView(text: message.body, role: .user, title: "You")
+					.opacity(0.55)
+			}
+		}
+	}
+}
+
+private struct PendingImageStrip: View {
+	let images: [PendingImagePreview]
+
+	var body: some View {
+		HStack(spacing: 6) {
+			ForEach(images) { preview in
+				if let uiImage = UIImage(data: preview.previewData) {
+					Image(uiImage: uiImage)
+						.resizable()
+						.scaledToFill()
+						.frame(width: 60, height: 60)
+						.clipShape(RoundedRectangle(cornerRadius: 8))
+				}
+			}
 		}
 	}
 }
@@ -865,11 +964,7 @@ struct ContentBlockView: View {
 
 		case "thinking":
 			if let text = block.text, !text.isEmpty {
-				Text(verbatim: text)
-					.font(chatFont(style: .callout))
-					.italic()
-					.foregroundStyle(.secondary)
-					.textSelection(.enabled)
+				ThinkingBlockView(text: text)
 			}
 
 		case "toolCall":
@@ -927,10 +1022,47 @@ private struct ToolCallDetailsView: View {
 	}
 }
 
+private struct ThinkingBlockView: View {
+	private static let maxVisibleLines = 10
+
+	let text: String
+
+	var body: some View {
+		ScrollViewReader { proxy in
+			ScrollView(.vertical) {
+				Text(verbatim: text)
+					.font(chatFont(style: .callout))
+					.italic()
+					.foregroundStyle(.secondary)
+					.textSelection(.enabled)
+					.frame(maxWidth: .infinity, alignment: .leading)
+					.id("thinking-bottom")
+			}
+			.frame(maxHeight: maxHeight)
+			.onChange(of: text) {
+				withAnimation(.easeOut(duration: 0.2)) {
+					proxy.scrollTo("thinking-bottom", anchor: .bottom)
+				}
+			}
+		}
+		.padding(.vertical, 8)
+		.padding(.horizontal, 10)
+		.background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+	}
+
+	private var maxHeight: CGFloat {
+		let lineHeight = UIFont.preferredFont(forTextStyle: .callout).lineHeight
+		return lineHeight * CGFloat(Self.maxVisibleLines) + 16 // 16 for vertical padding
+	}
+}
+
 private struct TranscriptImageView: View {
 	let url: URL
 	let mimeType: String?
 	let attachmentID: String?
+
+	@State private var quickLookURL: URL?
+	@State private var isPreviewLoading = false
 
 	var body: some View {
 		AsyncImage(url: url) { phase in
@@ -943,11 +1075,60 @@ private struct TranscriptImageView: View {
 					.scaledToFit()
 					.frame(maxWidth: 320, maxHeight: 240, alignment: .leading)
 					.clipShape(RoundedRectangle(cornerRadius: 10))
+					.overlay(alignment: .center) {
+						if isPreviewLoading {
+							ProgressView()
+								.padding(8)
+								.background(.thinMaterial, in: Circle())
+						}
+					}
+					.onTapGesture {
+						Task { await openQuickLook() }
+					}
 			case .failure:
 				placeholder(label: "Couldn’t load image", systemImage: "exclamationmark.triangle")
 			@unknown default:
 				placeholder(label: "Image", systemImage: "photo")
 			}
+		}
+		.quickLookPreview($quickLookURL)
+		.onDisappear { cleanupTempFile() }
+	}
+
+	private func openQuickLook() async {
+		guard !isPreviewLoading else { return }
+		isPreviewLoading = true
+		defer { isPreviewLoading = false }
+
+		do {
+			let (data, _) = try await URLSession.shared.data(from: url)
+			cleanupTempFile()
+			let ext = fileExtension(for: mimeType)
+			let tempURL = FileManager.default.temporaryDirectory
+				.appendingPathComponent("pimux-preview-\(UUID().uuidString)")
+				.appendingPathExtension(ext)
+			try data.write(to: tempURL)
+			quickLookURL = tempURL
+		} catch {
+			print("Failed to download image for QuickLook preview: \(error)")
+		}
+	}
+
+	private func cleanupTempFile() {
+		if let url = quickLookURL {
+			try? FileManager.default.removeItem(at: url)
+			quickLookURL = nil
+		}
+	}
+
+	private func fileExtension(for mimeType: String?) -> String {
+		switch mimeType {
+		case "image/png": "png"
+		case "image/jpeg": "jpg"
+		case "image/gif": "gif"
+		case "image/webp": "webp"
+		case "image/heic": "heic"
+		default: "png"
 		}
 	}
 
@@ -1052,7 +1233,7 @@ private struct TranscriptImageView: View {
 			position: 1,
 			createdAt: now.addingTimeInterval(30),
 			blocks: [
-				(type: "thinking", text: "Inspecting the supported roles and block kinds before updating the fixtures.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "thinking", text: "Inspecting the supported roles and block kinds before updating the fixtures.\nLet me look at the Message.Role enum to see what cases exist.\nI see: user, assistant, toolResult, bashExecution, custom, branchSummary, compactionSummary, other.\nNow checking block types: text, thinking, toolCall, image, other.\nThe preview currently only has a user message and an assistant message.\nI need to add tool results, bash execution, branch summaries, compaction summaries.\nAlso need to show images and unknown/other role types.\nLet me also make sure the thinking block is long enough to test scrolling.\nI should verify each role gets the right icon and color.\nPlanning the full set of fixture messages now.\nI'll add about 12 messages covering all the cases.\nStarting with the edit now.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift (offset=785, limit=140)", toolCallName: "read", mimeType: nil, attachmentID: nil)
 			]
 		)
