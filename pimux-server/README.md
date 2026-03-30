@@ -58,6 +58,14 @@ pimux agent status
 pimux agent logs
 ```
 
+To restart installed managed services:
+
+```sh
+pimux restart
+pimux restart --server
+pimux restart --agent
+```
+
 To remove the service later:
 
 ```sh
@@ -618,6 +626,26 @@ Stops and removes the per-user service definition.
 ```sh
 pimux server uninstall
 ```
+
+### `pimux restart`
+
+Restarts installed per-user managed services through the platform service manager.
+
+```sh
+pimux restart
+pimux restart --server
+pimux restart --agent
+pimux restart --server --agent
+```
+
+Behavior:
+- with no flags, restarts both installed services if present
+- `--server` restarts only the installed `pimux server` service
+- `--agent` restarts only the installed `pimux agent` service
+- **macOS**: uses `launchctl`
+- **Linux**: uses `systemd --user`
+- if a requested service is not installed, the command prints that and continues
+- this only affects services installed with `pimux server install` / `pimux agent install`, not additional foreground processes
 
 ## Agent service details
 

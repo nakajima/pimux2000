@@ -35,6 +35,8 @@ enum Commands {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Restart installed managed services
+    Restart(RestartArgs),
     /// List the local sessions the agent would discover
     List {
         /// Override pi's agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)
@@ -134,6 +136,16 @@ struct AgentLogsArgs {
 }
 
 #[derive(Debug, Args)]
+struct RestartArgs {
+    /// Restart the installed server service
+    #[arg(long)]
+    server: bool,
+    /// Restart the installed agent service
+    #[arg(long)]
+    agent: bool,
+}
+
+#[derive(Debug, Args)]
 struct UpdateArgs {
     /// Only check whether a newer GitHub release is available
     #[arg(long)]
@@ -160,6 +172,55 @@ impl AgentRunArgs {
             pi_agent_dir: self.pi_agent_dir,
             summary_model: self.summary_model,
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RestartTargets {
+    server: bool,
+    agent: bool,
+}
+
+fn restart_targets(args: &RestartArgs) -> RestartTargets {
+    if !args.server && !args.agent {
+        return RestartTargets {
+            server: true,
+            agent: true,
+        };
+    }
+
+    RestartTargets {
+        server: args.server,
+        agent: args.agent,
+    }
+}
+
+fn restart_requested_services(
+    args: RestartArgs,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let targets = restart_targets(&args);
+    let mut failures = Vec::new();
+
+    if targets.server {
+        match server::restart_service_if_installed() {
+            Ok(Some(kind)) => println!("restarted server service via {kind}"),
+            Ok(None) => println!("server service is not installed"),
+            Err(error) => failures.push(format!("server: {error}")),
+        }
+    }
+
+    if targets.agent {
+        match agent::restart_service_if_installed() {
+            Ok(Some(kind)) => println!("restarted agent service via {kind}"),
+            Ok(None) => println!("agent service is not installed"),
+            Err(error) => failures.push(format!("agent: {error}")),
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n").into())
     }
 }
 
@@ -238,6 +299,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 agent::service_logs(args.lines, args.follow)?;
             }
         },
+        Commands::Restart(args) => {
+            restart_requested_services(args)?;
+        }
         Commands::List {
             pi_agent_dir,
             summary_model,
@@ -267,4 +331,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RestartArgs, RestartTargets, restart_targets};
+
+    #[test]
+    fn restart_defaults_to_both_services() {
+        let targets = restart_targets(&RestartArgs {
+            server: false,
+            agent: false,
+        });
+
+        assert_eq!(
+            targets,
+            RestartTargets {
+                server: true,
+                agent: true,
+            }
+        );
+    }
+
+    #[test]
+    fn restart_can_target_only_server() {
+        let targets = restart_targets(&RestartArgs {
+            server: true,
+            agent: false,
+        });
+
+        assert_eq!(
+            targets,
+            RestartTargets {
+                server: true,
+                agent: false,
+            }
+        );
+    }
+
+    #[test]
+    fn restart_can_target_only_agent() {
+        let targets = restart_targets(&RestartArgs {
+            server: false,
+            agent: true,
+        });
+
+        assert_eq!(
+            targets,
+            RestartTargets {
+                server: false,
+                agent: true,
+            }
+        );
+    }
 }
