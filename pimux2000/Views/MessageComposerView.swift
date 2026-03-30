@@ -53,6 +53,19 @@ struct MessageComposerView: View {
 				HStack(alignment: .bottom, spacing: 12) {
 					TextField(placeholder, text: $text, axis: .vertical)
 						.lineLimit(1 ... 6)
+						.submitLabel(.send)
+						.onSubmit {
+							onSend()
+						}
+						.onKeyPress(.return, phases: [.down]) { press in
+							guard !isSending else { return .handled }
+							if press.modifiers.contains(.shift) {
+								text.append("\n")
+								return .handled
+							}
+							onSend()
+							return .handled
+						}
 						#if os(iOS)
 						.textInputAutocapitalization(.sentences)
 						#endif

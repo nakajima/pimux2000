@@ -134,6 +134,14 @@ struct AppDatabase {
 			}
 		}
 
+		migrator.registerMigration("addPiSessionLastUserMessageAt") { db in
+			let columnNames = try Self.columnNames(in: "piSessions", db: db)
+			guard !columnNames.contains("lastUserMessageAt") else { return }
+
+			try db.execute(sql: "ALTER TABLE piSessions ADD COLUMN lastUserMessageAt DATETIME")
+			try db.execute(sql: "UPDATE piSessions SET lastUserMessageAt = lastMessageAt WHERE lastUserMessageAt IS NULL")
+		}
+
 		return migrator
 	}
 

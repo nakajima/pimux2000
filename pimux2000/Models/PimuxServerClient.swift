@@ -224,8 +224,21 @@ enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 	}
 }
 
+struct PimuxInputImage: Encodable, Equatable, Sendable {
+	let type: String
+	let mimeType: String
+	let data: String
+
+	init(mimeType: String, data: String) {
+		self.type = "image"
+		self.mimeType = mimeType
+		self.data = data
+	}
+}
+
 private struct PimuxSendMessageRequest: Encodable {
 	let body: String
+	let images: [PimuxInputImage]
 }
 
 
@@ -329,10 +342,10 @@ struct PimuxServerClient {
 		return response.commands
 	}
 
-	func sendMessage(sessionID: String, body: String) async throws {
+	func sendMessage(sessionID: String, body: String, images: [PimuxInputImage] = []) async throws {
 		let requestData: Data
 		do {
-			requestData = try JSONEncoder().encode(PimuxSendMessageRequest(body: body))
+			requestData = try JSONEncoder().encode(PimuxSendMessageRequest(body: body, images: images))
 		} catch {
 			throw PimuxServerError.invalidResponse("Couldn't encode the message request.")
 		}

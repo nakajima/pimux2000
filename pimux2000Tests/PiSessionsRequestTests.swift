@@ -5,7 +5,7 @@ import Testing
 
 struct PiSessionsRequestTests {
 	@Test
-	func fetchOrdersActiveSessionsBeforeInactiveSessions() throws {
+	func fetchOrdersByLastUserMessageWhileKeepingActiveSessionsFirst() throws {
 		let database = AppDatabase.preview()
 		let base = Date(timeIntervalSince1970: 10_000)
 
@@ -18,53 +18,56 @@ struct PiSessionsRequestTests {
 			)
 			try host.insert(db)
 
-			var inactiveMostRecent = PiSession(
+			var inactiveNewestUser = PiSession(
 				id: nil,
 				hostID: try #require(host.id),
-				summary: "Inactive newest",
-				sessionID: "inactive-newest",
+				summary: "Inactive newest user",
+				sessionID: "inactive-newest-user",
 				sessionFile: nil,
 				model: "anthropic/claude-sonnet",
 				lastMessage: nil,
-				lastMessageAt: base.addingTimeInterval(300),
+				lastUserMessageAt: base.addingTimeInterval(300),
+				lastMessageAt: base.addingTimeInterval(400),
 				lastMessageRole: "assistant",
 				isCliActive: false,
 				startedAt: base.addingTimeInterval(-3_600),
-				lastSeenAt: base.addingTimeInterval(300)
+				lastSeenAt: base.addingTimeInterval(400)
 			)
-			try inactiveMostRecent.insert(db)
+			try inactiveNewestUser.insert(db)
 
-			var activeMoreRecent = PiSession(
+			var activeOlderUserWithNewerAgentReply = PiSession(
 				id: nil,
 				hostID: try #require(host.id),
-				summary: "Active newer",
-				sessionID: "active-newer",
+				summary: "Active older user, newer agent reply",
+				sessionID: "active-older-user",
 				sessionFile: nil,
 				model: "anthropic/claude-sonnet",
 				lastMessage: nil,
-				lastMessageAt: base.addingTimeInterval(200),
+				lastUserMessageAt: base.addingTimeInterval(100),
+				lastMessageAt: base.addingTimeInterval(500),
 				lastMessageRole: "assistant",
 				isCliActive: true,
 				startedAt: base.addingTimeInterval(-1_800),
-				lastSeenAt: base.addingTimeInterval(200)
+				lastSeenAt: base.addingTimeInterval(500)
 			)
-			try activeMoreRecent.insert(db)
+			try activeOlderUserWithNewerAgentReply.insert(db)
 
-			var activeOlder = PiSession(
+			var activeNewerUser = PiSession(
 				id: nil,
 				hostID: try #require(host.id),
-				summary: "Active older",
-				sessionID: "active-older",
+				summary: "Active newer user",
+				sessionID: "active-newer-user",
 				sessionFile: nil,
 				model: "anthropic/claude-sonnet",
 				lastMessage: nil,
-				lastMessageAt: base.addingTimeInterval(100),
+				lastUserMessageAt: base.addingTimeInterval(200),
+				lastMessageAt: base.addingTimeInterval(250),
 				lastMessageRole: "assistant",
 				isCliActive: true,
 				startedAt: base.addingTimeInterval(-900),
-				lastSeenAt: base.addingTimeInterval(100)
+				lastSeenAt: base.addingTimeInterval(250)
 			)
-			try activeOlder.insert(db)
+			try activeNewerUser.insert(db)
 		}
 
 		let sessions = try database.dbQueue.read { db in
@@ -72,9 +75,9 @@ struct PiSessionsRequestTests {
 		}
 
 		#expect(sessions.map(\.session.sessionID) == [
-			"active-newer",
-			"active-older",
-			"inactive-newest",
+			"active-newer-user",
+			"active-older-user",
+			"inactive-newest-user",
 		])
 	}
 }

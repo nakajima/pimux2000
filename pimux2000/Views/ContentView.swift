@@ -26,7 +26,7 @@ struct PiSessionsRequest: ValueObservationQueryable {
 			.including(required: PiSession.host)
 			.order(
 				Column("isCliActive").desc,
-				Column("lastSeenAt").desc,
+				Column("lastUserMessageAt").desc,
 				Column("startedAt").desc,
 				Column("sessionID").asc
 			)

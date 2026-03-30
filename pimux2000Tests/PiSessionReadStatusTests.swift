@@ -33,6 +33,7 @@ struct PiSessionReadStatusTests {
 			try PiSession.fetchOne(db)
 		}
 
+		#expect(session?.lastUserMessageAt == lastUserMessageAt)
 		#expect(session?.lastMessageAt == lastAssistantMessageAt)
 		#expect(session?.lastReadMessageAt == lastAssistantMessageAt)
 		#expect(session?.lastMessageRole == "assistant")

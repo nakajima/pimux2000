@@ -721,7 +721,7 @@ private struct TranscriptWarningView: View {
 	}
 }
 
-private struct PendingLocalMessageView: View {
+struct PendingLocalMessageView: View {
 	let message: PendingLocalMessage
 
 	var body: some View {
