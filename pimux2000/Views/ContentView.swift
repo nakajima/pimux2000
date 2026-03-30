@@ -6,6 +6,16 @@ struct SessionInfo: Decodable, FetchableRecord, Identifiable, Equatable, Hashabl
 	var session: PiSession
 	var host: Host
 	var id: Int64? { session.id }
+	
+	var description: String {
+		if let cwd = session.cwd {
+			let host = host.location.split(separator: "@").last ?? ""
+			let cwd = cwd.replacing(/\/Users\/\w+\/|\/home\/\w+\//, with: "~/")
+			return "\(host):\(cwd)"
+		} else {
+			return host.displayName
+		}
+	}
 }
 
 struct PiSessionsRequest: ValueObservationQueryable {
@@ -14,7 +24,12 @@ struct PiSessionsRequest: ValueObservationQueryable {
 	func fetch(_ db: Database) throws -> [SessionInfo] {
 		try PiSession
 			.including(required: PiSession.host)
-			.order(Column("lastSeenAt").desc, Column("startedAt").desc)
+			.order(
+				Column("isCliActive").desc,
+				Column("lastSeenAt").desc,
+				Column("startedAt").desc,
+				Column("sessionID").asc
+			)
 			.asRequest(of: SessionInfo.self)
 			.fetchAll(db)
 	}

@@ -27,7 +27,7 @@ struct SidebarView: View {
 										if let lastMessageAt = sessionInfo.session.lastMessageAt {
 											Text(verbatim: lastMessageAt.formatted(.dateTime))
 										}
-										Text(verbatim: sessionInfo.host.displayName)
+										Text(verbatim: "\(sessionInfo.description)")
 											.bold()
 									}
 								}

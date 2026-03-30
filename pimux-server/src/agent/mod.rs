@@ -10,6 +10,7 @@ mod transcript;
 use std::{
     env,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -33,6 +34,8 @@ use crate::{
 pub use summarizer::DEFAULT_SUMMARY_MODEL;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+const SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 pub struct Config {
     pub server_url: String,
@@ -278,6 +281,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     let mut connected = false;
     let mut last_report: Option<ReportPayload> = None;
     let mut summary_cache = summarizer::SummaryCache::load(&pi_agent_dir);
+    let mut last_full_summary_at: Option<Instant> = None;
 
     if let Err(error) = refresh_host_snapshot(
         &pi_agent_dir,
@@ -286,6 +290,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
         &live_store,
         &mut summary_cache,
         &mut last_report,
+        &mut last_full_summary_at,
         false,
         &channel_tx,
     )
@@ -316,6 +321,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                             &live_store,
                             &mut summary_cache,
                             &mut last_report,
+                            &mut last_full_summary_at,
                             &channel_tx,
                         ).await {
                             eprintln!("failed to publish current state after connect: {error}");
@@ -362,6 +368,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                     &live_store,
                     &mut summary_cache,
                     &mut last_report,
+                    &mut last_full_summary_at,
                     connected,
                     &channel_tx,
                 ).await {
@@ -381,6 +388,7 @@ async fn send_current_state(
     live_store: &live::LiveSessionStoreHandle,
     summary_cache: &mut summarizer::SummaryCache,
     last_report: &mut Option<ReportPayload>,
+    last_full_summary_at: &mut Option<Instant>,
     channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
 ) -> Result<(), BoxError> {
     refresh_host_snapshot(
@@ -390,6 +398,7 @@ async fn send_current_state(
         live_store,
         summary_cache,
         last_report,
+        last_full_summary_at,
         true,
         channel_tx,
     )
@@ -415,12 +424,22 @@ async fn refresh_host_snapshot(
     live_store: &live::LiveSessionStoreHandle,
     summary_cache: &mut summarizer::SummaryCache,
     last_report: &mut Option<ReportPayload>,
+    last_full_summary_at: &mut Option<Instant>,
     force_send: bool,
     channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
 ) -> Result<(), BoxError> {
     let discovered_sessions = discovery::discover_sessions(pi_agent_dir)?;
-    let active_sessions =
-        summarizer::apply_summaries(discovered_sessions, summary_config, summary_cache).await;
+    let needs_full_summary = last_full_summary_at
+        .map(|t| t.elapsed() >= SUMMARY_REFRESH_INTERVAL)
+        .unwrap_or(true);
+    let active_sessions = if needs_full_summary {
+        let sessions =
+            summarizer::apply_summaries(discovered_sessions, summary_config, summary_cache).await;
+        *last_full_summary_at = Some(Instant::now());
+        sessions
+    } else {
+        summarizer::apply_summaries_cached_only(discovered_sessions, summary_cache)
+    };
     let active_sessions =
         merge_live_sessions(active_sessions, live_store.all_listed_sessions().await);
     let report = ReportPayload {

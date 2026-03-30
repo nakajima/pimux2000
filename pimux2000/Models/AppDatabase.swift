@@ -127,6 +127,13 @@ struct AppDatabase {
 			}
 		}
 
+		migrator.registerMigration("addPiSessionCwd") { db in
+			let columnNames = try Self.columnNames(in: "piSessions", db: db)
+			if !columnNames.contains("cwd") {
+				try db.execute(sql: "ALTER TABLE piSessions ADD COLUMN cwd TEXT")
+			}
+		}
+
 		return migrator
 	}
 

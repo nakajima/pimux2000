@@ -107,6 +107,7 @@ struct PiSessionSync {
 				session.summary = remoteSession.summary
 				session.sessionFile = nil
 				session.model = remoteSession.model
+				session.cwd = remoteSession.cwd
 				session.lastMessage = nil
 				session.lastMessageAt = lastMessageAt
 				session.lastMessageRole = lastMessageRole
@@ -126,6 +127,7 @@ struct PiSessionSync {
 					sessionID: remoteSession.id,
 					sessionFile: nil,
 					model: remoteSession.model,
+					cwd: remoteSession.cwd,
 					lastMessage: nil,
 					lastMessageAt: lastMessageAt,
 					lastMessageRole: lastMessageRole,

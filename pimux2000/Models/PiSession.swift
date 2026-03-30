@@ -21,6 +21,7 @@ struct PiSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiab
 	var sessionID: String
 	var sessionFile: String?
 	var model: String
+	var cwd: String? = nil
 	var lastMessage: String?
 	var lastMessageAt: Date?
 	var lastMessageRole: String?

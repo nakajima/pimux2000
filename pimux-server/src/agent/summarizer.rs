@@ -329,6 +329,25 @@ pub async fn apply_summaries_with_stderr_progress(
     apply_summaries_inner(discovered_sessions, config, cache, true).await
 }
 
+pub fn apply_summaries_cached_only(
+    discovered_sessions: Vec<DiscoveredSession>,
+    cache: &SummaryCache,
+) -> Vec<ActiveSession> {
+    discovered_sessions
+        .into_iter()
+        .map(|session| {
+            let summary = resolve_summary_without_llm(&session, cache)
+                .map(|(summary, _)| summary)
+                .unwrap_or_else(|| {
+                    cache
+                        .persisted_summary_for(&session.session_file)
+                        .unwrap_or_else(|| session.heuristic_summary.clone())
+                });
+            session.into_active_session(summary)
+        })
+        .collect()
+}
+
 async fn apply_summaries_inner(
     discovered_sessions: Vec<DiscoveredSession>,
     config: &Config,

@@ -1,46 +1,30 @@
 import SwiftUI
 
-struct SessionTranscriptDiffItem: Equatable {
-	let id: String
-	let version: UInt64
-}
+// MARK: - Data types
 
-enum SessionTranscriptUpdatePlan: Equatable {
-	case none
-	case reloadAll
-	case batch(deletions: [Int], insertions: [Int], reloads: [Int])
-}
+enum TranscriptMessage: Identifiable {
+	case confirmed(MessageInfo)
+	case pending(PendingLocalMessage)
 
-enum SessionTranscriptUpdatePlanner {
-	static func plan(old: [SessionTranscriptDiffItem], new: [SessionTranscriptDiffItem]) -> SessionTranscriptUpdatePlan {
-		guard old != new else { return .none }
-		guard !old.isEmpty, !new.isEmpty else { return .reloadAll }
-		guard hasUniqueIDs(old), hasUniqueIDs(new) else { return .reloadAll }
-
-		let oldIndexByID = Dictionary(uniqueKeysWithValues: old.enumerated().map { ($1.id, $0) })
-		let newIndexByID = Dictionary(uniqueKeysWithValues: new.enumerated().map { ($1.id, $0) })
-
-		let oldSharedIDs = old.compactMap { newIndexByID[$0.id] == nil ? nil : $0.id }
-		let newSharedIDs = new.compactMap { oldIndexByID[$0.id] == nil ? nil : $0.id }
-		guard oldSharedIDs == newSharedIDs else { return .reloadAll }
-
-		let deletions = old.enumerated().compactMap { newIndexByID[$1.id] == nil ? $0 : nil }
-		let insertions = new.enumerated().compactMap { oldIndexByID[$1.id] == nil ? $0 : nil }
-		let reloads = new.enumerated().compactMap { element -> Int? in
-			let (index, item) = element
-			guard let oldIndex = oldIndexByID[item.id] else { return nil }
-			return old[oldIndex].version == item.version ? nil : index
+	var id: String {
+		switch self {
+		case .confirmed(let info):
+			return info.id
+		case .pending(let msg):
+			return "pending-\(msg.id.uuidString)"
 		}
-
-		guard !deletions.isEmpty || !insertions.isEmpty || !reloads.isEmpty else {
-			return .none
-		}
-
-		return .batch(deletions: deletions, insertions: insertions, reloads: reloads)
 	}
 
-	private static func hasUniqueIDs(_ items: [SessionTranscriptDiffItem]) -> Bool {
-		Set(items.map(\.id)).count == items.count
+	var fingerprint: UInt64 {
+		switch self {
+		case .confirmed(let info):
+			return info.contentFingerprint
+		case .pending(let msg):
+			return TranscriptFingerprint.make { fp in
+				fp.combine("pending")
+				fp.combine(msg.normalizedBody)
+			}
+		}
 	}
 }
 
@@ -50,137 +34,16 @@ enum TranscriptEmptyState: Equatable {
 	case empty
 }
 
-enum SessionTranscriptRow: Identifiable {
-	case status(String)
-	case warning(id: String, text: String)
-	case historyLoader(hiddenCount: Int)
-	case confirmed(MessageInfo)
-	case pending(PendingLocalMessage)
-	case empty(TranscriptEmptyState)
-
-	var id: String {
-		switch self {
-		case .status:
-			return "transcript-status"
-		case .warning(let id, _):
-			return id
-		case .historyLoader:
-			return "transcript-history-loader"
-		case .confirmed(let messageInfo):
-			return messageInfo.id
-		case .pending(let pendingMessage):
-			return "pending-\(pendingMessage.id.uuidString)"
-		case .empty:
-			return "transcript-empty-state"
-		}
-	}
-
-	var diffItem: SessionTranscriptDiffItem {
-		SessionTranscriptDiffItem(id: id, version: version)
-	}
-
-	private var version: UInt64 {
-		switch self {
-		case .status(let text):
-			return TranscriptFingerprint.make { fingerprint in
-				fingerprint.combine("status")
-				fingerprint.combine(text)
-			}
-		case .warning(_, let text):
-			return TranscriptFingerprint.make { fingerprint in
-				fingerprint.combine("warning")
-				fingerprint.combine(text)
-			}
-		case .historyLoader(let hiddenCount):
-			return TranscriptFingerprint.make { fingerprint in
-				fingerprint.combine("historyLoader")
-				fingerprint.combine(hiddenCount)
-			}
-		case .confirmed(let messageInfo):
-			return messageInfo.contentFingerprint
-		case .pending(let pendingMessage):
-			return TranscriptFingerprint.make { fingerprint in
-				fingerprint.combine("pending")
-				fingerprint.combine(pendingMessage.normalizedBody)
-			}
-		case .empty(let state):
-			return TranscriptFingerprint.make { fingerprint in
-				fingerprint.combine("empty")
-				switch state {
-				case .loading:
-					fingerprint.combine("loading")
-				case .error(let message):
-					fingerprint.combine("error")
-					fingerprint.combine(message)
-				case .empty:
-					fingerprint.combine("idle")
-				}
-			}
-		}
-	}
-}
-
-struct SessionTranscriptPaginationState {
-	let visibleRows: [SessionTranscriptRow]
-	let visibleBodyStartIndex: Int
-	let hiddenBodyRowCount: Int
-}
-
-enum SessionTranscriptPaginator {
-	static let initialBodyRowCount = 60
-	static let bodyPageSize = 60
-
-	static func paginate(rows: [SessionTranscriptRow], visibleBodyStartIndex: Int?) -> SessionTranscriptPaginationState {
-		let prefixCount = leadingAuxiliaryRowCount(in: rows)
-		let prefixRows = Array(rows.prefix(prefixCount))
-		let bodyRows = Array(rows.dropFirst(prefixCount))
-
-		guard bodyRows.count > initialBodyRowCount else {
-			return SessionTranscriptPaginationState(
-				visibleRows: rows,
-				visibleBodyStartIndex: 0,
-				hiddenBodyRowCount: 0
-			)
-		}
-
-		let initialStartIndex = max(0, bodyRows.count - initialBodyRowCount)
-		let startIndex = min(max(visibleBodyStartIndex ?? initialStartIndex, 0), max(0, bodyRows.count - 1))
-		var visibleRows = prefixRows
-		if startIndex > 0 {
-			visibleRows.append(.historyLoader(hiddenCount: startIndex))
-		}
-		visibleRows.append(contentsOf: bodyRows[startIndex...])
-
-		return SessionTranscriptPaginationState(
-			visibleRows: visibleRows,
-			visibleBodyStartIndex: startIndex,
-			hiddenBodyRowCount: startIndex
-		)
-	}
-
-	static func expandedVisibleBodyStartIndex(from startIndex: Int) -> Int {
-		max(0, startIndex - bodyPageSize)
-	}
-
-	private static func leadingAuxiliaryRowCount(in rows: [SessionTranscriptRow]) -> Int {
-		rows.prefix { row in
-			switch row {
-			case .status, .warning:
-				return true
-			case .historyLoader, .confirmed, .pending, .empty:
-				return false
-			}
-		}.count
-	}
-}
+// MARK: - iOS implementation
 
 #if canImport(UIKit) && !os(macOS)
 import UIKit
 
 struct SessionTranscriptView: UIViewRepresentable {
-	let rows: [SessionTranscriptRow]
+	let messages: [TranscriptMessage]
 	let sessionID: String
 	let serverURL: String?
+	let emptyState: TranscriptEmptyState?
 	var forcePinToken: Int = 0
 	var onRefresh: (() async -> Void)? = nil
 	var onRetry: (() -> Void)? = nil
@@ -200,20 +63,24 @@ struct SessionTranscriptView: UIViewRepresentable {
 		context.coordinator.update(parent: self, tableView: tableView)
 	}
 
+	// MARK: - Coordinator
+
 	final class Coordinator: NSObject, UITableViewDataSource, UITableViewDelegate {
+		private static let initialWindowSize = 50
+		private static let pageSize = 30
+		private static let nearBottomThreshold: CGFloat = 24
+		private static let loadOlderThreshold: CGFloat = 300
+
 		private var parent: SessionTranscriptView
 		private var currentSessionID: String
-		private var rows: [SessionTranscriptRow] = []
-		private var diffItems: [SessionTranscriptDiffItem] = []
-		private var visibleBodyStartIndex: Int?
-		private var lastLaidOutBoundsHeight: Int = 0
-		private var lastLaidOutContentHeight: Int = 0
+		private var allMessages: [TranscriptMessage] = []
+		private var windowStart: Int = 0
+		private var visibleMessages: [TranscriptMessage] = []
+		private var visibleFingerprints: [String: UInt64] = [:]
 		private var isPinnedToBottom = true
 		private var lastForcePinToken = 0
-		private var didFinishInitialSelectionTrace = false
-		private var estimatedHeightRequestCount = 0
+		private var isAdjustingScroll = false
 		private weak var refreshControl: UIRefreshControl?
-		private weak var tableView: UITableView?
 
 		init(parent: SessionTranscriptView) {
 			self.parent = parent
@@ -222,45 +89,33 @@ struct SessionTranscriptView: UIViewRepresentable {
 		}
 
 		func attach(to tableView: TranscriptTableView) {
-			self.tableView = tableView
 			tableView.dataSource = self
 			tableView.delegate = self
 			tableView.separatorStyle = .none
 			tableView.backgroundColor = .clear
 			tableView.rowHeight = UITableView.automaticDimension
-			tableView.estimatedRowHeight = 180
+			tableView.estimatedRowHeight = 80
 			tableView.keyboardDismissMode = .interactive
 			tableView.alwaysBounceVertical = true
 			tableView.register(TranscriptRowCell.self, forCellReuseIdentifier: TranscriptRowCell.reuseIdentifier)
-			tableView.onLayout = { [weak self, weak tableView] in
+			tableView.scrollToBottomAction = { [weak self, weak tableView] in
 				guard let self, let tableView else { return }
-				self.handleLayout(for: tableView)
+				self.scrollToBottom(tableView)
 			}
 			configureRefreshControl(for: tableView)
 		}
 
+		// MARK: Update
+
 		func update(parent: SessionTranscriptView, tableView: TranscriptTableView) {
 			if parent.sessionID != currentSessionID {
-				resetState(for: parent)
-			}
-
-			let pagination = SessionTranscriptPaginator.paginate(rows: parent.rows, visibleBodyStartIndex: visibleBodyStartIndex)
-			visibleBodyStartIndex = pagination.visibleBodyStartIndex
-			let visibleRows = pagination.visibleRows
-			let interval = SessionSelectionPerformanceTrace.beginInterval(
-				name: "TranscriptUpdate",
-				sessionID: parent.sessionID,
-				message: "incomingRows=\(parent.rows.count) visibleRows=\(visibleRows.count) hiddenRows=\(pagination.hiddenBodyRowCount)"
-			)
-			defer {
-				SessionSelectionPerformanceTrace.endInterval(
-					interval,
-					message: "rows=\(rows.count) hiddenRows=\(pagination.hiddenBodyRowCount) estimatedHeightRequests=\(estimatedHeightRequestCount)"
-				)
+				resetForNewSession(parent: parent, tableView: tableView)
+				return
 			}
 
 			self.parent = parent
 			configureRefreshControl(for: tableView)
+			updateEmptyState(on: tableView)
 
 			let forcePinRequested = parent.forcePinToken != lastForcePinToken
 			if forcePinRequested {
@@ -268,61 +123,233 @@ struct SessionTranscriptView: UIViewRepresentable {
 				isPinnedToBottom = true
 			}
 
-			let newDiffItems = visibleRows.map(\.diffItem)
-			guard diffItems != newDiffItems || forcePinRequested else {
-				if forcePinRequested {
-					scrollToBottom(tableView)
+			let newAll = parent.messages
+			let oldAll = allMessages
+			allMessages = newAll
+
+			guard !newAll.isEmpty else {
+				if !visibleMessages.isEmpty {
+					visibleMessages = []
+					visibleFingerprints = [:]
+					windowStart = 0
+					UIView.performWithoutAnimation { tableView.reloadData() }
 				}
 				return
 			}
 
-			let plan = SessionTranscriptUpdatePlanner.plan(old: diffItems, new: newDiffItems)
-			apply(plan: plan, newRows: visibleRows, newDiffItems: newDiffItems, to: tableView, forcePinRequested: forcePinRequested)
+			if oldAll.isEmpty {
+				windowStart = max(0, newAll.count - Self.initialWindowSize)
+				visibleMessages = Array(newAll[windowStart...])
+				visibleFingerprints = buildFingerprintMap(visibleMessages)
+				UIView.performWithoutAnimation { tableView.reloadData() }
+				requestScrollToBottom(tableView)
+				return
+			}
+
+			let oldVisibleIDs = visibleMessages.map(\.id)
+			windowStart = min(windowStart, max(0, newAll.count - 1))
+			let newVisible = Array(newAll[windowStart...])
+			let newVisibleIDs = newVisible.map(\.id)
+
+			if !oldVisibleIDs.isEmpty, newVisibleIDs.starts(with: oldVisibleIDs) {
+				let appendCount = newVisibleIDs.count - oldVisibleIDs.count
+				if appendCount > 0 {
+					visibleMessages = newVisible
+					visibleFingerprints = buildFingerprintMap(visibleMessages)
+					let paths = (oldVisibleIDs.count..<newVisibleIDs.count).map { IndexPath(row: $0, section: 0) }
+					UIView.performWithoutAnimation {
+						tableView.insertRows(at: paths, with: .none)
+					}
+					if isPinnedToBottom || forcePinRequested {
+						requestScrollToBottom(tableView)
+					}
+				} else {
+					reloadChangedRows(old: visibleMessages, new: newVisible, tableView: tableView)
+					if (isPinnedToBottom || forcePinRequested), hasLastRowContentChanged(old: visibleMessages, new: newVisible) {
+						stickyScrollToBottom(tableView)
+					}
+				}
+			} else {
+				reloadPreservingPosition(newVisible: newVisible, tableView: tableView, forcePinRequested: forcePinRequested)
+			}
 		}
 
-		private func resetState(for parent: SessionTranscriptView) {
+		private func resetForNewSession(parent: SessionTranscriptView, tableView: TranscriptTableView) {
 			self.parent = parent
 			currentSessionID = parent.sessionID
-			rows = []
-			diffItems = []
-			visibleBodyStartIndex = nil
-			lastLaidOutBoundsHeight = 0
-			lastLaidOutContentHeight = 0
+			allMessages = parent.messages
+			windowStart = max(0, allMessages.count - Self.initialWindowSize)
+			visibleMessages = allMessages.isEmpty ? [] : Array(allMessages[windowStart...])
+			visibleFingerprints = buildFingerprintMap(visibleMessages)
 			isPinnedToBottom = true
 			lastForcePinToken = parent.forcePinToken
-			didFinishInitialSelectionTrace = false
-			estimatedHeightRequestCount = 0
+			isAdjustingScroll = false
+			UIView.performWithoutAnimation { tableView.reloadData() }
+			updateEmptyState(on: tableView)
+			if !visibleMessages.isEmpty {
+				requestScrollToBottom(tableView)
+			}
 		}
 
-		func numberOfSections(in tableView: UITableView) -> Int {
-			1
+		// MARK: Diffing helpers
+
+		private func buildFingerprintMap(_ messages: [TranscriptMessage]) -> [String: UInt64] {
+			Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0.fingerprint) })
 		}
+
+		private func reloadChangedRows(old: [TranscriptMessage], new: [TranscriptMessage], tableView: UITableView) {
+			var reloadPaths: [IndexPath] = []
+			let newFP = buildFingerprintMap(new)
+			for (index, msg) in old.enumerated() {
+				if let newFingerprint = newFP[msg.id], newFingerprint != msg.fingerprint {
+					reloadPaths.append(IndexPath(row: index, section: 0))
+				}
+			}
+			guard !reloadPaths.isEmpty else { return }
+			visibleMessages = new
+			visibleFingerprints = newFP
+			UIView.performWithoutAnimation {
+				tableView.reloadRows(at: reloadPaths, with: .none)
+			}
+		}
+
+		private func hasLastRowContentChanged(old: [TranscriptMessage], new: [TranscriptMessage]) -> Bool {
+			guard let oldLast = old.last, let newLast = new.last else { return false }
+			return oldLast.id == newLast.id && oldLast.fingerprint != newLast.fingerprint
+		}
+
+		private func reloadPreservingPosition(newVisible: [TranscriptMessage], tableView: TranscriptTableView, forcePinRequested: Bool) {
+			let anchor = captureAnchor(in: tableView)
+			visibleMessages = newVisible
+			visibleFingerprints = buildFingerprintMap(newVisible)
+			UIView.performWithoutAnimation { tableView.reloadData() }
+			if isPinnedToBottom || forcePinRequested {
+				requestScrollToBottom(tableView)
+			} else if let anchor {
+				restoreAnchor(anchor, in: tableView)
+			}
+		}
+
+		// MARK: Scroll anchor
+
+		private struct ScrollAnchor {
+			let messageID: String
+			let offsetFromTop: CGFloat
+		}
+
+		private func captureAnchor(in tableView: UITableView) -> ScrollAnchor? {
+			guard let firstVisiblePath = tableView.indexPathsForVisibleRows?.first,
+				visibleMessages.indices.contains(firstVisiblePath.row),
+				let cell = tableView.cellForRow(at: firstVisiblePath) else {
+				return nil
+			}
+			let offset = cell.frame.origin.y - tableView.contentOffset.y
+			return ScrollAnchor(messageID: visibleMessages[firstVisiblePath.row].id, offsetFromTop: offset)
+		}
+
+		private func restoreAnchor(_ anchor: ScrollAnchor, in tableView: UITableView) {
+			guard let index = visibleMessages.firstIndex(where: { $0.id == anchor.messageID }) else { return }
+			tableView.layoutIfNeeded()
+			let rect = tableView.rectForRow(at: IndexPath(row: index, section: 0))
+			let targetOffset = rect.origin.y - anchor.offsetFromTop
+			let maxOffset = tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom
+			let minOffset = -tableView.adjustedContentInset.top
+			tableView.contentOffset.y = min(maxOffset, max(minOffset, targetOffset))
+		}
+
+		// MARK: Prepend older messages
+
+		private func loadOlderMessages(_ tableView: UITableView) {
+			guard windowStart > 0 else { return }
+
+			let oldStart = windowStart
+			let newStart = max(0, oldStart - Self.pageSize)
+			guard newStart < oldStart else { return }
+
+			let oldContentHeight = tableView.contentSize.height
+			let oldOffset = tableView.contentOffset
+
+			windowStart = newStart
+			let prependedMessages = Array(allMessages[newStart..<oldStart])
+			visibleMessages = prependedMessages + visibleMessages
+			visibleFingerprints = buildFingerprintMap(visibleMessages)
+
+			let insertCount = oldStart - newStart
+			let paths = (0..<insertCount).map { IndexPath(row: $0, section: 0) }
+
+			isAdjustingScroll = true
+			UIView.performWithoutAnimation {
+				tableView.insertRows(at: paths, with: .none)
+				tableView.layoutIfNeeded()
+			}
+			let heightDelta = tableView.contentSize.height - oldContentHeight
+			tableView.contentOffset = CGPoint(x: oldOffset.x, y: oldOffset.y + heightDelta)
+			isAdjustingScroll = false
+		}
+
+		// MARK: Scroll
+
+		private func scrollToBottom(_ tableView: UITableView) {
+			let lastRow = tableView.numberOfRows(inSection: 0) - 1
+			guard lastRow >= 0 else { return }
+			tableView.scrollToRow(at: IndexPath(row: lastRow, section: 0), at: .bottom, animated: false)
+		}
+
+		/// Keeps the viewport pinned to the bottom edge when the last
+		/// row's content is growing (e.g. streaming blocks). Unlike
+		/// `scrollToRow` this works even when we're already at the last
+		/// row but its height increased after a reload.
+		private func stickyScrollToBottom(_ tableView: UITableView) {
+			let maxOffset = tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom
+			guard maxOffset > -tableView.adjustedContentInset.top else { return }
+			tableView.contentOffset = CGPoint(x: 0, y: maxOffset)
+		}
+
+		/// Scrolls to bottom immediately if layout is ready, otherwise
+		/// defers to the next layoutSubviews pass where geometry is valid.
+		private func requestScrollToBottom(_ tableView: TranscriptTableView) {
+			if tableView.bounds.height > 0 && tableView.contentSize.height > 0 {
+				scrollToBottom(tableView)
+			}
+			tableView.pendingScrollToBottom = true
+			tableView.setNeedsLayout()
+		}
+
+		// MARK: UITableViewDataSource
+
+		func numberOfSections(in tableView: UITableView) -> Int { 1 }
 
 		func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-			rows.count
+			visibleMessages.count
 		}
 
 		func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
 			guard let cell = tableView.dequeueReusableCell(withIdentifier: TranscriptRowCell.reuseIdentifier, for: indexPath) as? TranscriptRowCell,
-				rows.indices.contains(indexPath.row) else {
+				visibleMessages.indices.contains(indexPath.row) else {
 				return UITableViewCell()
 			}
-
-			cell.configure(
-				row: rows[indexPath.row],
-				context: renderContext
-			)
+			cell.configure(message: visibleMessages[indexPath.row], context: renderContext)
 			return cell
 		}
 
-		func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
-			estimatedHeightForRow(at: indexPath, in: tableView)
-		}
+		// MARK: UIScrollViewDelegate
 
 		func scrollViewDidScroll(_ scrollView: UIScrollView) {
-			guard scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating else { return }
-			isPinnedToBottom = bottomDistance(of: scrollView) <= TranscriptLayout.nearBottomThreshold
+			guard !isAdjustingScroll else { return }
+
+			if scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating {
+				let bottomDistance = scrollView.contentSize.height - scrollView.contentOffset.y - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+				isPinnedToBottom = bottomDistance <= Self.nearBottomThreshold
+			}
+
+			if let tableView = scrollView as? UITableView,
+				scrollView.contentOffset.y < Self.loadOlderThreshold,
+				windowStart > 0 {
+				loadOlderMessages(tableView)
+			}
 		}
+
+		// MARK: Refresh control
 
 		@objc
 		private func refreshControlChanged() {
@@ -330,26 +357,10 @@ struct SessionTranscriptView: UIViewRepresentable {
 				refreshControl?.endRefreshing()
 				return
 			}
-
 			Task {
 				await onRefresh()
-				await MainActor.run {
-					self.refreshControl?.endRefreshing()
-				}
+				await MainActor.run { self.refreshControl?.endRefreshing() }
 			}
-		}
-
-		private var renderContext: TranscriptRenderContext {
-			TranscriptRenderContext(
-				sessionID: parent.sessionID,
-				serverURL: parent.serverURL,
-				onRetry: parent.onRetry,
-				onOpenMessageContext: parent.onOpenMessageContext,
-				onLoadOlderMessages: { [weak self] in
-					guard let self, let tableView = self.tableView else { return }
-					self.loadOlderMessages(on: tableView)
-				}
-			)
 		}
 
 		private func configureRefreshControl(for tableView: UITableView) {
@@ -358,7 +369,6 @@ struct SessionTranscriptView: UIViewRepresentable {
 				refreshControl = nil
 				return
 			}
-
 			if refreshControl == nil {
 				let control = UIRefreshControl()
 				control.addTarget(self, action: #selector(refreshControlChanged), for: .valueChanged)
@@ -367,303 +377,62 @@ struct SessionTranscriptView: UIViewRepresentable {
 			}
 		}
 
-		private func loadOlderMessages(on tableView: UITableView) {
-			let pagination = SessionTranscriptPaginator.paginate(rows: parent.rows, visibleBodyStartIndex: visibleBodyStartIndex)
-			guard pagination.hiddenBodyRowCount > 0 else { return }
-			let hiddenBefore = pagination.hiddenBodyRowCount
-			visibleBodyStartIndex = SessionTranscriptPaginator.expandedVisibleBodyStartIndex(from: pagination.visibleBodyStartIndex)
-			let expandedPagination = SessionTranscriptPaginator.paginate(rows: parent.rows, visibleBodyStartIndex: visibleBodyStartIndex)
-			visibleBodyStartIndex = expandedPagination.visibleBodyStartIndex
-			let newRows = expandedPagination.visibleRows
-			let newDiffItems = newRows.map(\.diffItem)
-			let plan = SessionTranscriptUpdatePlanner.plan(old: diffItems, new: newDiffItems)
+		// MARK: Empty state
 
-			SessionSelectionPerformanceTrace.emitEvent(
+		private func updateEmptyState(on tableView: UITableView) {
+			if visibleMessages.isEmpty, let emptyState = parent.emptyState {
+				if tableView.backgroundView == nil || !(tableView.backgroundView is TranscriptEmptyStateView) {
+					tableView.backgroundView = TranscriptEmptyStateView(state: emptyState, onRetry: parent.onRetry)
+				}
+			} else {
+				tableView.backgroundView = nil
+			}
+		}
+
+		// MARK: Render context
+
+		private var renderContext: TranscriptRenderContext {
+			TranscriptRenderContext(
 				sessionID: parent.sessionID,
-				name: "TranscriptLoadOlder",
-				message: "hiddenBefore=\(hiddenBefore) hiddenAfter=\(expandedPagination.hiddenBodyRowCount) visibleRows=\(newRows.count)"
+				serverURL: parent.serverURL,
+				onOpenMessageContext: parent.onOpenMessageContext
 			)
-
-			apply(plan: plan, newRows: newRows, newDiffItems: newDiffItems, to: tableView, forcePinRequested: false)
-		}
-
-		private func handleLayout(for tableView: UITableView) {
-			let boundsHeight = roundedKey(for: tableView.bounds.height)
-			let contentHeight = roundedKey(for: tableView.contentSize.height)
-			let layoutChanged = boundsHeight != lastLaidOutBoundsHeight || contentHeight != lastLaidOutContentHeight
-			lastLaidOutBoundsHeight = boundsHeight
-			lastLaidOutContentHeight = contentHeight
-
-			if !didFinishInitialSelectionTrace,
-				tableView.window != nil,
-				tableView.bounds.height > 0,
-				(tableView.contentSize.height > 0 || !rows.isEmpty)
-			{
-				didFinishInitialSelectionTrace = true
-				SessionSelectionPerformanceTrace.emitEvent(
-					sessionID: parent.sessionID,
-					name: "TranscriptFirstLayout",
-					message: "rows=\(rows.count) contentHeight=\(contentHeight) estimatedHeightRequests=\(estimatedHeightRequestCount)"
-				)
-				SessionSelectionPerformanceTrace.endSelection(
-					sessionID: parent.sessionID,
-					reason: "first_layout rows=\(rows.count)"
-				)
-			}
-
-			guard layoutChanged, isPinnedToBottom, !isUserInteracting(tableView) else { return }
-			scrollToBottom(tableView)
-		}
-
-		private func apply(
-			plan: SessionTranscriptUpdatePlan,
-			newRows: [SessionTranscriptRow],
-			newDiffItems: [SessionTranscriptDiffItem],
-			to tableView: UITableView,
-			forcePinRequested: Bool
-		) {
-			switch plan {
-			case .none:
-				rows = newRows
-				diffItems = newDiffItems
-				if forcePinRequested {
-					scrollToBottom(tableView)
-				}
-			case .reloadAll:
-				applyFullReload(with: newRows, diffItems: newDiffItems, to: tableView, forcePinRequested: forcePinRequested)
-			case .batch(let deletions, let insertions, let reloads):
-				let shouldPreserveBottom = isPinnedToBottom || forcePinRequested
-				let preservedBottomDistance = shouldPreserveBottom ? bottomDistance(of: tableView) : nil
-				rows = newRows
-				diffItems = newDiffItems
-
-				let deletePaths = deletions.map { IndexPath(row: $0, section: 0) }
-				let insertPaths = insertions.map { IndexPath(row: $0, section: 0) }
-				let reloadPaths = reloads.map { IndexPath(row: $0, section: 0) }
-
-				UIView.performWithoutAnimation {
-					tableView.performBatchUpdates {
-						if !deletePaths.isEmpty {
-							tableView.deleteRows(at: deletePaths, with: .none)
-						}
-						if !insertPaths.isEmpty {
-							tableView.insertRows(at: insertPaths, with: .none)
-						}
-						if !reloadPaths.isEmpty {
-							tableView.reloadRows(at: reloadPaths, with: .none)
-						}
-					} completion: { _ in
-						self.scheduleScrollRestore(on: tableView, preservedBottomDistance: preservedBottomDistance, forcePinRequested: forcePinRequested)
-					}
-				}
-			}
-		}
-
-		private func applyFullReload(
-			with newRows: [SessionTranscriptRow],
-			diffItems newDiffItems: [SessionTranscriptDiffItem],
-			to tableView: UITableView,
-			forcePinRequested: Bool
-		) {
-			let shouldPreserveBottom = isPinnedToBottom || forcePinRequested
-			let preservedBottomDistance = shouldPreserveBottom ? bottomDistance(of: tableView) : nil
-			rows = newRows
-			diffItems = newDiffItems
-
-			UIView.performWithoutAnimation {
-				tableView.reloadData()
-			}
-
-			scheduleScrollRestore(on: tableView, preservedBottomDistance: preservedBottomDistance, forcePinRequested: forcePinRequested)
-		}
-
-		private func scheduleScrollRestore(on tableView: UITableView, preservedBottomDistance: CGFloat?, forcePinRequested: Bool) {
-			DispatchQueue.main.async { [weak self, weak tableView] in
-				guard let self, let tableView else { return }
-				self.restoreScrollPosition(on: tableView, preservedBottomDistance: preservedBottomDistance, forcePinRequested: forcePinRequested)
-			}
-		}
-
-		private func restoreScrollPosition(on tableView: UITableView, preservedBottomDistance: CGFloat?, forcePinRequested: Bool) {
-			if forcePinRequested || isPinnedToBottom {
-				scrollToBottom(tableView)
-				DispatchQueue.main.async { [weak self, weak tableView] in
-					guard let self, let tableView else { return }
-					guard forcePinRequested || self.isPinnedToBottom else { return }
-					self.scrollToBottom(tableView)
-				}
-				return
-			}
-
-			guard let preservedBottomDistance else { return }
-			setBottomDistance(preservedBottomDistance, on: tableView)
-		}
-
-		private func scrollToBottom(_ tableView: UITableView) {
-			setBottomDistance(0, on: tableView)
-		}
-
-		private func setBottomDistance(_ distance: CGFloat, on tableView: UITableView) {
-			let topOffset = -tableView.adjustedContentInset.top
-			let maxOffset = max(topOffset, tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom)
-			let targetOffset = min(maxOffset, max(topOffset, maxOffset - distance))
-			tableView.setContentOffset(CGPoint(x: 0, y: targetOffset), animated: false)
-		}
-
-		private func bottomDistance(of scrollView: UIScrollView) -> CGFloat {
-			let topOffset = -scrollView.adjustedContentInset.top
-			let maxOffset = max(topOffset, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
-			return max(0, maxOffset - scrollView.contentOffset.y)
-		}
-
-		private func estimatedHeightForRow(at indexPath: IndexPath, in tableView: UITableView) -> CGFloat {
-			estimatedHeightRequestCount += 1
-			guard rows.indices.contains(indexPath.row) else { return 1 }
-			let width = max(tableView.bounds.width, 1)
-			let row = rows[indexPath.row]
-			return roughEstimatedHeight(for: row, width: width)
-		}
-
-		private func roughEstimatedHeight(for row: SessionTranscriptRow, width: CGFloat) -> CGFloat {
-			switch row {
-			case .status(let text):
-				return roughEstimatedPillHeight(text: text, width: width)
-			case .warning(_, let text):
-				return roughEstimatedPillHeight(text: text, width: width)
-			case .historyLoader:
-				return 52
-			case .pending(let pendingMessage):
-				let textHeight = roughEstimatedLabelHeight(
-					for: pendingMessage.body,
-					width: max(120, width - 2 * TranscriptLayout.horizontalInset),
-					font: messageFont(for: .user, style: .body)
-				)
-				return ceil(TranscriptLayout.verticalInset * 2 + 26 + 6 + textHeight)
-			case .empty(let state):
-				switch state {
-				case .loading:
-					return 140
-				case .error(let message):
-					let textHeight = roughEstimatedLabelHeight(
-						for: message,
-						width: max(120, width - 2 * TranscriptLayout.horizontalInset - 40),
-						font: UIFont.preferredFont(forTextStyle: .body)
-					)
-					return ceil(140 + textHeight)
-				case .empty:
-					return 120
-				}
-			case .confirmed(let messageInfo):
-				return roughEstimatedMessageHeight(for: messageInfo, width: width)
-			}
-		}
-
-		private func roughEstimatedPillHeight(text: String, width: CGFloat) -> CGFloat {
-			let textHeight = roughEstimatedLabelHeight(
-				for: text,
-				width: max(120, width - 2 * TranscriptLayout.horizontalInset - 20 - 20 - 8),
-				font: UIFont.preferredFont(forTextStyle: .caption1)
-			)
-			return ceil(TranscriptLayout.verticalInset * 2 + textHeight + 16)
-		}
-
-		private func roughEstimatedMessageHeight(for messageInfo: MessageInfo, width: CGFloat) -> CGFloat {
-			let role = messageInfo.message.role
-			let contentWidth = max(120, width - 2 * TranscriptLayout.horizontalInset - 20 - 12)
-			var total = TranscriptLayout.verticalInset * 2 + 22
-			let blocks = messageInfo.contentBlocks
-			for index in blocks.indices {
-				if index > 0 {
-					total += 6
-				}
-				total += roughEstimatedBlockHeight(for: blocks[index], role: role, width: contentWidth, title: messageTitle(for: messageInfo.message))
-			}
-			return ceil(max(total, 52))
-		}
-
-		private func roughEstimatedBlockHeight(for block: MessageContentBlock, role: Message.Role, width: CGFloat, title: String) -> CGFloat {
-			switch block.type {
-			case "text":
-				guard let text = block.text, !text.isEmpty else { return 0 }
-				let displayText = MessageMarkdownRenderer.shouldCollapsePreview(for: text, role: role)
-					? MessageMarkdownRenderer.previewText(for: text)
-					: text
-				let textHeight = roughEstimatedLabelHeight(for: displayText, width: width, font: messageFont(for: role, style: .body))
-				let contextButtonHeight: CGFloat = MessageMarkdownRenderer.shouldCollapsePreview(for: text, role: role) ? 30 : 0
-				return ceil(textHeight + contextButtonHeight)
-			case "thinking":
-				guard let text = block.text, !text.isEmpty else { return 0 }
-				return ceil(roughEstimatedLabelHeight(for: text, width: width, font: UIFont.preferredFont(forTextStyle: .callout)))
-			case "toolCall":
-				var total: CGFloat = 32
-				if let text = block.text, !text.isEmpty {
-					let collapsed = shouldCollapseCodeLikeContent(text)
-					let displayText = collapsed ? MessageMarkdownRenderer.previewText(for: text) : text
-					let textHeight = roughEstimatedLabelHeight(
-						for: displayText,
-						width: max(80, width - 20),
-						font: UIFont.monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .caption1).pointSize, weight: .regular)
-					)
-					total += 8 + textHeight + 16
-					if collapsed {
-						total += 30
-					}
-				}
-				return ceil(total)
-			case "image":
-				return TranscriptLayout.imageSize.height
-			default:
-				guard let text = block.text, !text.isEmpty else { return 0 }
-				return ceil(roughEstimatedLabelHeight(for: text, width: width, font: UIFont.preferredFont(forTextStyle: .body)))
-			}
-		}
-
-		private func roughEstimatedLabelHeight(for text: String, width: CGFloat, font: UIFont) -> CGFloat {
-			guard !text.isEmpty else { return font.lineHeight }
-			let rect = (text as NSString).boundingRect(
-				with: CGSize(width: max(1, width), height: .greatestFiniteMagnitude),
-				options: [.usesLineFragmentOrigin, .usesFontLeading],
-				attributes: [.font: font],
-				context: nil
-			)
-			return max(font.lineHeight, ceil(rect.height))
-		}
-
-		private func isUserInteracting(_ scrollView: UIScrollView) -> Bool {
-			scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating
-		}
-
-		private func roundedKey(for value: CGFloat) -> Int {
-			Int(value.rounded())
 		}
 	}
 }
+
+// MARK: - Layout constants
 
 private enum TranscriptLayout {
 	static let horizontalInset: CGFloat = 16
 	static let verticalInset: CGFloat = 8
-	static let verticalSpacing: CGFloat = 8
-	static let messageBlockSpacing: CGFloat = 10
 	static let imageSize = CGSize(width: 320, height: 240)
-	static let nearBottomThreshold: CGFloat = 24
 }
+
+// MARK: - Render context
 
 private struct TranscriptRenderContext {
 	let sessionID: String
 	let serverURL: String?
-	let onRetry: (() -> Void)?
 	let onOpenMessageContext: ((MessageContextRoute) -> Void)?
-	let onLoadOlderMessages: (() -> Void)?
 }
 
+// MARK: - Table view
+
 final class TranscriptTableView: UITableView {
-	var onLayout: (() -> Void)?
+	var pendingScrollToBottom = false
+	var scrollToBottomAction: (() -> Void)?
 
 	override func layoutSubviews() {
 		super.layoutSubviews()
-		onLayout?()
+		if pendingScrollToBottom, bounds.height > 0, contentSize.height > 0 {
+			pendingScrollToBottom = false
+			scrollToBottomAction?()
+		}
 	}
 }
+
+// MARK: - Cell
 
 private final class TranscriptRowCell: UITableViewCell {
 	static let reuseIdentifier = "TranscriptRowCell"
@@ -690,12 +459,12 @@ private final class TranscriptRowCell: UITableViewCell {
 		hostedConstraints.removeAll()
 	}
 
-	func configure(row: SessionTranscriptRow, context: TranscriptRenderContext) {
+	func configure(message: TranscriptMessage, context: TranscriptRenderContext) {
 		hostedRowView?.removeFromSuperview()
 		NSLayoutConstraint.deactivate(hostedConstraints)
 		hostedConstraints.removeAll()
 
-		let view = makeView(for: row, context: context)
+		let view = makeView(for: message, context: context)
 		view.translatesAutoresizingMaskIntoConstraints = false
 		contentView.addSubview(view)
 		hostedConstraints = [
@@ -708,23 +477,23 @@ private final class TranscriptRowCell: UITableViewCell {
 		hostedRowView = view
 	}
 
-	private func makeView(for row: SessionTranscriptRow, context: TranscriptRenderContext) -> UIView {
-		switch row {
-		case .status(let text):
-			return TranscriptInsetContainerView(content: TranscriptPillView(text: text, systemImage: "dot.radiowaves.left.and.right", foregroundColor: .secondaryLabel, backgroundColor: UIColor.secondarySystemFill))
-		case .warning(_, let text):
-			return TranscriptInsetContainerView(content: TranscriptPillView(text: text, systemImage: "exclamationmark.triangle.fill", foregroundColor: .systemYellow, backgroundColor: UIColor.systemYellow.withAlphaComponent(0.12)))
-		case .historyLoader(let hiddenCount):
-			return TranscriptInsetContainerView(content: TranscriptHistoryLoaderRowView(hiddenCount: hiddenCount, onLoadOlderMessages: context.onLoadOlderMessages), verticalInset: TranscriptLayout.verticalInset)
+	private func makeView(for message: TranscriptMessage, context: TranscriptRenderContext) -> UIView {
+		switch message {
 		case .confirmed(let messageInfo):
-			return TranscriptInsetContainerView(content: TranscriptMessageRowView(messageInfo: messageInfo, sessionID: context.sessionID, serverURL: context.serverURL, onOpenMessageContext: context.onOpenMessageContext), verticalInset: TranscriptLayout.verticalInset)
+			return TranscriptInsetContainerView(
+				content: TranscriptMessageRowView(messageInfo: messageInfo, sessionID: context.sessionID, serverURL: context.serverURL, onOpenMessageContext: context.onOpenMessageContext),
+				verticalInset: TranscriptLayout.verticalInset
+			)
 		case .pending(let pendingMessage):
-			return TranscriptInsetContainerView(content: TranscriptPendingMessageRowView(message: pendingMessage), verticalInset: TranscriptLayout.verticalInset)
-		case .empty(let state):
-			return TranscriptInsetContainerView(content: TranscriptEmptyStateRowView(state: state, onRetry: context.onRetry), verticalInset: 24)
+			return TranscriptInsetContainerView(
+				content: TranscriptPendingMessageRowView(message: pendingMessage),
+				verticalInset: TranscriptLayout.verticalInset
+			)
 		}
 	}
 }
+
+// MARK: - Row views
 
 private final class TranscriptInsetContainerView: UIView {
 	init(content: UIView, verticalInset: CGFloat = TranscriptLayout.verticalInset) {
@@ -746,90 +515,9 @@ private final class TranscriptInsetContainerView: UIView {
 	}
 }
 
-private final class TranscriptPillView: UIView {
-	init(text: String, systemImage: String, foregroundColor: UIColor, backgroundColor: UIColor) {
-		super.init(frame: .zero)
-		translatesAutoresizingMaskIntoConstraints = false
-
-		let imageView = UIImageView(image: UIImage(systemName: systemImage))
-		imageView.translatesAutoresizingMaskIntoConstraints = false
-		imageView.tintColor = foregroundColor
-		imageView.setContentHuggingPriority(.required, for: .horizontal)
-		imageView.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-		let label = UILabel()
-		label.translatesAutoresizingMaskIntoConstraints = false
-		label.font = UIFont.preferredFont(forTextStyle: .caption1)
-		label.adjustsFontForContentSizeCategory = true
-		label.textColor = foregroundColor
-		label.numberOfLines = 0
-		label.text = text
-
-		let stack = UIStackView(arrangedSubviews: [imageView, label])
-		stack.translatesAutoresizingMaskIntoConstraints = false
-		stack.axis = .horizontal
-		stack.alignment = .center
-		stack.spacing = 8
-
-		layer.cornerRadius = 10
-		self.backgroundColor = backgroundColor
-		addSubview(stack)
-
-		NSLayoutConstraint.activate([
-			stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-			stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-			stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-			stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-		])
-	}
-
-	required init?(coder: NSCoder) {
-		fatalError("init(coder:) has not been implemented")
-	}
-}
-
-private final class TranscriptHistoryLoaderRowView: UIView {
-	init(hiddenCount: Int, onLoadOlderMessages: (() -> Void)?) {
-		super.init(frame: .zero)
-		translatesAutoresizingMaskIntoConstraints = false
-
-		let button = UIButton(type: .system)
-		button.translatesAutoresizingMaskIntoConstraints = false
-		button.setTitle(historyButtonTitle(hiddenCount: hiddenCount), for: .normal)
-		button.titleLabel?.font = UIFont.preferredFont(forTextStyle: .footnote)
-		button.titleLabel?.adjustsFontForContentSizeCategory = true
-		button.backgroundColor = .secondarySystemFill
-		button.layer.cornerRadius = 10
-		button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-		button.contentHorizontalAlignment = .center
-		button.isEnabled = onLoadOlderMessages != nil
-		if let onLoadOlderMessages {
-			button.addAction(UIAction { _ in onLoadOlderMessages() }, for: .touchUpInside)
-		}
-		addSubview(button)
-
-		NSLayoutConstraint.activate([
-			button.leadingAnchor.constraint(equalTo: leadingAnchor),
-			button.trailingAnchor.constraint(equalTo: trailingAnchor),
-			button.topAnchor.constraint(equalTo: topAnchor),
-			button.bottomAnchor.constraint(equalTo: bottomAnchor),
-			button.heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
-		])
-	}
-
-	required init?(coder: NSCoder) {
-		fatalError("init(coder:) has not been implemented")
-	}
-
-	private func historyButtonTitle(hiddenCount: Int) -> String {
-		hiddenCount == 1 ? "Show 1 earlier message" : "Show \(hiddenCount) earlier messages"
-	}
-}
-
-private final class TranscriptEmptyStateRowView: UIView {
+private final class TranscriptEmptyStateView: UIView {
 	init(state: TranscriptEmptyState, onRetry: (() -> Void)?) {
 		super.init(frame: .zero)
-		translatesAutoresizingMaskIntoConstraints = false
 
 		let stack = UIStackView()
 		stack.translatesAutoresizingMaskIntoConstraints = false
@@ -853,7 +541,7 @@ private final class TranscriptEmptyStateRowView: UIView {
 		case .error(let message):
 			icon.image = UIImage(systemName: "exclamationmark.triangle")
 			icon.tintColor = .systemOrange
-			stack.addArrangedSubview(makeLabel("Couldn’t Load Messages", style: .headline, color: .label, alignment: .center))
+			stack.addArrangedSubview(makeLabel("Couldn't Load Messages", style: .headline, color: .label, alignment: .center))
 			stack.addArrangedSubview(makeLabel(message, style: .body, color: .secondaryLabel, alignment: .center))
 			if let onRetry {
 				let button = UIButton(type: .system)
@@ -868,11 +556,10 @@ private final class TranscriptEmptyStateRowView: UIView {
 		}
 
 		NSLayoutConstraint.activate([
-			stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
-			stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
 			stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-			stack.topAnchor.constraint(equalTo: topAnchor),
-			stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+			stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+			stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 20),
+			stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -20),
 		])
 	}
 
@@ -994,6 +681,8 @@ private final class TranscriptMessageRowView: UIView {
 	}
 }
 
+// MARK: - Block views
+
 private func makeBlockView(
 	block: MessageContentBlock,
 	messageRole: Message.Role,
@@ -1085,6 +774,48 @@ private final class TranscriptToolCallBlockView: UIView {
 			stack.trailingAnchor.constraint(equalTo: trailingAnchor),
 			stack.topAnchor.constraint(equalTo: topAnchor),
 			stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+		])
+	}
+
+	required init?(coder: NSCoder) {
+		fatalError("init(coder:) has not been implemented")
+	}
+}
+
+private final class TranscriptPillView: UIView {
+	init(text: String, systemImage: String, foregroundColor: UIColor, backgroundColor: UIColor) {
+		super.init(frame: .zero)
+		translatesAutoresizingMaskIntoConstraints = false
+
+		let imageView = UIImageView(image: UIImage(systemName: systemImage))
+		imageView.translatesAutoresizingMaskIntoConstraints = false
+		imageView.tintColor = foregroundColor
+		imageView.setContentHuggingPriority(.required, for: .horizontal)
+		imageView.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+		let label = UILabel()
+		label.translatesAutoresizingMaskIntoConstraints = false
+		label.font = UIFont.preferredFont(forTextStyle: .caption1)
+		label.adjustsFontForContentSizeCategory = true
+		label.textColor = foregroundColor
+		label.numberOfLines = 0
+		label.text = text
+
+		let stack = UIStackView(arrangedSubviews: [imageView, label])
+		stack.translatesAutoresizingMaskIntoConstraints = false
+		stack.axis = .horizontal
+		stack.alignment = .center
+		stack.spacing = 8
+
+		layer.cornerRadius = 10
+		self.backgroundColor = backgroundColor
+		addSubview(stack)
+
+		NSLayoutConstraint.activate([
+			stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+			stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+			stack.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+			stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
 		])
 	}
 
@@ -1193,6 +924,8 @@ private final class TranscriptImageBlockView: UIView {
 		placeholderStack.isHidden = true
 	}
 }
+
+// MARK: - Helper functions
 
 private func makeContextButton(action: @escaping () -> Void) -> UIButton {
 	let button = UIButton(type: .system)
@@ -1324,15 +1057,15 @@ private func attachmentURL(for block: MessageContentBlock, sessionID: String, se
 	}
 }
 
+// MARK: - Preview
+
 #Preview("iOS transcript") {
-	let rows: [SessionTranscriptRow] = [
-		.status("Live transcript • attached • source: live"),
-		.warning(id: "warning", text: "Fell back to a persisted snapshot for a moment."),
+	let messages: [TranscriptMessage] = [
 		.confirmed(
 			MessageInfo(
 				message: Message(id: 1, piSessionID: 1, role: .user, toolName: nil, position: 0, createdAt: Date()),
 				contentBlocks: [
-					MessageContentBlock(id: 1, messageID: 1, type: "text", text: "Can you make the transcript stable on iOS?", toolCallName: nil, position: 0)
+					MessageContentBlock(id: 1, messageID: 1, type: "text", text: "Can you make the transcript stable on iOS?", toolCallName: nil, position: 0),
 				]
 			)
 		),
@@ -1340,8 +1073,8 @@ private func attachmentURL(for block: MessageContentBlock, sessionID: String, se
 			MessageInfo(
 				message: Message(id: 2, piSessionID: 1, role: .assistant, toolName: nil, position: 1, createdAt: Date()),
 				contentBlocks: [
-					MessageContentBlock(id: 2, messageID: 2, type: "text", text: "Yes — the iOS transcript now uses UIKit rows instead of hosted SwiftUI rows, so sizing stays deterministic.", toolCallName: nil, position: 0),
-					MessageContentBlock(id: 3, messageID: 2, type: "toolCall", text: "xcodebuild -scheme pimux2000 -destination 'platform=iOS Simulator,id=1234' test", toolCallName: "bash", position: 1)
+					MessageContentBlock(id: 2, messageID: 2, type: "text", text: "Yes — the iOS transcript now uses a windowed UITableView with anchor-preserving prepend.", toolCallName: nil, position: 0),
+					MessageContentBlock(id: 3, messageID: 2, type: "toolCall", text: "xcodebuild -scheme pimux2000 -destination 'platform=iOS Simulator,id=1234' test", toolCallName: "bash", position: 1),
 				]
 			)
 		),
@@ -1349,7 +1082,7 @@ private func attachmentURL(for block: MessageContentBlock, sessionID: String, se
 	]
 
 	return NavigationStack {
-		SessionTranscriptView(rows: rows, sessionID: "preview-session", serverURL: nil, onOpenMessageContext: { _ in })
+		SessionTranscriptView(messages: messages, sessionID: "preview-session", serverURL: nil, emptyState: nil, onOpenMessageContext: { _ in })
 			.background(.background)
 	}
 }

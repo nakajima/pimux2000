@@ -217,55 +217,59 @@ struct PiSessionView: View {
 		renderedMessages.map(DisplayedSessionMessage.confirmed) + pendingMessages.map(DisplayedSessionMessage.pending)
 	}
 
-	private var transcriptRows: [SessionTranscriptRow] {
-		var rows: [SessionTranscriptRow] = []
-
-		if let transcriptStatusText {
-			rows.append(.status(transcriptStatusText))
-		}
-
-		rows += transcriptWarnings.enumerated().map { index, warning in
-			.warning(id: "transcript-warning-\(index)", text: warning)
-		}
-
-		if displayedMessages.isEmpty {
-			rows.append(.empty(transcriptEmptyState))
-		} else {
-			rows += displayedMessages.map { displayedMessage in
-				switch displayedMessage {
-				case .confirmed(let messageInfo):
-					.confirmed(messageInfo)
-				case .pending(let pendingMessage):
-					.pending(pendingMessage)
-				}
-			}
-		}
-
-		return rows
+	private var transcriptMessages: [TranscriptMessage] {
+		renderedMessages.map(TranscriptMessage.confirmed) + pendingMessages.map(TranscriptMessage.pending)
 	}
 
-	private var transcriptEmptyState: TranscriptEmptyState {
+	private var transcriptEmptyState: TranscriptEmptyState? {
+		guard displayedMessages.isEmpty else { return nil }
 		if isLoadingMessages {
-			.loading
+			return .loading
 		} else if let loadError {
-			.error(loadError)
+			return .error(loadError)
 		} else {
-			.empty
+			return .empty
 		}
 	}
 
 	@ViewBuilder
 	private var transcriptView: some View {
 		#if canImport(UIKit) && !os(macOS)
-		SessionTranscriptView(
-			rows: transcriptRows,
-			sessionID: session.sessionID,
-			serverURL: serverConfiguration?.serverURL,
-			forcePinToken: transcriptForcePinToken,
-			onRefresh: { await loadMessages() },
-			onRetry: { Task { await loadMessages() } },
-			onOpenMessageContext: { requestedMessageContext = $0 }
-		)
+		VStack(spacing: 0) {
+			if transcriptStatusText != nil || !transcriptWarnings.isEmpty {
+				VStack(spacing: 0) {
+					if let text = transcriptStatusText {
+						Label(text, systemImage: "dot.radiowaves.left.and.right")
+							.font(.caption)
+							.foregroundStyle(.secondary)
+							.padding(.horizontal)
+							.padding(.vertical, 6)
+							.frame(maxWidth: .infinity, alignment: .leading)
+					}
+					ForEach(transcriptWarnings, id: \.self) { warning in
+						Label(warning, systemImage: "exclamationmark.triangle.fill")
+							.font(.caption)
+							.foregroundStyle(.yellow)
+							.padding(.horizontal)
+							.padding(.vertical, 6)
+							.frame(maxWidth: .infinity, alignment: .leading)
+							.background(.yellow.opacity(0.1))
+					}
+				}
+				.background(.ultraThinMaterial)
+			}
+
+			SessionTranscriptView(
+				messages: transcriptMessages,
+				sessionID: session.sessionID,
+				serverURL: serverConfiguration?.serverURL,
+				emptyState: transcriptEmptyState,
+				forcePinToken: transcriptForcePinToken,
+				onRefresh: { await loadMessages() },
+				onRetry: { Task { await loadMessages() } },
+				onOpenMessageContext: { requestedMessageContext = $0 }
+			)
+		}
 		#else
 		ScrollViewReader { proxy in
 			ScrollView {
@@ -393,15 +397,13 @@ struct PiSessionView: View {
 		SessionSelectionPerformanceTrace.emitEvent(
 			sessionID: session.sessionID,
 			name: "LiveMessagesLoopStart",
-			message: "serverConfigured=\(serverConfiguration != nil)"
+			message: "serverConfigured=\(serverConfiguration != nil) eagerLoad=false stored=\(storedMessages.count)"
 		)
 
 		guard serverConfiguration != nil else {
 			liveStreamState = .idle
 			return
 		}
-
-		await loadMessages()
 
 		while !Task.isCancelled {
 			do {

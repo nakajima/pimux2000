@@ -78,6 +78,7 @@ struct PiSessionSyncTests {
 		let canonicalHost = try #require(hosts.first(where: { $0.id == session.hostID }))
 		#expect(canonicalHost.location == "nakajima@macstudio")
 		#expect(session.summary == "Connected canonical session")
+		#expect(session.cwd == "/tmp/live")
 		#expect(session.contextTokensUsed == 20)
 	}
 
