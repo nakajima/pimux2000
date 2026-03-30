@@ -98,7 +98,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 			collectionView.backgroundColor = .clear
 			collectionView.keyboardDismissMode = .interactive
 			collectionView.alwaysBounceVertical = true
-			collectionView.register(UICollectionViewCell.self, forCellWithReuseIdentifier: "cell")
+			collectionView.register(TranscriptCell.self, forCellWithReuseIdentifier: "cell")
 			configureRefreshControl(for: collectionView)
 		}
 
@@ -390,6 +390,16 @@ struct TranscriptRenderContext {
 	let sessionID: String
 	let serverURL: String?
 	let onOpenMessageContext: ((MessageContextRoute) -> Void)?
+}
+
+// MARK: - Cell subclass
+
+private final class TranscriptCell: UICollectionViewCell {
+	override func apply(_ layoutAttributes: UICollectionViewLayoutAttributes) {
+		UIView.performWithoutAnimation {
+			super.apply(layoutAttributes)
+		}
+	}
 }
 
 // MARK: - Collection view
