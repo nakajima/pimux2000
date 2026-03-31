@@ -265,7 +265,6 @@ struct PiSessionView: View {
 			serverURL: serverConfiguration?.serverURL,
 			emptyState: transcriptEmptyState,
 			forcePinToken: transcriptForcePinToken,
-			onRefresh: { await loadMessages() },
 			onRetry: { Task { await loadMessages() } },
 			onOpenMessageContext: { requestedMessageContext = $0 }
 		)
