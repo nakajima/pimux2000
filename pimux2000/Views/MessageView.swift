@@ -255,6 +255,15 @@ private struct ThinkingBlockView: View {
 				.opacity(0.7)
 				.frame(maxWidth: .infinity, maxHeight: maxHeight, alignment: .bottomLeading)
 				.clipped()
+				.mask {
+					VStack(spacing: 0) {
+						if needsTruncation {
+							LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom)
+								.frame(height: maxHeight * 0.25)
+						}
+						Color.black
+					}
+				}
 
 			if needsTruncation {
 				NavigationLink(value: Route.messageContext(route)) {
