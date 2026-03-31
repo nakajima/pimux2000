@@ -45,10 +45,22 @@ struct MessageMarkdownView: View {
 	}
 
 	private var renderedMarkdown: some View {
-		MarkdownTextView(
-			attributedText: MarkdownAttributedStringBuilder.attributedString(for: text, role: role),
-			isSelectable: displayMode == .full
-		)
+		let isInlineOnly = MessageMarkdownRenderer.usesInlineMarkdown(for: text, role: role)
+		let isMonospaced = role == .toolResult || role == .bashExecution
+
+		return Group {
+			if !isInlineOnly && !isMonospaced {
+				MarkdownBlocksView(
+					blocks: MarkdownBlockParser.parse(text),
+					isSelectable: displayMode == .full
+				)
+			} else {
+				MarkdownTextView(
+					attributedText: MarkdownAttributedStringBuilder.attributedString(for: text, role: role),
+					isSelectable: displayMode == .full
+				)
+			}
+		}
 		.frame(maxWidth: .infinity, alignment: .leading)
 	}
 

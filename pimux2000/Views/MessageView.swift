@@ -236,32 +236,40 @@ private struct ThinkingBlockView: View {
 
 	let text: String
 
+	private var needsTruncation: Bool {
+		let lines = text.components(separatedBy: .newlines)
+		return lines.count > Self.maxVisibleLines || text.count > Self.maxVisibleLines * 60
+	}
+
+	private var maxHeight: CGFloat {
+		UIFont.preferredFont(forTextStyle: .callout).lineHeight * CGFloat(Self.maxVisibleLines)
+	}
+
+	private var route: MessageContextRoute {
+		MessageContextRoute(title: "Thinking", text: text, role: .assistant)
+	}
+
 	var body: some View {
-		ScrollViewReader { proxy in
-			ScrollView(.vertical) {
-				Text(verbatim: text)
-					.font(chatFont(style: .callout))
-					.italic()
-					.foregroundStyle(.secondary)
-					.textSelection(.enabled)
-					.frame(maxWidth: .infinity, alignment: .leading)
-					.id("thinking-bottom")
-			}
-			.frame(maxHeight: maxHeight)
-			.onChange(of: text) {
-				withAnimation(.easeOut(duration: 0.2)) {
-					proxy.scrollTo("thinking-bottom", anchor: .bottom)
+		VStack(alignment: .leading, spacing: 6) {
+			Text(verbatim: text)
+				.font(chatFont(style: .callout))
+				.italic()
+				.foregroundStyle(.secondary)
+				.frame(maxWidth: .infinity, maxHeight: maxHeight, alignment: .bottomLeading)
+				.clipped()
+
+			if needsTruncation {
+				NavigationLink(value: Route.messageContext(route)) {
+					Label("View full thinking", systemImage: "arrow.right.circle")
+						.font(.caption.weight(.semibold))
+						.foregroundStyle(.tint)
 				}
+				.buttonStyle(.plain)
 			}
 		}
 		.padding(.vertical, 8)
 		.padding(.horizontal, 10)
 		.background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-	}
-
-	private var maxHeight: CGFloat {
-		let lineHeight = UIFont.preferredFont(forTextStyle: .callout).lineHeight
-		return lineHeight * CGFloat(Self.maxVisibleLines) + 16 // 16 for vertical padding
 	}
 }
 

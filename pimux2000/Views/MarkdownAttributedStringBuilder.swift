@@ -2,6 +2,8 @@ import UIKit
 
 enum MarkdownAttributedStringBuilder {
 
+	/// Full attributed string for a message — handles monospaced roles and inline-only text.
+	/// Block-level markdown is handled by ``MarkdownBlocksView`` instead.
 	static func attributedString(for text: String, role: Message.Role) -> NSAttributedString {
 		let baseFont = chatUIFont()
 		let monoFont = UIFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
@@ -16,138 +18,44 @@ enum MarkdownAttributedStringBuilder {
 		}
 
 		let markup = MessageMarkdownRenderer.markdown(for: text, role: role)
-		let isInlineOnly = MessageMarkdownRenderer.usesInlineMarkdown(for: text, role: role)
+		return renderInline(markup, font: baseFont, monoFont: monoFont, textColor: textColor)
+	}
 
-		return renderMarkdown(
-			markup,
-			isInlineOnly: isInlineOnly,
-			baseFont: baseFont,
-			monoFont: monoFont,
-			textColor: textColor
-		)
+	/// Inline-only attributed string for use inside block views (paragraphs, headings, list items, quotes).
+	static func inlineAttributedString(
+		for text: String,
+		font: UIFont = chatUIFont(),
+		textColor: UIColor = .label
+	) -> NSAttributedString {
+		let monoFont = UIFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular)
+		return renderInline(text, font: font, monoFont: monoFont, textColor: textColor)
 	}
 
 	// MARK: - Private
 
-	private static func renderMarkdown(
+	private static func renderInline(
 		_ markup: String,
-		isInlineOnly: Bool,
-		baseFont: UIFont,
+		font: UIFont,
 		monoFont: UIFont,
 		textColor: UIColor
 	) -> NSAttributedString {
 		do {
-			let syntax: AttributedString.MarkdownParsingOptions.InterpretedSyntax =
-				isInlineOnly ? .inlineOnlyPreservingWhitespace : .full
-			let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: syntax)
+			let options = AttributedString.MarkdownParsingOptions(
+				interpretedSyntax: .inlineOnlyPreservingWhitespace
+			)
 			var source = try AttributedString(markdown: markup, options: options)
 
-			// Set base styling on entire string
-			source.uiKit.font = baseFont
+			source.uiKit.font = font
 			source.uiKit.foregroundColor = textColor
 
-			if !isInlineOnly {
-				applyBlockStyling(
-					to: &source,
-					baseFont: baseFont,
-					monoFont: monoFont,
-					textColor: textColor
-				)
-			}
-
-			applyInlineStyling(to: &source, baseFont: baseFont, monoFont: monoFont)
+			applyInlineStyling(to: &source, baseFont: font, monoFont: monoFont)
 
 			return NSAttributedString(source)
 		} catch {
 			var container = AttributeContainer()
-			container.uiKit.font = baseFont
+			container.uiKit.font = font
 			container.uiKit.foregroundColor = textColor
 			return NSAttributedString(AttributedString(markup, attributes: container))
-		}
-	}
-
-	// MARK: - Block styling
-
-	private struct BlockMod {
-		let range: Range<AttributedString.Index>
-		var font: UIFont?
-		var foregroundColor: UIColor?
-		var backgroundColor: UIColor?
-	}
-
-	private static func applyBlockStyling(
-		to source: inout AttributedString,
-		baseFont: UIFont,
-		monoFont: UIFont,
-		textColor: UIColor
-	) {
-		var mods: [BlockMod] = []
-		var listMarkers: [(index: AttributedString.Index, marker: String)] = []
-
-		for (intent, range) in source.runs[\.presentationIntent] {
-			guard let intent else { continue }
-
-			for component in intent.components {
-				switch component.kind {
-				case .header(let level):
-					let scale: CGFloat = switch level {
-					case 1: 1.4
-					case 2: 1.25
-					case 3: 1.12
-					default: 1.05
-					}
-					mods.append(BlockMod(
-						range: range,
-						font: UIFont.systemFont(ofSize: baseFont.pointSize * scale, weight: .semibold)
-					))
-
-				case .codeBlock:
-					mods.append(BlockMod(
-						range: range,
-						font: UIFont.monospacedSystemFont(
-							ofSize: monoFont.pointSize * 0.9,
-							weight: .regular
-						),
-						backgroundColor: UIColor.tertiarySystemFill
-					))
-
-				case .blockQuote:
-					mods.append(BlockMod(
-						range: range,
-						foregroundColor: UIColor.secondaryLabel
-					))
-
-				case .listItem(let ordinal):
-					let isOrdered = intent.components.contains { c in
-						if case .orderedList = c.kind { return true }
-						return false
-					}
-					let marker = isOrdered ? "\(ordinal).\t" : "•\t"
-					listMarkers.append((index: range.lowerBound, marker: marker))
-
-				default:
-					break
-				}
-			}
-		}
-
-		// Apply attribute modifications (no character changes, so ranges stay valid).
-		for mod in mods {
-			if let font = mod.font { source[mod.range].uiKit.font = font }
-			if let fg = mod.foregroundColor { source[mod.range].uiKit.foregroundColor = fg }
-			if let bg = mod.backgroundColor { source[mod.range].uiKit.backgroundColor = bg }
-		}
-
-		// Insert list markers in reverse so earlier insertions don't shift later indices.
-		var markerAttrs = AttributeContainer()
-		markerAttrs.uiKit.font = baseFont
-		markerAttrs.uiKit.foregroundColor = textColor
-
-		for insertion in listMarkers.reversed() {
-			source.insert(
-				AttributedString(insertion.marker, attributes: markerAttrs),
-				at: insertion.index
-			)
 		}
 	}
 
