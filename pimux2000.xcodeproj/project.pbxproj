@@ -9,7 +9,6 @@
 /* Begin PBXBuildFile section */
 		A659C6662F70FA3B00E37016 /* GRDBQuery in Frameworks */ = {isa = PBXBuildFile; productRef = A659C6652F70FA3B00E37016 /* GRDBQuery */; };
 		A659C6692F70FA5000E37016 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A659C6682F70FA5000E37016 /* GRDB */; };
-		A6E9D0012F76D00000E37016 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = A6E9D0022F76D00000E37016 /* Textual */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -60,7 +59,6 @@
 			files = (
 				A659C6662F70FA3B00E37016 /* GRDBQuery in Frameworks */,
 				A659C6692F70FA5000E37016 /* GRDB in Frameworks */,
-				A6E9D0012F76D00000E37016 /* Textual in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -123,7 +121,6 @@
 			packageProductDependencies = (
 				A659C6652F70FA3B00E37016 /* GRDBQuery */,
 				A659C6682F70FA5000E37016 /* GRDB */,
-				A6E9D0022F76D00000E37016 /* Textual */,
 			);
 			productName = pimux2000;
 			productReference = A659C63A2F70F81500E37016 /* pimux2000.app */;
@@ -210,7 +207,6 @@
 			packageReferences = (
 				A659C6642F70FA3B00E37016 /* XCRemoteSwiftPackageReference "GRDBQuery" */,
 				A659C6672F70FA5000E37016 /* XCRemoteSwiftPackageReference "GRDB" */,
-				A6E9D0032F76D00000E37016 /* XCRemoteSwiftPackageReference "textual" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A659C63B2F70F81500E37016 /* Products */;
@@ -637,14 +633,6 @@
 				kind = branch;
 			};
 		};
-		A6E9D0032F76D00000E37016 /* XCRemoteSwiftPackageReference "textual" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/nakajima/textual";
-			requirement = {
-				branch = bugfix/streaming_crash;
-				kind = branch;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -657,11 +645,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A659C6672F70FA5000E37016 /* XCRemoteSwiftPackageReference "GRDB" */;
 			productName = GRDB;
-		};
-		A6E9D0022F76D00000E37016 /* Textual */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A6E9D0032F76D00000E37016 /* XCRemoteSwiftPackageReference "textual" */;
-			productName = Textual;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

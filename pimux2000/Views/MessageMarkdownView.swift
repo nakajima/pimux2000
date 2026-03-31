@@ -1,5 +1,4 @@
 import SwiftUI
-import Textual
 
 struct MessageMarkdownView: View {
 	enum DisplayMode {
@@ -46,24 +45,10 @@ struct MessageMarkdownView: View {
 	}
 
 	private var renderedMarkdown: some View {
-		let markup = MessageMarkdownRenderer.markdown(for: text, role: role)
-		let usesInlineMarkdown = MessageMarkdownRenderer.usesInlineMarkdown(for: text, role: role)
-
-		let isMonospaced = role == .toolResult || role == .bashExecution
-
-		return Group {
-			if usesInlineMarkdown {
-				StructuredText(markup, parser: .inlineMarkdown())
-			} else {
-				StructuredText(markdown: markup)
-			}
-		}
-		.font(isMonospaced ? .system(.body, design: .monospaced) : chatFont(style: .body))
-		.textual.structuredTextStyle(.gitHub)
-		.textual.highlighterTheme(.default)
-		.applyIf(displayMode == .full) { view in
-			view.textual.textSelection(.enabled)
-		}
+		MarkdownTextView(
+			attributedText: MarkdownAttributedStringBuilder.attributedString(for: text, role: role),
+			isSelectable: displayMode == .full
+		)
 		.frame(maxWidth: .infinity, alignment: .leading)
 	}
 
@@ -264,17 +249,6 @@ enum MessageMarkdownRenderer {
 		}
 
 		return nil
-	}
-}
-
-private extension View {
-	@ViewBuilder
-	func applyIf<Content: View>(_ condition: Bool, transform: (Self) -> Content) -> some View {
-		if condition {
-			transform(self)
-		} else {
-			self
-		}
 	}
 }
 

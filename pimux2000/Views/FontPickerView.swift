@@ -284,17 +284,25 @@ func chatFont(style: Font.TextStyle = .body) -> Font {
 	return .custom(resolvedFontName, size: preferredFontSize(for: style), relativeTo: style)
 }
 
-func chatLineHeight(style: Font.TextStyle = .body) -> CGFloat {
+#if canImport(UIKit)
+func chatUIFont(style: Font.TextStyle = .body) -> UIFont {
 	let storedValue = UserDefaults.standard.string(forKey: "chatFontFamily") ?? ""
 	let resolvedFontName = ChatFontCatalog.resolvedFontName(forStoredValue: storedValue)
 	let fontSize = preferredFontSize(for: style)
-
-	#if canImport(UIKit)
 	if !resolvedFontName.isEmpty, let font = UIFont(name: resolvedFontName, size: fontSize) {
-		return font.lineHeight
+		return font
 	}
-	return UIFont.preferredFont(forTextStyle: style.uiKit).lineHeight
+	return UIFont.preferredFont(forTextStyle: style.uiKit)
+}
+#endif
+
+func chatLineHeight(style: Font.TextStyle = .body) -> CGFloat {
+	#if canImport(UIKit)
+	return chatUIFont(style: style).lineHeight
 	#else
+	let storedValue = UserDefaults.standard.string(forKey: "chatFontFamily") ?? ""
+	let resolvedFontName = ChatFontCatalog.resolvedFontName(forStoredValue: storedValue)
+	let fontSize = preferredFontSize(for: style)
 	if !resolvedFontName.isEmpty, let font = NSFont(name: resolvedFontName, size: fontSize) {
 		return font.ascender - font.descender + font.leading
 	}
