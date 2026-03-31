@@ -64,18 +64,6 @@ struct ContentView: View {
 				source: "ContentView.selectedSessionID"
 			)
 		}
-		.toolbar {
-			ToolbarItem(placement: .navigation) {
-				Button {
-					withAnimation {
-						columnVisibility = columnVisibility == .detailOnly ? .automatic : .detailOnly
-					}
-				} label: {
-					Label("Toggle Sidebar", systemImage: "sidebar.left")
-				}
-				.keyboardShortcut("l", modifiers: [.command, .shift])
-			}
-		}
 		.onChange(of: sessions.map(\.session.sessionID)) {
 			guard !sessions.isEmpty else {
 				selectedSessionID = nil
@@ -102,7 +90,7 @@ struct ContentView: View {
 						description: Text("Connect this app to a pimux server from the sidebar.")
 					)
 				} else if let selectedSession {
-					PiSessionView(session: selectedSession)
+					PiSessionView(session: selectedSession, columnVisibility: $columnVisibility)
 						.id(selectedSession.sessionID)
 				} else if sessions.isEmpty {
 					ContentUnavailableView(
@@ -128,7 +116,7 @@ struct ContentView: View {
 	private func destination(for route: Route) -> some View {
 		switch route {
 		case .piSession(let session):
-			PiSessionView(session: session)
+			PiSessionView(session: session, columnVisibility: $columnVisibility)
 				.id(session.sessionID)
 		case .messageContext(let context):
 			MessageContextView(route: context)

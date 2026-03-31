@@ -1,0 +1,17 @@
+Target dependency graph (7 targets)
+Target 'pimux2000' in project 'pimux2000'
+➜ Explicit dependency on target 'GRDBQuery' in project 'GRDBQuery'
+➜ Explicit dependency on target 'GRDB' in project 'GRDB'
+Target 'GRDBQuery' in project 'GRDBQuery'
+➜ Explicit dependency on target 'GRDBQuery' in project 'GRDBQuery'
+➜ Explicit dependency on target 'GRDB' in project 'GRDB'
+Target 'GRDBQuery' in project 'GRDBQuery'
+➜ Explicit dependency on target 'GRDB' in project 'GRDB'
+Target 'GRDB' in project 'GRDB'
+➜ Explicit dependency on target 'GRDB' in project 'GRDB'
+➜ Explicit dependency on target 'GRDB_GRDB' in project 'GRDB'
+Target 'GRDB' in project 'GRDB'
+➜ Explicit dependency on target 'GRDB_GRDB' in project 'GRDB'
+➜ Explicit dependency on target 'GRDBSQLite' in project 'GRDB'
+Target 'GRDBSQLite' in project 'GRDB' (no dependencies)
+Target 'GRDB_GRDB' in project 'GRDB' (no dependencies)

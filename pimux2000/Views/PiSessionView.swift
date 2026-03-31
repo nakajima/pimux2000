@@ -64,9 +64,12 @@ struct PiSessionView: View {
 	@State private var agentIdleTask: Task<Void, Never>?
 	@State private var deferredStartupGeneration = 0
 	@State private var deferredStartupRequestID = 0
+	@Binding var columnVisibility: NavigationSplitViewVisibility
+	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
-	init(session: PiSession) {
+	init(session: PiSession, columnVisibility: Binding<NavigationSplitViewVisibility>) {
 		self.session = session
+		self._columnVisibility = columnVisibility
 		self._storedMessages = Query(MessagesRequest(sessionID: session.sessionID))
 	}
 
@@ -94,6 +97,23 @@ struct PiSessionView: View {
 			}
 		}
 		.navigationTitle(session.summary)
+		#if canImport(UIKit) && !os(macOS)
+		.navigationBarTitleDisplayMode(.inline)
+		.toolbar {
+			ToolbarItem(placement: .topBarLeading) {
+				if horizontalSizeClass != .compact {
+					Button {
+						withAnimation {
+							columnVisibility = columnVisibility == .detailOnly ? .automatic : .detailOnly
+						}
+					} label: {
+						Label("Toggle Sidebar", systemImage: "sidebar.left")
+					}
+					.keyboardShortcut("l", modifiers: [.command, .shift])
+				}
+			}
+		}
+		#endif
 		.onAppear {
 			SessionSelectionPerformanceTrace.emitEvent(
 				sessionID: session.sessionID,
@@ -174,6 +194,7 @@ struct PiSessionView: View {
 		}
 	}
 
+
 	@ViewBuilder
 	private var transcriptView: some View {
 		#if canImport(UIKit) && !os(macOS)
@@ -204,7 +225,7 @@ struct PiSessionView: View {
 						ForEach(displayedMessages) { displayedMessage in
 							switch displayedMessage {
 							case .confirmed(let messageInfo):
-								MessageView(
+								TranscriptMessageView(
 									messageInfo: messageInfo,
 									sessionID: session.sessionID,
 									serverURL: serverConfiguration?.serverURL
@@ -905,8 +926,9 @@ private struct TranscriptWarningView: View {
 	}
 
 	return NavigationStack {
-		PiSessionView(session: session)
+		PiSessionView(session: session, columnVisibility: .constant(.automatic))
 	}
 	.environment(\.appDatabase, db)
+	.environment(\.previewImageURL, Bundle.main.url(forResource: "preview-image", withExtension: "png"))
 	.databaseContext(.readWrite { db.dbQueue })
 }

@@ -1,0 +1,91 @@
+{
+  "" : {
+    "const-values" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/GRDBQuery-primary.swiftconstvalues",
+    "dependencies" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/GRDBQuery-primary.d",
+    "diagnostics" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/GRDBQuery-primary.dia",
+    "emit-module-dependencies" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/GRDBQuery-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/GRDBQuery-primary-emit-module.dia",
+    "pch" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/GRDBQuery-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/GRDBQuery-primary.swiftdeps"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Combine+MainActor/DeferredOnMainActor.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/DeferredOnMainActor.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/DeferredOnMainActor.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/DeferredOnMainActor.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Combine+MainActor/MainActorScheduler.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/MainActorScheduler.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/MainActorScheduler.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/MainActorScheduler.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/DatabaseContext/DatabaseContext.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/DatabaseContext.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/DatabaseContext.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/DatabaseContext.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/DatabaseContext/EnvironmentValues+databaseContext.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/EnvironmentValues+databaseContext.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/EnvironmentValues+databaseContext.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/EnvironmentValues+databaseContext.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/DatabaseContext/TopLevelDatabaseReader.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/TopLevelDatabaseReader.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/TopLevelDatabaseReader.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/TopLevelDatabaseReader.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/EnvironmentStateObject.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/EnvironmentStateObject.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/EnvironmentStateObject.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/EnvironmentStateObject.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Query+DatabaseContext.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Query+DatabaseContext.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Query+DatabaseContext.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Query+DatabaseContext.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Query+VoidContext.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Query+VoidContext.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Query+VoidContext.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Query+VoidContext.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Query.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Query.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Query.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Query.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/QueryObservation.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/QueryObservation.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/QueryObservation.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/QueryObservation.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Queryable+DatabaseContext/FetchQueryable.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/FetchQueryable.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/FetchQueryable.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/FetchQueryable.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Queryable+DatabaseContext/Presence.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Presence.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Presence.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Presence.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Queryable+DatabaseContext/PresenceObservationQueryable.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/PresenceObservationQueryable.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/PresenceObservationQueryable.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/PresenceObservationQueryable.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Queryable+DatabaseContext/QueryableOptions.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/QueryableOptions.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/QueryableOptions.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/QueryableOptions.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Queryable+DatabaseContext/ValueObservationQueryable.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/ValueObservationQueryable.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/ValueObservationQueryable.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/ValueObservationQueryable.o"
+  },
+  "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/Sources/GRDBQuery/Queryable.swift" : {
+    "index-unit-output-path" : "/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Queryable.o",
+    "llvm-bc" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Queryable.bc",
+    "object" : "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz/SourcePackages/checkouts/GRDBQuery/build/GRDBQuery.build/Release-iphonesimulator/GRDBQuery.build/Objects-normal/x86_64/Queryable.o"
+  }
+}

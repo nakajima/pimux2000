@@ -1,0 +1,4 @@
+module GRDBQuery {
+header "GRDBQuery-Swift.h"
+export *
+}

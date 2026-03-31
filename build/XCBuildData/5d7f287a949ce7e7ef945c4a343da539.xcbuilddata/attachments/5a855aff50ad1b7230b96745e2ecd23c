@@ -1,0 +1,231 @@
+{
+  "" : {
+    "const-values" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000-primary.swiftconstvalues",
+    "dependencies" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000-primary.d",
+    "diagnostics" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000-primary.dia",
+    "emit-module-dependencies" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000-primary-emit-module.dia",
+    "pch" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000-primary.swiftdeps"
+  },
+  "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/GeneratedAssetSymbols.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/AppDatabase.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/AppDatabase.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/AppDatabase.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/AppDatabase.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/ComposerImage.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ComposerImage.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ComposerImage.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ComposerImage.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/Host.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/Host.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/Host.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/Host.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/ImageAttachmentID.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ImageAttachmentID.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ImageAttachmentID.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ImageAttachmentID.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/Message.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/Message.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/Message.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/Message.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/MessageContentBlock.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageContentBlock.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageContentBlock.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageContentBlock.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/MessageInfo.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageInfo.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageInfo.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageInfo.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/OutgoingImageProcessor.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/OutgoingImageProcessor.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/OutgoingImageProcessor.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/OutgoingImageProcessor.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/PendingLocalMessage.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PendingLocalMessage.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PendingLocalMessage.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PendingLocalMessage.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/PiSession.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PiSession.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PiSession.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PiSession.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/PiSessionSync.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PiSessionSync.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PiSessionSync.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PiSessionSync.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/PimuxServerClient.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PimuxServerClient.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PimuxServerClient.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PimuxServerClient.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/ServerConfiguration.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ServerConfiguration.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ServerConfiguration.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ServerConfiguration.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/SlashCommand.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SlashCommand.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SlashCommand.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SlashCommand.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/TranscriptFingerprint.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/TranscriptFingerprint.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/TranscriptFingerprint.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/TranscriptFingerprint.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Models/UITestFixtures.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/UITestFixtures.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/UITestFixtures.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/UITestFixtures.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/AssistantMessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/AssistantMessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/AssistantMessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/AssistantMessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/BashExecutionMessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/BashExecutionMessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/BashExecutionMessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/BashExecutionMessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/BranchSummaryMessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/BranchSummaryMessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/BranchSummaryMessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/BranchSummaryMessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/CameraCaptureView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/CameraCaptureView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/CameraCaptureView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/CameraCaptureView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/CompactionSummaryMessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/CompactionSummaryMessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/CompactionSummaryMessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/CompactionSummaryMessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/ContentView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ContentView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ContentView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ContentView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/CustomMessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/CustomMessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/CustomMessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/CustomMessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/FontPickerView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/FontPickerView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/FontPickerView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/FontPickerView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/MarkdownAttributedStringBuilder.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownAttributedStringBuilder.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownAttributedStringBuilder.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownAttributedStringBuilder.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/MarkdownBlockParser.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownBlockParser.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownBlockParser.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownBlockParser.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/MarkdownBlocksView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownBlocksView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownBlocksView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownBlocksView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/MarkdownTextView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownTextView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownTextView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MarkdownTextView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/MessageComposerView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageComposerView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageComposerView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageComposerView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/MessageHeader.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageHeader.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageHeader.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageHeader.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/MessageMarkdownView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageMarkdownView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageMarkdownView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageMarkdownView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/MessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/MessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/OtherMessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/OtherMessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/OtherMessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/OtherMessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/PiSessionView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PiSessionView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PiSessionView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/PiSessionView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/Route.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/Route.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/Route.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/Route.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/ServerConnectionSheet.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ServerConnectionSheet.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ServerConnectionSheet.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ServerConnectionSheet.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/SessionSelectionPerformanceTrace.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SessionSelectionPerformanceTrace.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SessionSelectionPerformanceTrace.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SessionSelectionPerformanceTrace.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/SessionTranscriptView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SessionTranscriptView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SessionTranscriptView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SessionTranscriptView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/SidebarView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SidebarView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SidebarView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/SidebarView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/ToolResultMessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ToolResultMessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ToolResultMessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/ToolResultMessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/TranscriptMessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/TranscriptMessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/TranscriptMessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/TranscriptMessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/Views/UserMessageView.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/UserMessageView.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/UserMessageView.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/UserMessageView.o"
+  },
+  "/Users/nakajima/apps/pimux2000/pimux2000/pimux2000App.swift" : {
+    "index-unit-output-path" : "/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000App.o",
+    "llvm-bc" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000App.bc",
+    "object" : "/Users/nakajima/apps/pimux2000/build/pimux2000.build/Release-iphonesimulator/pimux2000.build/Objects-normal/x86_64/pimux2000App.o"
+  }
+}

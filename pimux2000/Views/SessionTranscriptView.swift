@@ -47,6 +47,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 	var forcePinToken: Int = 0
 	var onRetry: (() -> Void)? = nil
 	var onOpenMessageContext: ((MessageContextRoute) -> Void)? = nil
+	var onScrollOffsetChanged: ((CGFloat) -> Void)? = nil
 
 	func makeCoordinator() -> Coordinator {
 		Coordinator(parent: self)
@@ -62,7 +63,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 		tableView.keyboardDismissMode = .interactive
 		tableView.alwaysBounceVertical = true
 		tableView.contentInset.top = 16
-		tableView.showsVerticalScrollIndicator = false
+		tableView.showsVerticalScrollIndicator = true
 		tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
 		return tableView
 	}
@@ -142,6 +143,11 @@ struct SessionTranscriptView: UIViewRepresentable {
 			return false
 		}
 
+		func scrollViewDidScroll(_ scrollView: UIScrollView) {
+			let normalized = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+			parent.onScrollOffsetChanged?(normalized)
+		}
+
 		// MARK: Empty state
 
 		private func updateEmptyState(on tableView: UITableView) {
@@ -194,7 +200,7 @@ private struct TranscriptRowSwiftUIView: View {
 		Group {
 			switch message {
 			case .confirmed(let messageInfo):
-				MessageView(
+				TranscriptMessageView(
 					messageInfo: messageInfo,
 					sessionID: context.sessionID,
 					serverURL: context.serverURL
