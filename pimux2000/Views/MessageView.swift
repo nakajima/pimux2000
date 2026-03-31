@@ -251,10 +251,8 @@ private struct ThinkingBlockView: View {
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 6) {
-			Text(verbatim: text)
-				.font(chatFont(style: .callout))
-				.italic()
-				.foregroundStyle(.secondary)
+			MessageMarkdownView(text: text, role: .assistant, title: "Thinking")
+				.opacity(0.7)
 				.frame(maxWidth: .infinity, maxHeight: maxHeight, alignment: .bottomLeading)
 				.clipped()
 
