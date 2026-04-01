@@ -52,7 +52,7 @@ struct AssistantMessageView: View {
 				.background(.teal.opacity(0.1))
 
 				if let text = block.text, !text.isEmpty {
-					ToolCallDetailsView(text: text)
+					ToolCallDetailsView(toolName: block.toolCallName, text: text)
 				}
 			}
 
@@ -161,17 +161,66 @@ struct ThinkingBlockView: View {
 // MARK: - ToolCallDetailsView
 
 struct ToolCallDetailsView: View {
+	private static let maxVisibleLines = 10
+
+	let toolName: String?
 	let text: String
 
+	private var needsTruncation: Bool {
+		let lines = text.components(separatedBy: .newlines)
+		return lines.count > Self.maxVisibleLines || text.count > Self.maxVisibleLines * 60
+	}
+
+	private var maxHeight: CGFloat {
+		UIFont.preferredFont(forTextStyle: .caption1).lineHeight * CGFloat(Self.maxVisibleLines)
+	}
+
+	private var routeTitle: String {
+		let trimmedName = toolName?.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard let trimmedName, !trimmedName.isEmpty else { return "Tool Call" }
+		return "Tool Call · \(trimmedName)"
+	}
+
+	private var route: MessageContextRoute {
+		MessageContextRoute(title: routeTitle, text: text, role: .toolResult)
+	}
+
 	var body: some View {
-		Text(verbatim: text)
-			.frame(maxWidth: .infinity, alignment: .leading)
-			.font(.system(.caption, design: .monospaced))
-			.foregroundStyle(.secondary)
-			.textSelection(.enabled)
-			.padding(.vertical, 8)
-			.padding(.horizontal, 10)
-			.background(.teal.opacity(0.08))
+		VStack(alignment: .leading, spacing: 6) {
+			Text(verbatim: text)
+				.frame(maxWidth: .infinity, maxHeight: maxHeight, alignment: .topLeading)
+				.font(.system(.caption, design: .monospaced))
+				.foregroundStyle(.secondary)
+				.textSelection(.enabled)
+				.clipped()
+				.overlay(alignment: .bottom) {
+					if needsTruncation {
+						Rectangle()
+							.fill(.teal.opacity(0.08))
+							.frame(height: UIFont.preferredFont(forTextStyle: .caption1).lineHeight * 2)
+							.mask(
+								LinearGradient(
+									colors: [.clear, .black],
+									startPoint: .top,
+									endPoint: .bottom
+								)
+							)
+							.allowsHitTesting(false)
+					}
+				}
+
+			if needsTruncation {
+				NavigationLink(value: Route.messageContext(route)) {
+					Label("View full tool call", systemImage: "arrow.right.circle")
+						.font(.caption.weight(.semibold))
+						.foregroundStyle(.tint)
+				}
+				.buttonStyle(.plain)
+			}
+		}
+		.padding(.vertical, 8)
+		.padding(.horizontal, 10)
+		.background(.teal.opacity(0.08))
 	}
 }
 
@@ -186,7 +235,13 @@ struct ToolCallDetailsView: View {
 				message: Message(piSessionID: 1, role: .assistant, toolName: nil, position: 0, createdAt: Date()),
 				contentBlocks: [
 					MessageContentBlock(messageID: 1, type: "thinking", text: "Let me think about this step by step…\nFirst I need to check the file.\nThen I'll make the edit.", toolCallName: nil, position: 0),
-					MessageContentBlock(messageID: 1, type: "toolCall", text: "src/main.swift (offset=10, limit=50)", toolCallName: "read", position: 1),
+					MessageContentBlock(
+						messageID: 1,
+						type: "toolCall",
+						text: "{\n  \"path\": \"src/main.swift\",\n  \"offset\": 10,\n  \"limit\": 50,\n  \"includeHidden\": false,\n  \"showContext\": true,\n  \"surroundingLines\": 6,\n  \"annotations\": [\n    \"capture the import list\",\n    \"show the view body\",\n    \"include the preview block\",\n    \"keep enough lines for the next edit\"\n  ]\n}",
+						toolCallName: "read",
+						position: 1
+					),
 					MessageContentBlock(messageID: 1, type: "text", text: "Here's what I found in the file.", toolCallName: nil, position: 2),
 					MessageContentBlock(messageID: 1, type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: attachmentID, position: 3),
 				]

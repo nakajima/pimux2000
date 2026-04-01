@@ -238,6 +238,50 @@ struct PimuxSessionUIDialogState: Decodable, Equatable, Sendable, Identifiable {
 	let value: String?
 }
 
+extension PimuxSessionUIDialogState {
+	var isSelectorDialog: Bool {
+		kind == "confirm" || kind == "select"
+	}
+
+	var isTextValueDialog: Bool {
+		kind == "input" || kind == "editor"
+	}
+
+	var usesMultilineTextEditor: Bool {
+		kind == "editor"
+	}
+
+	var resolvedTextValue: String {
+		value ?? ""
+	}
+
+	func settingSelectedIndex(_ selectedIndex: Int) -> Self {
+		Self(
+			id: id,
+			kind: kind,
+			title: title,
+			message: message,
+			options: options,
+			selectedIndex: selectedIndex,
+			placeholder: placeholder,
+			value: value
+		)
+	}
+
+	func settingTextValue(_ value: String) -> Self {
+		Self(
+			id: id,
+			kind: kind,
+			title: title,
+			message: message,
+			options: options,
+			selectedIndex: selectedIndex,
+			placeholder: placeholder,
+			value: value
+		)
+	}
+}
+
 enum PimuxSessionUIDialogAction: Encodable, Equatable, Sendable {
 	case move(direction: String)
 	case selectIndex(index: Int)

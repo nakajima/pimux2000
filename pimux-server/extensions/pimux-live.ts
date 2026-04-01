@@ -103,6 +103,13 @@ type PimuxUiDialogAction =
 	| { type: "submit" }
 	| { type: "cancel" };
 
+type UiDialogOptions = { signal?: AbortSignal; timeout?: number };
+
+type MirroredDialogTui = {
+	terminal: { kittyProtocolActive: boolean };
+	requestRender: () => void;
+};
+
 interface RuntimeSelectorDialog<
 	Result,
 	Kind extends Extract<PimuxUiDialogKind, "confirm" | "select">
@@ -516,6 +523,26 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function activateMirroredUiDialog<T extends RuntimeUiDialog>(dialog: T): T {
+		state.currentUiDialog = dialog;
+		sendCurrentUiDialogState(dialog.sessionId);
+		return dialog;
+	}
+
+	function cleanupMirroredUiDialog(dialog: RuntimeUiDialog) {
+		if (state.currentUiDialog === dialog && !dialog.finished) {
+			clearCurrentUiDialogState(dialog.sessionId);
+		}
+	}
+
+	function configureMirroredTuiComponent(
+		tui: MirroredDialogTui,
+		keybindings: Parameters<typeof setKeybindings>[0]
+	) {
+		setKeybindings(keybindings);
+		setKittyProtocolActive(tui.terminal.kittyProtocolActive);
+	}
+
 	function setSelectorDialogSelectedIndex(
 		dialog: RuntimeUiDialogSelectorState,
 		nextIndex: number
@@ -607,6 +634,54 @@ export default function (pi: ExtensionAPI) {
 		result: { value?: string; cancelled?: boolean }
 	) {
 		finishTextValueDialog(dialog, result.cancelled ? undefined : result.value);
+	}
+
+	function submitCurrentUiDialog(dialog: RuntimeUiDialog) {
+		if (isConfirmDialog(dialog)) {
+			finishCurrentConfirmDialog(dialog, {
+				confirmed: dialog.state.selectedIndex === 0,
+				cancelled: false,
+			});
+			return;
+		}
+		if (isSelectDialog(dialog)) {
+			finishCurrentSelectDialog(dialog, {
+				selected: dialog.state.options[dialog.state.selectedIndex],
+				cancelled: false,
+			});
+			return;
+		}
+		if (isInputDialog(dialog)) {
+			finishCurrentInputDialog(dialog, {
+				value: dialog.state.value,
+				cancelled: false,
+			});
+			return;
+		}
+		if (isEditorDialog(dialog)) {
+			finishCurrentEditorDialog(dialog, {
+				value: dialog.state.value,
+				cancelled: false,
+			});
+		}
+	}
+
+	function cancelUiDialog(dialog: RuntimeUiDialog) {
+		if (isConfirmDialog(dialog)) {
+			finishCurrentConfirmDialog(dialog, { cancelled: true });
+			return;
+		}
+		if (isSelectDialog(dialog)) {
+			finishCurrentSelectDialog(dialog, { cancelled: true });
+			return;
+		}
+		if (isInputDialog(dialog)) {
+			finishCurrentInputDialog(dialog, { cancelled: true });
+			return;
+		}
+		if (isEditorDialog(dialog)) {
+			finishCurrentEditorDialog(dialog, { cancelled: true });
+		}
 	}
 
 	function attachSelectorDialogSelector<Result>(
@@ -711,15 +786,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (!sessionId || dialog.sessionId === sessionId) {
-			if (isConfirmDialog(dialog)) {
-				finishCurrentConfirmDialog(dialog, { cancelled: true });
-			} else if (isSelectDialog(dialog)) {
-				finishCurrentSelectDialog(dialog, { cancelled: true });
-			} else if (isInputDialog(dialog)) {
-				finishCurrentInputDialog(dialog, { cancelled: true });
-			} else if (isEditorDialog(dialog)) {
-				finishCurrentEditorDialog(dialog, { cancelled: true });
-			}
+			cancelUiDialog(dialog);
 		}
 	}
 
@@ -769,38 +836,10 @@ export default function (pi: ExtensionAPI) {
 				setTextValueDialogValue(dialog, action.value);
 				break;
 			case "submit":
-				if (isConfirmDialog(dialog)) {
-					finishCurrentConfirmDialog(dialog, {
-						confirmed: dialog.state.selectedIndex === 0,
-						cancelled: false,
-					});
-				} else if (isSelectDialog(dialog)) {
-					finishCurrentSelectDialog(dialog, {
-						selected: dialog.state.options[dialog.state.selectedIndex],
-						cancelled: false,
-					});
-				} else if (isInputDialog(dialog)) {
-					finishCurrentInputDialog(dialog, {
-						value: dialog.state.value,
-						cancelled: false,
-					});
-				} else if (isEditorDialog(dialog)) {
-					finishCurrentEditorDialog(dialog, {
-						value: dialog.state.value,
-						cancelled: false,
-					});
-				}
+				submitCurrentUiDialog(dialog);
 				break;
 			case "cancel":
-				if (isConfirmDialog(dialog)) {
-					finishCurrentConfirmDialog(dialog, { cancelled: true });
-				} else if (isSelectDialog(dialog)) {
-					finishCurrentSelectDialog(dialog, { cancelled: true });
-				} else if (isInputDialog(dialog)) {
-					finishCurrentInputDialog(dialog, { cancelled: true });
-				} else if (isEditorDialog(dialog)) {
-					finishCurrentEditorDialog(dialog, { cancelled: true });
-				}
+				cancelUiDialog(dialog);
 				break;
 		}
 
@@ -824,7 +863,7 @@ export default function (pi: ExtensionAPI) {
 		const originalSetWorkingMessage = ui.setWorkingMessage.bind(ui);
 		const originalSetHiddenThinkingLabel = ui.setHiddenThinkingLabel.bind(ui);
 
-		ui.select = (async (title: string, options: string[], opts?: { signal?: AbortSignal; timeout?: number }) => {
+		ui.select = (async (title: string, options: string[], opts?: UiDialogOptions) => {
 			const sessionId = state.currentSessionId;
 			if (!sessionId || state.currentUiDialog || options.length === 0) {
 				return originalSelect(title, options, opts);
@@ -848,8 +887,7 @@ export default function (pi: ExtensionAPI) {
 				finished: false,
 				result: undefined,
 			};
-			state.currentUiDialog = dialog;
-			sendCurrentUiDialogState(sessionId);
+			activateMirroredUiDialog(dialog);
 
 			const onAbort = () => {
 				finishCurrentSelectDialog(dialog, { cancelled: true });
@@ -858,8 +896,7 @@ export default function (pi: ExtensionAPI) {
 
 			try {
 				return await ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
-					setKeybindings(keybindings);
-					setKittyProtocolActive(tui.terminal.kittyProtocolActive);
+					configureMirroredTuiComponent(tui as MirroredDialogTui, keybindings);
 
 					const selector = new ExtensionSelectorComponent(
 						title,
@@ -884,13 +921,11 @@ export default function (pi: ExtensionAPI) {
 				});
 			} finally {
 				opts?.signal?.removeEventListener("abort", onAbort);
-				if (state.currentUiDialog === dialog && !dialog.finished) {
-					clearCurrentUiDialogState(dialog.sessionId);
-				}
+				cleanupMirroredUiDialog(dialog);
 			}
 		}) as typeof ui.select;
 
-		ui.input = (async (title: string, placeholder?: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
+		ui.input = (async (title: string, placeholder?: string, opts?: UiDialogOptions) => {
 			const sessionId = state.currentSessionId;
 			if (!sessionId || state.currentUiDialog) {
 				return originalInput(title, placeholder, opts);
@@ -917,8 +952,7 @@ export default function (pi: ExtensionAPI) {
 				finished: false,
 				result: undefined,
 			};
-			state.currentUiDialog = dialog;
-			sendCurrentUiDialogState(sessionId);
+			activateMirroredUiDialog(dialog);
 
 			const onAbort = () => {
 				finishCurrentInputDialog(dialog, { cancelled: true });
@@ -927,8 +961,7 @@ export default function (pi: ExtensionAPI) {
 
 			try {
 				return await ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
-					setKeybindings(keybindings);
-					setKittyProtocolActive(tui.terminal.kittyProtocolActive);
+					configureMirroredTuiComponent(tui as MirroredDialogTui, keybindings);
 
 					const inputComponent = new ExtensionInputComponent(
 						title,
@@ -950,9 +983,7 @@ export default function (pi: ExtensionAPI) {
 				});
 			} finally {
 				opts?.signal?.removeEventListener("abort", onAbort);
-				if (state.currentUiDialog === dialog && !dialog.finished) {
-					clearCurrentUiDialogState(dialog.sessionId);
-				}
+				cleanupMirroredUiDialog(dialog);
 			}
 		}) as typeof ui.input;
 
@@ -979,13 +1010,11 @@ export default function (pi: ExtensionAPI) {
 				finished: false,
 				result: undefined,
 			};
-			state.currentUiDialog = dialog;
-			sendCurrentUiDialogState(sessionId);
+			activateMirroredUiDialog(dialog);
 
 			try {
 				return await ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
-					setKeybindings(keybindings);
-					setKittyProtocolActive(tui.terminal.kittyProtocolActive);
+					configureMirroredTuiComponent(tui as MirroredDialogTui, keybindings);
 
 					const editorComponent = new ExtensionEditorComponent(
 						tui,
@@ -1007,13 +1036,11 @@ export default function (pi: ExtensionAPI) {
 					return editorComponent;
 				});
 			} finally {
-				if (state.currentUiDialog === dialog && !dialog.finished) {
-					clearCurrentUiDialogState(dialog.sessionId);
-				}
+				cleanupMirroredUiDialog(dialog);
 			}
 		}) as typeof ui.editor;
 
-		ui.confirm = (async (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
+		ui.confirm = (async (title: string, message: string, opts?: UiDialogOptions) => {
 			const sessionId = state.currentSessionId;
 			if (!sessionId || state.currentUiDialog) {
 				return originalConfirm(title, message, opts);
@@ -1037,8 +1064,7 @@ export default function (pi: ExtensionAPI) {
 				finished: false,
 				result: false,
 			};
-			state.currentUiDialog = dialog;
-			sendCurrentUiDialogState(sessionId);
+			activateMirroredUiDialog(dialog);
 
 			const onAbort = () => {
 				finishCurrentConfirmDialog(dialog, { cancelled: true });
@@ -1047,8 +1073,7 @@ export default function (pi: ExtensionAPI) {
 
 			try {
 				return await ui.custom<boolean>((tui, _theme, keybindings, done) => {
-					setKeybindings(keybindings);
-					setKittyProtocolActive(tui.terminal.kittyProtocolActive);
+					configureMirroredTuiComponent(tui as MirroredDialogTui, keybindings);
 
 					const selector = new ExtensionSelectorComponent(
 						`${title}\n${message}`,
@@ -1070,9 +1095,7 @@ export default function (pi: ExtensionAPI) {
 				});
 			} finally {
 				opts?.signal?.removeEventListener("abort", onAbort);
-				if (state.currentUiDialog === dialog && !dialog.finished) {
-					clearCurrentUiDialogState(dialog.sessionId);
-				}
+				cleanupMirroredUiDialog(dialog);
 			}
 		}) as typeof ui.confirm;
 

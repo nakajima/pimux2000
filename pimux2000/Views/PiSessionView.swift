@@ -112,16 +112,13 @@ struct PiSessionView: View {
 
 				SessionUIDialogOverlay(
 					dialog: currentUIDialog,
-					inputText: Binding(
-						get: { currentUIDialog.value ?? "" },
-						set: { updateUIDialogTextValue($0) }
-					),
+					textValue: uiDialogTextBinding(for: currentUIDialog),
 					isSendingAction: isUIDialogActionInFlight,
 					errorMessage: uiDialogActionError,
 					onSelectOption: { index in
 						Task { await chooseUIDialogOption(index) }
 					},
-					onSubmitInput: {
+					onSubmitTextValue: {
 						Task { await submitUIDialogTextValue() }
 					},
 					onCancel: {
@@ -449,10 +446,7 @@ struct PiSessionView: View {
 		case .uiDialogState(let sequence, let state):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
-			uiDialogValueSyncTask?.cancel()
-			uiDialogValueSyncTask = nil
-			currentUIDialog = state
-			uiDialogActionError = nil
+			applyIncomingUIDialogState(state)
 		case .keepalive(let sequence, _):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
@@ -664,7 +658,7 @@ struct PiSessionView: View {
 	}
 
 	private func chooseUIDialogOption(_ index: Int) async {
-		guard let dialog = currentUIDialog else { return }
+		guard let dialog = currentUIDialog, dialog.isSelectorDialog else { return }
 		guard let serverConfiguration else {
 			uiDialogActionError = "No pimux server configured."
 			return
@@ -677,16 +671,7 @@ struct PiSessionView: View {
 		do {
 			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
 			if dialog.selectedIndex != index {
-				currentUIDialog = PimuxSessionUIDialogState(
-					id: dialog.id,
-					kind: dialog.kind,
-					title: dialog.title,
-					message: dialog.message,
-					options: dialog.options,
-					selectedIndex: index,
-					placeholder: dialog.placeholder,
-					value: dialog.value
-				)
+				currentUIDialog = dialog.settingSelectedIndex(index)
 				try await client.sendUIDialogAction(
 					sessionID: session.sessionID,
 					dialogID: dialog.id,
@@ -704,17 +689,9 @@ struct PiSessionView: View {
 	}
 
 	private func updateUIDialogTextValue(_ value: String) {
-		guard let dialog = currentUIDialog, dialog.kind == "input" || dialog.kind == "editor" else { return }
-		currentUIDialog = PimuxSessionUIDialogState(
-			id: dialog.id,
-			kind: dialog.kind,
-			title: dialog.title,
-			message: dialog.message,
-			options: dialog.options,
-			selectedIndex: dialog.selectedIndex,
-			placeholder: dialog.placeholder,
-			value: value
-		)
+		guard let dialog = currentUIDialog, dialog.isTextValueDialog else { return }
+		guard dialog.resolvedTextValue != value else { return }
+		currentUIDialog = dialog.settingTextValue(value)
 		uiDialogActionError = nil
 		uiDialogValueSyncTask?.cancel()
 
@@ -749,7 +726,7 @@ struct PiSessionView: View {
 	}
 
 	private func submitUIDialogTextValue() async {
-		guard let dialog = currentUIDialog, dialog.kind == "input" || dialog.kind == "editor" else { return }
+		guard let dialog = currentUIDialog, dialog.isTextValueDialog else { return }
 		guard let serverConfiguration else {
 			uiDialogActionError = "No pimux server configured."
 			return
@@ -776,6 +753,40 @@ struct PiSessionView: View {
 		} catch {
 			uiDialogActionError = error.localizedDescription
 		}
+	}
+
+	private func applyIncomingUIDialogState(_ state: PimuxSessionUIDialogState?) {
+		let previousDialog = currentUIDialog
+		let shouldPreserveOptimisticTextValue =
+			previousDialog?.id == state?.id
+			&& previousDialog?.isTextValueDialog == true
+			&& state?.isTextValueDialog == true
+			&& (uiDialogValueSyncTask != nil || isUIDialogActionInFlight)
+
+		if shouldPreserveOptimisticTextValue, let state, let previousDialog {
+			currentUIDialog = state.settingTextValue(previousDialog.resolvedTextValue)
+		} else {
+			uiDialogValueSyncTask?.cancel()
+			uiDialogValueSyncTask = nil
+			currentUIDialog = state
+		}
+
+		if state == nil || state?.id != previousDialog?.id {
+			isUIDialogActionInFlight = false
+		}
+		uiDialogActionError = nil
+	}
+
+	private func uiDialogTextBinding(for dialog: PimuxSessionUIDialogState) -> Binding<String> {
+		Binding(
+			get: {
+				guard let currentUIDialog, currentUIDialog.id == dialog.id else {
+					return dialog.resolvedTextValue
+				}
+				return currentUIDialog.resolvedTextValue
+			},
+			set: { updateUIDialogTextValue($0) }
+		)
 	}
 
 	private func cancelUIDialog() async {
@@ -923,231 +934,7 @@ private struct TranscriptWarningView: View {
 	}
 }
 
-private struct SessionUIDialogOverlay: View {
-	let dialog: PimuxSessionUIDialogState
-	let inputText: Binding<String>
-	let isSendingAction: Bool
-	let errorMessage: String?
-	let onSelectOption: (Int) -> Void
-	let onSubmitInput: () -> Void
-	let onCancel: () -> Void
-
-	var body: some View {
-		VStack(alignment: .leading, spacing: 16) {
-			Text(dialog.title)
-				.font(.headline)
-
-			if !dialog.message.isEmpty {
-				Text(dialog.message)
-					.font(.subheadline)
-					.foregroundStyle(.secondary)
-			}
-
-			if dialog.kind == "input" {
-				TextField(dialog.placeholder ?? "", text: inputText)
-					.textFieldStyle(.roundedBorder)
-					.submitLabel(.done)
-					.disabled(isSendingAction)
-					.onSubmit(onSubmitInput)
-
-				HStack {
-					Spacer()
-					Button("Cancel", role: .cancel, action: onCancel)
-						.disabled(isSendingAction)
-					Button("Submit", action: onSubmitInput)
-						.disabled(isSendingAction)
-				}
-			} else if dialog.kind == "editor" {
-				TextEditor(text: inputText)
-					.font(.system(.body, design: .monospaced))
-					.frame(minHeight: 220)
-					.padding(8)
-					.background(
-						RoundedRectangle(cornerRadius: 12)
-							.fill(.regularMaterial)
-					)
-					.overlay(
-						RoundedRectangle(cornerRadius: 12)
-							.stroke(Color.secondary.opacity(0.18), lineWidth: 1)
-					)
-					.disabled(isSendingAction)
-
-				HStack {
-					Spacer()
-					Button("Cancel", role: .cancel, action: onCancel)
-						.disabled(isSendingAction)
-					Button("Submit", action: onSubmitInput)
-						.disabled(isSendingAction)
-				}
-			} else {
-				VStack(spacing: 10) {
-					ForEach(Array(dialog.options.enumerated()), id: \.offset) { index, option in
-						Button {
-							onSelectOption(index)
-						} label: {
-							HStack(spacing: 12) {
-								Text(option)
-									.fontWeight(dialog.selectedIndex == index ? .semibold : .regular)
-								Spacer()
-								if dialog.selectedIndex == index {
-									Image(systemName: "checkmark.circle.fill")
-										.foregroundStyle(.tint)
-								}
-							}
-							.padding(.horizontal, 14)
-							.padding(.vertical, 12)
-							.frame(maxWidth: .infinity)
-							.background(
-								dialog.selectedIndex == index
-									? AnyShapeStyle(.tint.opacity(0.14))
-									: AnyShapeStyle(.regularMaterial),
-								in: RoundedRectangle(cornerRadius: 12)
-							)
-							.overlay(
-								RoundedRectangle(cornerRadius: 12)
-									.stroke(dialog.selectedIndex == index ? Color.accentColor : Color.secondary.opacity(0.18), lineWidth: 1)
-							)
-						}
-						.buttonStyle(.plain)
-						.disabled(isSendingAction)
-					}
-				}
-
-				HStack {
-					Spacer()
-					Button("Cancel", role: .cancel, action: onCancel)
-						.disabled(isSendingAction)
-				}
-			}
-
-			if isSendingAction {
-				HStack(spacing: 8) {
-					ProgressView()
-						.controlSize(.small)
-					Text("Sending action…")
-						.font(.caption)
-						.foregroundStyle(.secondary)
-				}
-			}
-
-			if let errorMessage, !errorMessage.isEmpty {
-				Text(verbatim: errorMessage)
-					.font(.caption)
-					.foregroundStyle(.red)
-			}
-		}
-		.padding(20)
-		.frame(maxWidth: 420)
-		.background(.thickMaterial, in: RoundedRectangle(cornerRadius: 18))
-		.overlay(
-			RoundedRectangle(cornerRadius: 18)
-				.stroke(Color.secondary.opacity(0.18), lineWidth: 1)
-		)
-		.shadow(color: .black.opacity(0.12), radius: 24, y: 8)
-	}
-}
-
 // MARK: - Preview
-
-#Preview("Session UI confirm dialog") {
-	ZStack {
-		Color(.systemBackground)
-		SessionUIDialogOverlay(
-			dialog: PimuxSessionUIDialogState(
-				id: "confirm-1",
-				kind: "confirm",
-				title: "Pimux Live Confirm Test",
-				message: "Choose from either the Pi TUI or the iOS app. Does this confirm stay mirrored and resolve correctly?",
-				options: ["Yes", "No"],
-				selectedIndex: 0,
-				placeholder: nil,
-				value: nil
-			),
-			inputText: .constant(""),
-			isSendingAction: false,
-			errorMessage: nil,
-			onSelectOption: { _ in },
-			onSubmitInput: {},
-			onCancel: {}
-		)
-		.padding()
-	}
-}
-
-#Preview("Session UI select dialog") {
-	ZStack {
-		Color(.systemBackground)
-		SessionUIDialogOverlay(
-			dialog: PimuxSessionUIDialogState(
-				id: "select-1",
-				kind: "select",
-				title: "Pimux Live Select Test",
-				message: "",
-				options: ["Alpha", "Beta", "Gamma"],
-				selectedIndex: 1,
-				placeholder: nil,
-				value: nil
-			),
-			inputText: .constant(""),
-			isSendingAction: false,
-			errorMessage: nil,
-			onSelectOption: { _ in },
-			onSubmitInput: {},
-			onCancel: {}
-		)
-		.padding()
-	}
-}
-
-#Preview("Session UI input dialog") {
-	ZStack {
-		Color(.systemBackground)
-		SessionUIDialogOverlay(
-			dialog: PimuxSessionUIDialogState(
-				id: "input-1",
-				kind: "input",
-				title: "Pimux Live Input Test",
-				message: "",
-				options: [],
-				selectedIndex: 0,
-				placeholder: "Type from either the Pi TUI or the iOS app.",
-				value: "hello"
-			),
-			inputText: .constant("hello"),
-			isSendingAction: false,
-			errorMessage: nil,
-			onSelectOption: { _ in },
-			onSubmitInput: {},
-			onCancel: {}
-		)
-		.padding()
-	}
-}
-
-#Preview("Session UI editor dialog") {
-	ZStack {
-		Color(.systemBackground)
-		SessionUIDialogOverlay(
-			dialog: PimuxSessionUIDialogState(
-				id: "editor-1",
-				kind: "editor",
-				title: "Pimux Live Editor Test",
-				message: "",
-				options: [],
-				selectedIndex: 0,
-				placeholder: nil,
-				value: "Edit this text from either the Pi TUI or the iOS app.\n\nDoes this editor stay mirrored and resolve correctly?"
-			),
-			inputText: .constant("Edit this text from either the Pi TUI or the iOS app.\n\nDoes this editor stay mirrored and resolve correctly?"),
-			isSendingAction: false,
-			errorMessage: nil,
-			onSelectOption: { _ in },
-			onSubmitInput: {},
-			onCancel: {}
-		)
-		.padding()
-	}
-}
 
 #Preview("All message types") {
 	let preview = {
