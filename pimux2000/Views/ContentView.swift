@@ -125,13 +125,17 @@ struct ContentView: View {
 }
 
 #Preview {
-	let db = AppDatabase.preview()
-	try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
-	try! db.dbQueue.write { dbConn in
-		var host = Host(id: nil, location: "nakajima@arch", createdAt: Date(), updatedAt: Date())
-		try host.insert(dbConn)
-	}
-	return ContentView()
-		.environment(\.appDatabase, db)
-		.databaseContext(.readWrite { db.dbQueue })
+	let preview = {
+		let db = AppDatabase.preview()
+		try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
+		try! db.dbQueue.write { dbConn in
+			var host = Host(id: nil, location: "nakajima@arch", createdAt: Date(), updatedAt: Date())
+			try host.insert(dbConn)
+		}
+		return ContentView()
+			.environment(\.appDatabase, db)
+			.databaseContext(.readWrite { db.dbQueue })
+	}()
+
+	preview
 }

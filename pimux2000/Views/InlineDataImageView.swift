@@ -54,6 +54,6 @@ struct InlineDataImageView: View {
 		.appendingPathComponent("preview-image.png")
 	let imageData = (try? Data(contentsOf: imageURL)) ?? Data()
 
-	return InlineDataImageView(id: "preview", data: imageData)
+	InlineDataImageView(id: "preview", data: imageData)
 		.padding()
 }

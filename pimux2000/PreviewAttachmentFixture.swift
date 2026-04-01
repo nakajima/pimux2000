@@ -1,4 +1,3 @@
-#if DEBUG
 import Foundation
 
 enum PreviewAttachmentFixture {
@@ -17,4 +16,3 @@ enum PreviewAttachmentFixture {
 		return FileManager.default.fileExists(atPath: fileURL.path) ? fileURL : nil
 	}
 }
-#endif

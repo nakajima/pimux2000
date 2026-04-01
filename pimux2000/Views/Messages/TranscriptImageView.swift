@@ -119,7 +119,7 @@ struct TranscriptImageView: View {
 	let attachmentID = "preview-img"
 	let _ = PreviewAttachmentFixture.installImageAttachment(sessionID: sessionID, attachmentID: attachmentID)
 
-	return TranscriptImageView(
+	TranscriptImageView(
 		url: URL(string: "https://example.com/sessions/\(sessionID)/attachments/\(attachmentID)")!,
 		sessionID: sessionID,
 		mimeType: "image/png",

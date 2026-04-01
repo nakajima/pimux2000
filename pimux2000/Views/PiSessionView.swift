@@ -736,201 +736,205 @@ private struct TranscriptWarningView: View {
 // MARK: - Preview
 
 #Preview("All message types") {
-	let db = AppDatabase.preview()
-	let previewSessionID = "test-session-1"
-	let previewAttachmentID = "img-preview"
-	let _ = PreviewAttachmentFixture.installImageAttachment(sessionID: previewSessionID, attachmentID: previewAttachmentID)
-	try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
+	let preview = {
+		let db = AppDatabase.preview()
+		let previewSessionID = "test-session-1"
+		let previewAttachmentID = "img-preview"
+		let _ = PreviewAttachmentFixture.installImageAttachment(sessionID: previewSessionID, attachmentID: previewAttachmentID)
+		try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
 
-	try! db.dbQueue.write { dbConn in
-		let now = Date()
+		try! db.dbQueue.write { dbConn in
+			let now = Date()
 
-		func insertMessage(
-			for sessionID: Int64,
-			role: Message.Role,
-			toolName: String? = nil,
-			position: Int,
-			createdAt: Date,
-			blocks: [(type: String, text: String?, toolCallName: String?, mimeType: String?, attachmentID: String?)]
-		) throws {
-			var message = Message(
-				piSessionID: sessionID,
-				role: role,
-				toolName: toolName,
-				position: position,
-				createdAt: createdAt
-			)
-			try message.insert(dbConn)
-
-			for (blockIndex, block) in blocks.enumerated() {
-				var contentBlock = MessageContentBlock(
-					messageID: message.id!,
-					type: block.type,
-					text: block.text,
-					toolCallName: block.toolCallName,
-					mimeType: block.mimeType,
-					attachmentID: block.attachmentID,
-					position: blockIndex
+			func insertMessage(
+				for sessionID: Int64,
+				role: Message.Role,
+				toolName: String? = nil,
+				position: Int,
+				createdAt: Date,
+				blocks: [(type: String, text: String?, toolCallName: String?, mimeType: String?, attachmentID: String?)]
+			) throws {
+				var message = Message(
+					piSessionID: sessionID,
+					role: role,
+					toolName: toolName,
+					position: position,
+					createdAt: createdAt
 				)
-				try contentBlock.insert(dbConn)
+				try message.insert(dbConn)
+
+				for (blockIndex, block) in blocks.enumerated() {
+					var contentBlock = MessageContentBlock(
+						messageID: message.id!,
+						type: block.type,
+						text: block.text,
+						toolCallName: block.toolCallName,
+						mimeType: block.mimeType,
+						attachmentID: block.attachmentID,
+						position: blockIndex
+					)
+					try contentBlock.insert(dbConn)
+				}
 			}
+
+			var host = Host(id: nil, location: "nakajima@localhost", createdAt: now, updatedAt: now)
+			try host.insert(dbConn)
+
+			var session = PiSession(
+				id: nil,
+				hostID: host.id!,
+				summary: "Working on chat UI",
+				sessionID: previewSessionID,
+				sessionFile: nil,
+				model: "anthropic/claude-sonnet",
+				lastMessage: "Unknown roles fall back gracefully.",
+				lastMessageAt: now.addingTimeInterval(210),
+				lastMessageRole: "systemNote",
+				startedAt: now.addingTimeInterval(-900),
+				lastSeenAt: now.addingTimeInterval(210)
+			)
+			try session.insert(dbConn)
+
+			let sessionRowID = session.id!
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .user,
+				position: 0,
+				createdAt: now,
+				blocks: [
+					(type: "text", text: "Can you help me expand this preview so it covers more transcript cases?", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .assistant,
+				position: 1,
+				createdAt: now.addingTimeInterval(30),
+				blocks: [
+					(type: "thinking", text: "Inspecting the supported roles and block kinds before updating the fixtures.\nLet me look at the Message.Role enum to see what cases exist.\nI see: user, assistant, toolResult, bashExecution, custom, branchSummary, compactionSummary, other.\nNow checking block types: text, thinking, toolCall, image, other.\nThe preview currently only has a user message and an assistant message.\nI need to add tool results, bash execution, branch summaries, compaction summaries.\nAlso need to show images and unknown/other role types.\nLet me also make sure the thinking block is long enough to test scrolling.\nI should verify each role gets the right icon and color.\nPlanning the full set of fixture messages now.\nI'll add about 12 messages covering all the cases.\nStarting with the edit now.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+					(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift (offset=785, limit=140)", toolCallName: "read", mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .toolResult,
+				toolName: "read",
+				position: 2,
+				createdAt: now.addingTimeInterval(60),
+				blocks: [
+					(type: "text", text: "Found the preview block at the bottom of `PiSessionView.swift`:\n\n```swift\nprivate var displayedMessagesScrollSignature: String {\n    ...\n}\n```\n\nIt currently renders text, thinking, tool calls, images, and fallback blocks.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .assistant,
+				position: 3,
+				createdAt: now.addingTimeInterval(90),
+				blocks: [
+					(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .bashExecution,
+				position: 4,
+				createdAt: now.addingTimeInterval(120),
+				blocks: [
+					(type: "text", text: "$ xcodebuild -scheme pimux2000 ENABLE_PREVIEWS=YES\nSwiftCompile PiSessionView.swift\n** BUILD SUCCEEDED **", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .assistant,
+				position: 5,
+				createdAt: now.addingTimeInterval(150),
+				blocks: [
+					(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .toolResult,
+				toolName: "edit",
+				position: 6,
+				createdAt: now.addingTimeInterval(180),
+				blocks: [
+					(type: "text", text: "Applied 1 edit to `pimux2000/Views/PiSessionView.swift`:\n\n- split the scroll signature into smaller helper functions\n- expanded preview fixtures to cover tool calls and summary roles\n- kept the image attachment placeholder in place", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .assistant,
+				position: 7,
+				createdAt: now.addingTimeInterval(210),
+				blocks: [
+					(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift (offset=785, limit=140)", toolCallName: "read", mimeType: nil, attachmentID: nil),
+					(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil),
+					(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil),
+					(type: "text", text: "Done — this preview now shows tool calls alongside realistic outputs, plus summaries, shell output, image attachments, and fallback cases.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+					(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: previewAttachmentID)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .custom,
+				position: 8,
+				createdAt: now.addingTimeInterval(240),
+				blocks: [
+					(type: "other", text: "Custom extension note: the live stream briefly detached, so the app fell back to a persisted snapshot.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .branchSummary,
+				position: 9,
+				createdAt: now.addingTimeInterval(270),
+				blocks: [
+					(type: "text", text: "Created branch `preview-message-fixtures` from `main` and staged the updated transcript preview data.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .compactionSummary,
+				position: 10,
+				createdAt: now.addingTimeInterval(300),
+				blocks: [
+					(type: "text", text: "Earlier setup discussion was compacted into a shorter summary so the preview still shows long-running session behavior.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				]
+			)
+
+			try insertMessage(
+				for: sessionRowID,
+				role: .other("systemNote"),
+				position: 11,
+				createdAt: now.addingTimeInterval(330),
+				blocks: [
+					(type: "text", text: "Unknown roles render with fallback styling so future transcript events remain visible.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+				]
+			)
 		}
 
-		var host = Host(id: nil, location: "nakajima@localhost", createdAt: now, updatedAt: now)
-		try host.insert(dbConn)
+		let session = try! db.dbQueue.read { dbConn in
+			try PiSession.fetchOne(dbConn)!
+		}
 
-		var session = PiSession(
-			id: nil,
-			hostID: host.id!,
-			summary: "Working on chat UI",
-			sessionID: previewSessionID,
-			sessionFile: nil,
-			model: "anthropic/claude-sonnet",
-			lastMessage: "Unknown roles fall back gracefully.",
-			lastMessageAt: now.addingTimeInterval(210),
-			lastMessageRole: "systemNote",
-			startedAt: now.addingTimeInterval(-900),
-			lastSeenAt: now.addingTimeInterval(210)
-		)
-		try session.insert(dbConn)
+		return NavigationStack {
+			PiSessionView(session: session, columnVisibility: .constant(.automatic))
+		}
+		.environment(\.appDatabase, db)
+		.databaseContext(.readWrite { db.dbQueue })
+	}()
 
-		let sessionRowID = session.id!
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .user,
-			position: 0,
-			createdAt: now,
-			blocks: [
-				(type: "text", text: "Can you help me expand this preview so it covers more transcript cases?", toolCallName: nil, mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .assistant,
-			position: 1,
-			createdAt: now.addingTimeInterval(30),
-			blocks: [
-				(type: "thinking", text: "Inspecting the supported roles and block kinds before updating the fixtures.\nLet me look at the Message.Role enum to see what cases exist.\nI see: user, assistant, toolResult, bashExecution, custom, branchSummary, compactionSummary, other.\nNow checking block types: text, thinking, toolCall, image, other.\nThe preview currently only has a user message and an assistant message.\nI need to add tool results, bash execution, branch summaries, compaction summaries.\nAlso need to show images and unknown/other role types.\nLet me also make sure the thinking block is long enough to test scrolling.\nI should verify each role gets the right icon and color.\nPlanning the full set of fixture messages now.\nI'll add about 12 messages covering all the cases.\nStarting with the edit now.", toolCallName: nil, mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift (offset=785, limit=140)", toolCallName: "read", mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .toolResult,
-			toolName: "read",
-			position: 2,
-			createdAt: now.addingTimeInterval(60),
-			blocks: [
-				(type: "text", text: "Found the preview block at the bottom of `PiSessionView.swift`:\n\n```swift\nprivate var displayedMessagesScrollSignature: String {\n    ...\n}\n```\n\nIt currently renders text, thinking, tool calls, images, and fallback blocks.", toolCallName: nil, mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .assistant,
-			position: 3,
-			createdAt: now.addingTimeInterval(90),
-			blocks: [
-				(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .bashExecution,
-			position: 4,
-			createdAt: now.addingTimeInterval(120),
-			blocks: [
-				(type: "text", text: "$ xcodebuild -scheme pimux2000 ENABLE_PREVIEWS=YES\nSwiftCompile PiSessionView.swift\n** BUILD SUCCEEDED **", toolCallName: nil, mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .assistant,
-			position: 5,
-			createdAt: now.addingTimeInterval(150),
-			blocks: [
-				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .toolResult,
-			toolName: "edit",
-			position: 6,
-			createdAt: now.addingTimeInterval(180),
-			blocks: [
-				(type: "text", text: "Applied 1 edit to `pimux2000/Views/PiSessionView.swift`:\n\n- split the scroll signature into smaller helper functions\n- expanded preview fixtures to cover tool calls and summary roles\n- kept the image attachment placeholder in place", toolCallName: nil, mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .assistant,
-			position: 7,
-			createdAt: now.addingTimeInterval(210),
-			blocks: [
-				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift (offset=785, limit=140)", toolCallName: "read", mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil),
-				(type: "text", text: "Done — this preview now shows tool calls alongside realistic outputs, plus summaries, shell output, image attachments, and fallback cases.", toolCallName: nil, mimeType: nil, attachmentID: nil),
-				(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: previewAttachmentID)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .custom,
-			position: 8,
-			createdAt: now.addingTimeInterval(240),
-			blocks: [
-				(type: "other", text: "Custom extension note: the live stream briefly detached, so the app fell back to a persisted snapshot.", toolCallName: nil, mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .branchSummary,
-			position: 9,
-			createdAt: now.addingTimeInterval(270),
-			blocks: [
-				(type: "text", text: "Created branch `preview-message-fixtures` from `main` and staged the updated transcript preview data.", toolCallName: nil, mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .compactionSummary,
-			position: 10,
-			createdAt: now.addingTimeInterval(300),
-			blocks: [
-				(type: "text", text: "Earlier setup discussion was compacted into a shorter summary so the preview still shows long-running session behavior.", toolCallName: nil, mimeType: nil, attachmentID: nil)
-			]
-		)
-
-		try insertMessage(
-			for: sessionRowID,
-			role: .other("systemNote"),
-			position: 11,
-			createdAt: now.addingTimeInterval(330),
-			blocks: [
-				(type: "text", text: "Unknown roles render with fallback styling so future transcript events remain visible.", toolCallName: nil, mimeType: nil, attachmentID: nil)
-			]
-		)
-	}
-
-	let session = try! db.dbQueue.read { dbConn in
-		try PiSession.fetchOne(dbConn)!
-	}
-
-	return NavigationStack {
-		PiSessionView(session: session, columnVisibility: .constant(.automatic))
-	}
-	.environment(\.appDatabase, db)
-	.databaseContext(.readWrite { db.dbQueue })
+	preview
 }

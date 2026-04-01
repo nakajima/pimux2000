@@ -306,7 +306,7 @@ private func makeLabel(_ text: String, style: UIFont.TextStyle, color: UIColor, 
 		.pending(PendingLocalMessage(body: "Please keep it boring and stable.", confirmedUserMessageBaseline: 1)),
 	]
 
-	return NavigationStack {
+	NavigationStack {
 		SessionTranscriptView(messages: messages, sessionID: "preview-session", serverURL: nil, emptyState: nil, onOpenMessageContext: { _ in })
 			.background(.background)
 	}

@@ -120,72 +120,76 @@ private struct UnreadSessionBadge: View {
 }
 
 #Preview {
-	let db = AppDatabase.preview()
-	try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
+	let preview = {
+		let db = AppDatabase.preview()
+		try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
 
-	try! db.dbQueue.write { dbConn in
-		let now = Date()
-		var host = Host(id: nil, location: "nakajima@mac-studio", createdAt: now, updatedAt: now)
-		try host.insert(dbConn)
+		try! db.dbQueue.write { dbConn in
+			let now = Date()
+			var host = Host(id: nil, location: "nakajima@mac-studio", createdAt: now, updatedAt: now)
+			try host.insert(dbConn)
 
-		var activeSession = PiSession(
-			id: nil,
-			hostID: host.id!,
-			summary: "Watch live transcripts",
-			sessionID: "sidebar-preview-session-read",
-			sessionFile: nil,
-			model: "anthropic/claude-sonnet",
-			lastMessage: nil,
-			lastUserMessageAt: now.addingTimeInterval(-240),
-			lastMessageAt: now.addingTimeInterval(-120),
-			lastMessageRole: "assistant",
-			lastReadMessageAt: now.addingTimeInterval(-120),
-			isCliActive: true,
-			startedAt: now.addingTimeInterval(-600),
-			lastSeenAt: now.addingTimeInterval(-120)
-		)
-		try activeSession.insert(dbConn)
+			var activeSession = PiSession(
+				id: nil,
+				hostID: host.id!,
+				summary: "Watch live transcripts",
+				sessionID: "sidebar-preview-session-read",
+				sessionFile: nil,
+				model: "anthropic/claude-sonnet",
+				lastMessage: nil,
+				lastUserMessageAt: now.addingTimeInterval(-240),
+				lastMessageAt: now.addingTimeInterval(-120),
+				lastMessageRole: "assistant",
+				lastReadMessageAt: now.addingTimeInterval(-120),
+				isCliActive: true,
+				startedAt: now.addingTimeInterval(-600),
+				lastSeenAt: now.addingTimeInterval(-120)
+			)
+			try activeSession.insert(dbConn)
 
-		var unreadSession = PiSession(
-			id: nil,
-			hostID: host.id!,
-			summary: "Ship read badges",
-			sessionID: "sidebar-preview-session-unread",
-			sessionFile: nil,
-			model: "anthropic/claude-sonnet",
-			lastMessage: nil,
-			lastUserMessageAt: now.addingTimeInterval(-30),
-			lastMessageAt: now,
-			lastMessageRole: "assistant",
-			lastReadMessageAt: now.addingTimeInterval(-300),
-			isCliActive: true,
-			startedAt: now.addingTimeInterval(-1800),
-			lastSeenAt: now
-		)
-		try unreadSession.insert(dbConn)
+			var unreadSession = PiSession(
+				id: nil,
+				hostID: host.id!,
+				summary: "Ship read badges",
+				sessionID: "sidebar-preview-session-unread",
+				sessionFile: nil,
+				model: "anthropic/claude-sonnet",
+				lastMessage: nil,
+				lastUserMessageAt: now.addingTimeInterval(-30),
+				lastMessageAt: now,
+				lastMessageRole: "assistant",
+				lastReadMessageAt: now.addingTimeInterval(-300),
+				isCliActive: true,
+				startedAt: now.addingTimeInterval(-1800),
+				lastSeenAt: now
+			)
+			try unreadSession.insert(dbConn)
 
-		var inactiveSession = PiSession(
-			id: nil,
-			hostID: host.id!,
-			summary: "Old debugging session",
-			sessionID: "sidebar-preview-session-inactive",
-			sessionFile: nil,
-			model: "anthropic/claude-sonnet",
-			lastMessage: nil,
-			lastUserMessageAt: now.addingTimeInterval(-4200),
-			lastMessageAt: now.addingTimeInterval(-3600),
-			lastMessageRole: "assistant",
-			lastReadMessageAt: now.addingTimeInterval(-3600),
-			isCliActive: false,
-			startedAt: now.addingTimeInterval(-7200),
-			lastSeenAt: now.addingTimeInterval(-3600)
-		)
-		try inactiveSession.insert(dbConn)
-	}
+			var inactiveSession = PiSession(
+				id: nil,
+				hostID: host.id!,
+				summary: "Old debugging session",
+				sessionID: "sidebar-preview-session-inactive",
+				sessionFile: nil,
+				model: "anthropic/claude-sonnet",
+				lastMessage: nil,
+				lastUserMessageAt: now.addingTimeInterval(-4200),
+				lastMessageAt: now.addingTimeInterval(-3600),
+				lastMessageRole: "assistant",
+				lastReadMessageAt: now.addingTimeInterval(-3600),
+				isCliActive: false,
+				startedAt: now.addingTimeInterval(-7200),
+				lastSeenAt: now.addingTimeInterval(-3600)
+			)
+			try inactiveSession.insert(dbConn)
+		}
 
-	return NavigationStack {
-		SidebarView(selectedSessionID: .constant(nil))
-	}
-	.environment(\.appDatabase, db)
-	.databaseContext(.readWrite { db.dbQueue })
+		return NavigationStack {
+			SidebarView(selectedSessionID: .constant(nil))
+		}
+		.environment(\.appDatabase, db)
+		.databaseContext(.readWrite { db.dbQueue })
+	}()
+
+	preview
 }
