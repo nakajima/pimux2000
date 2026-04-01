@@ -1,8 +1,22 @@
 import SwiftUI
 
+private struct MarkdownTextStyleKey: EnvironmentKey {
+	static let defaultValue: Font.TextStyle = .body
+}
+
+extension EnvironmentValues {
+	var markdownTextStyle: Font.TextStyle {
+		get { self[MarkdownTextStyleKey.self] }
+		set { self[MarkdownTextStyleKey.self] = newValue }
+	}
+}
+
 struct MarkdownBlocksView: View {
 	let blocks: [MarkdownBlock]
 	var isSelectable: Bool = false
+	@Environment(\.markdownTextStyle) private var textStyle
+
+	private var baseFont: UIFont { chatUIFont(style: textStyle) }
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 10) {
@@ -60,7 +74,7 @@ struct MarkdownBlocksView: View {
 
 	private func inlineTextView(for text: String) -> some View {
 		MarkdownTextView(
-			attributedText: MarkdownAttributedStringBuilder.inlineAttributedString(for: text),
+			attributedText: MarkdownAttributedStringBuilder.inlineAttributedString(for: text, font: baseFont),
 			isSelectable: isSelectable
 		)
 	}
@@ -74,7 +88,7 @@ struct MarkdownBlocksView: View {
 		default: 1.05
 		}
 		let font = UIFont.systemFont(
-			ofSize: chatUIFont().pointSize * scale,
+			ofSize: baseFont.pointSize * scale,
 			weight: .semibold
 		)
 
@@ -119,6 +133,7 @@ private struct CodeBlockView: View {
 private struct BlockQuoteView: View {
 	let content: String
 	var isSelectable: Bool = false
+	@Environment(\.markdownTextStyle) private var textStyle
 
 	var body: some View {
 		HStack(alignment: .top, spacing: 8) {
@@ -129,6 +144,7 @@ private struct BlockQuoteView: View {
 			MarkdownTextView(
 				attributedText: MarkdownAttributedStringBuilder.inlineAttributedString(
 					for: content,
+					font: chatUIFont(style: textStyle),
 					textColor: .secondaryLabel
 				),
 				isSelectable: isSelectable

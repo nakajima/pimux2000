@@ -10,6 +10,7 @@ struct MessageMarkdownView: View {
 	let role: Message.Role
 	let title: String
 	var displayMode: DisplayMode = .preview
+	@Environment(\.markdownTextStyle) private var textStyle
 
 	private var previewHeight: CGFloat {
 		ceil(chatLineHeight(style: .body) * CGFloat(MessageMarkdownRenderer.maxPreviewLines))
@@ -48,6 +49,8 @@ struct MessageMarkdownView: View {
 		let isInlineOnly = MessageMarkdownRenderer.usesInlineMarkdown(for: text, role: role)
 		let isMonospaced = role == .toolResult || role == .bashExecution
 
+		let font = chatUIFont(style: textStyle)
+
 		return Group {
 			if !isInlineOnly && !isMonospaced {
 				MarkdownBlocksView(
@@ -56,7 +59,7 @@ struct MessageMarkdownView: View {
 				)
 			} else {
 				MarkdownTextView(
-					attributedText: MarkdownAttributedStringBuilder.attributedString(for: text, role: role),
+					attributedText: MarkdownAttributedStringBuilder.attributedString(for: text, role: role, font: font),
 					isSelectable: displayMode == .full
 				)
 			}

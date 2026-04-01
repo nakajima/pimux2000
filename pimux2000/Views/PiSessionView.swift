@@ -61,6 +61,9 @@ struct PiSessionView: View {
 	@State private var requestedMessageContext: MessageContextRoute?
 	@State private var transcriptForcePinToken = 0
 	@State private var isAgentBusy = false
+	@State private var currentUIDialog: PimuxSessionUIDialogState?
+	@State private var isUIDialogActionInFlight = false
+	@State private var uiDialogActionError: String?
 	@State private var agentIdleTask: Task<Void, Never>?
 	@State private var deferredStartupGeneration = 0
 	@State private var deferredStartupRequestID = 0
@@ -74,26 +77,50 @@ struct PiSessionView: View {
 	}
 
 	var body: some View {
-		VStack(spacing: 0) {
-			transcriptView
+		ZStack {
+			VStack(spacing: 0) {
+				transcriptView
 
-			MessageComposerView(
-				text: $draftMessage,
-				attachments: draftImages,
-				customCommands: customCommands,
-				canAttachImages: session.supportsImages ?? true,
-				isEnabled: serverConfiguration != nil,
-				isSending: isSendingMessage,
-				isAgentActive: isAgentBusy,
-				errorMessage: sendError,
-				onSend: { Task { await sendMessage() } },
-				onStop: { Task { await interruptSession() } },
-				onRemoveAttachment: { id in draftImages.removeAll { $0.id == id } },
-				onPhotosSelected: { importPhotos($0) },
-				onImportImageData: { data, source in importImageData(data, source: source) }
-			)
-			.onChange(of: draftMessage) {
-				sendError = nil
+				MessageComposerView(
+					text: $draftMessage,
+					attachments: draftImages,
+					customCommands: customCommands,
+					canAttachImages: session.supportsImages ?? true,
+					isEnabled: serverConfiguration != nil,
+					isSending: isSendingMessage,
+					isAgentActive: isAgentBusy,
+					errorMessage: sendError,
+					onSend: { Task { await sendMessage() } },
+					onStop: { Task { await interruptSession() } },
+					onRemoveAttachment: { id in draftImages.removeAll { $0.id == id } },
+					onPhotosSelected: { importPhotos($0) },
+					onImportImageData: { data, source in importImageData(data, source: source) }
+				)
+				.onChange(of: draftMessage) {
+					sendError = nil
+				}
+			}
+
+			if let currentUIDialog {
+				Color.black.opacity(0.16)
+					.ignoresSafeArea()
+					.onTapGesture {
+						guard !isUIDialogActionInFlight else { return }
+						Task { await cancelUIDialog() }
+					}
+
+				SessionUIDialogOverlay(
+					dialog: currentUIDialog,
+					isSendingAction: isUIDialogActionInFlight,
+					errorMessage: uiDialogActionError,
+					onSelectOption: { index in
+						Task { await chooseUIDialogOption(index) }
+					},
+					onCancel: {
+						Task { await cancelUIDialog() }
+					}
+				)
+				.padding(20)
 			}
 		}
 		.navigationTitle(session.summary)
@@ -339,6 +366,9 @@ struct PiSessionView: View {
 
 		guard serverConfiguration != nil else {
 			liveStreamState = .idle
+			currentUIDialog = nil
+			uiDialogActionError = nil
+			isUIDialogActionInFlight = false
 			return
 		}
 
@@ -403,6 +433,14 @@ struct PiSessionView: View {
 			if !connected {
 				persistActivity(PimuxSessionActivity(active: false, attached: false))
 			}
+		case .uiState(let sequence, _):
+			guard sequence > lastStreamSequence else { return }
+			lastStreamSequence = sequence
+		case .uiDialogState(let sequence, let state):
+			guard sequence > lastStreamSequence else { return }
+			lastStreamSequence = sequence
+			currentUIDialog = state
+			uiDialogActionError = nil
 		case .keepalive(let sequence, _):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
@@ -613,6 +651,67 @@ struct PiSessionView: View {
 		}
 	}
 
+	private func chooseUIDialogOption(_ index: Int) async {
+		guard let dialog = currentUIDialog else { return }
+		guard let serverConfiguration else {
+			uiDialogActionError = "No pimux server configured."
+			return
+		}
+
+		isUIDialogActionInFlight = true
+		uiDialogActionError = nil
+		defer { isUIDialogActionInFlight = false }
+
+		do {
+			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+			if dialog.selectedIndex != index {
+				currentUIDialog = PimuxSessionUIDialogState(
+					id: dialog.id,
+					kind: dialog.kind,
+					title: dialog.title,
+					message: dialog.message,
+					options: dialog.options,
+					selectedIndex: index
+				)
+				try await client.sendUIDialogAction(
+					sessionID: session.sessionID,
+					dialogID: dialog.id,
+					action: .selectIndex(index: index)
+				)
+			}
+			try await client.sendUIDialogAction(
+				sessionID: session.sessionID,
+				dialogID: dialog.id,
+				action: .submit
+			)
+		} catch {
+			uiDialogActionError = error.localizedDescription
+		}
+	}
+
+	private func cancelUIDialog() async {
+		guard let dialog = currentUIDialog else { return }
+		guard let serverConfiguration else {
+			uiDialogActionError = "No pimux server configured."
+			return
+		}
+
+		isUIDialogActionInFlight = true
+		uiDialogActionError = nil
+		defer { isUIDialogActionInFlight = false }
+
+		do {
+			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+			try await client.sendUIDialogAction(
+				sessionID: session.sessionID,
+				dialogID: dialog.id,
+				action: .cancel
+			)
+		} catch {
+			uiDialogActionError = error.localizedDescription
+		}
+	}
+
 	private func persistActivity(_ activity: PimuxSessionActivity) {
 		try? appDatabase?.updateSessionActivity(
 			sessionID: session.sessionID,
@@ -733,7 +832,133 @@ private struct TranscriptWarningView: View {
 	}
 }
 
+private struct SessionUIDialogOverlay: View {
+	let dialog: PimuxSessionUIDialogState
+	let isSendingAction: Bool
+	let errorMessage: String?
+	let onSelectOption: (Int) -> Void
+	let onCancel: () -> Void
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 16) {
+			Text(dialog.title)
+				.font(.headline)
+
+			if !dialog.message.isEmpty {
+				Text(dialog.message)
+					.font(.subheadline)
+					.foregroundStyle(.secondary)
+			}
+
+			VStack(spacing: 10) {
+				ForEach(Array(dialog.options.enumerated()), id: \.offset) { index, option in
+					Button {
+						onSelectOption(index)
+					} label: {
+						HStack(spacing: 12) {
+							Text(option)
+								.fontWeight(dialog.selectedIndex == index ? .semibold : .regular)
+							Spacer()
+							if dialog.selectedIndex == index {
+								Image(systemName: "checkmark.circle.fill")
+									.foregroundStyle(.tint)
+							}
+						}
+						.padding(.horizontal, 14)
+						.padding(.vertical, 12)
+						.frame(maxWidth: .infinity)
+						.background(
+							dialog.selectedIndex == index
+								? AnyShapeStyle(.tint.opacity(0.14))
+								: AnyShapeStyle(.regularMaterial),
+							in: RoundedRectangle(cornerRadius: 12)
+						)
+						.overlay(
+							RoundedRectangle(cornerRadius: 12)
+								.stroke(dialog.selectedIndex == index ? Color.accentColor : Color.secondary.opacity(0.18), lineWidth: 1)
+						)
+					}
+					.buttonStyle(.plain)
+					.disabled(isSendingAction)
+				}
+			}
+
+			if isSendingAction {
+				HStack(spacing: 8) {
+					ProgressView()
+						.controlSize(.small)
+					Text("Sending action…")
+						.font(.caption)
+						.foregroundStyle(.secondary)
+				}
+			}
+
+			if let errorMessage, !errorMessage.isEmpty {
+				Text(verbatim: errorMessage)
+					.font(.caption)
+					.foregroundStyle(.red)
+			}
+
+			HStack {
+				Spacer()
+				Button("Cancel", role: .cancel, action: onCancel)
+					.disabled(isSendingAction)
+			}
+		}
+		.padding(20)
+		.frame(maxWidth: 420)
+		.background(.thickMaterial, in: RoundedRectangle(cornerRadius: 18))
+		.overlay(
+			RoundedRectangle(cornerRadius: 18)
+				.stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+		)
+		.shadow(color: .black.opacity(0.12), radius: 24, y: 8)
+	}
+}
+
 // MARK: - Preview
+
+#Preview("Session UI confirm dialog") {
+	ZStack {
+		Color(.systemBackground)
+		SessionUIDialogOverlay(
+			dialog: PimuxSessionUIDialogState(
+				id: "confirm-1",
+				kind: "confirm",
+				title: "Pimux Live Confirm Test",
+				message: "Choose from either the Pi TUI or the iOS app. Does this confirm stay mirrored and resolve correctly?",
+				options: ["Yes", "No"],
+				selectedIndex: 0
+			),
+			isSendingAction: false,
+			errorMessage: nil,
+			onSelectOption: { _ in },
+			onCancel: {}
+		)
+		.padding()
+	}
+}
+
+#Preview("Session UI select dialog") {
+	ZStack {
+		Color(.systemBackground)
+		SessionUIDialogOverlay(
+			dialog: PimuxSessionUIDialogState(
+				id: "select-1",
+				kind: "select",
+				title: "Pimux Live Select Test",
+				message: "",
+				options: ["Alpha", "Beta", "Gamma"],
+				selectedIndex: 1
+			),
+			isSendingAction: false,
+			errorMessage: nil,
+			onSelectOption: { _ in },
+			onCancel: {}
+		)
+		.padding()
+	}
+}
 
 #Preview("All message types") {
 	let preview = {

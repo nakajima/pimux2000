@@ -4,7 +4,9 @@ use crate::{
     host::HostIdentity,
     message::ImageContent,
     session::{ActiveSession, SessionCommand},
-    transcript::SessionMessagesResponse,
+    transcript::{
+        SessionMessagesResponse, SessionUiDialogAction, SessionUiDialogState, SessionUiState,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,6 +21,14 @@ pub enum AgentToServerMessage {
     LiveSessionUpdate {
         session: SessionMessagesResponse,
         active_session: Option<ActiveSession>,
+    },
+    LiveUiUpdate {
+        session_id: String,
+        ui_state: SessionUiState,
+    },
+    LiveUiDialogUpdate {
+        session_id: String,
+        ui_dialog_state: Option<SessionUiDialogState>,
     },
     FetchTranscriptResult {
         request_id: String,
@@ -38,6 +48,10 @@ pub enum AgentToServerMessage {
     GetCommandsResult {
         request_id: String,
         commands: Option<Vec<SessionCommand>>,
+        error: Option<String>,
+    },
+    UiDialogActionResult {
+        request_id: String,
         error: Option<String>,
     },
     Ping,
@@ -66,6 +80,12 @@ pub enum ServerToAgentMessage {
     GetCommands {
         request_id: String,
         session_id: String,
+    },
+    UiDialogAction {
+        request_id: String,
+        session_id: String,
+        dialog_id: String,
+        action: SessionUiDialogAction,
     },
     Ping,
     Pong,

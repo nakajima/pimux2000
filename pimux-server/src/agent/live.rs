@@ -21,8 +21,8 @@ use crate::{
     message::{ImageContent, Message, Role, truncate_text},
     session::{ActiveSession, SessionCommand, SessionContextUsage},
     transcript::{
-        SessionActivity, SessionMessagesResponse, TranscriptFreshness, TranscriptFreshnessState,
-        TranscriptSource,
+        SessionActivity, SessionMessagesResponse, SessionUiDialogAction, SessionUiDialogState,
+        SessionUiState, TranscriptFreshness, TranscriptFreshnessState, TranscriptSource,
     },
 };
 
@@ -31,9 +31,10 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub const DEFAULT_DETACHED_CAPACITY: usize = 3;
 pub const DEFAULT_DETACHED_TTL: Duration = Duration::from_secs(180);
 const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
-const LIVE_PROTOCOL_VERSION: u32 = 2;
+const LIVE_PROTOCOL_VERSION: u32 = 3;
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const GET_COMMANDS_TIMEOUT: Duration = Duration::from_secs(5);
+const UI_DIALOG_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,9 +48,19 @@ pub struct LiveSessionMetadata {
 }
 
 #[derive(Debug, Clone)]
-pub struct LiveUpdate {
-    pub snapshot: SessionMessagesResponse,
-    pub active_session: Option<ActiveSession>,
+pub enum LiveUpdate {
+    Transcript {
+        snapshot: SessionMessagesResponse,
+        active_session: Option<ActiveSession>,
+    },
+    UiState {
+        session_id: String,
+        ui_state: SessionUiState,
+    },
+    UiDialogState {
+        session_id: String,
+        ui_dialog_state: Option<SessionUiDialogState>,
+    },
 }
 
 #[derive(Clone)]
@@ -83,6 +94,18 @@ impl LiveSessionStoreHandle {
         let mut store = self.inner.lock().await;
         store.purge_expired();
         store.all_snapshots()
+    }
+
+    pub async fn all_ui_states(&self) -> HashMap<String, SessionUiState> {
+        let mut store = self.inner.lock().await;
+        store.purge_expired();
+        store.all_ui_states()
+    }
+
+    pub async fn all_ui_dialog_states(&self) -> HashMap<String, SessionUiDialogState> {
+        let mut store = self.inner.lock().await;
+        store.purge_expired();
+        store.all_ui_dialog_states()
     }
 
     pub async fn listed_session_for_session(&self, session_id: &str) -> Option<ActiveSession> {
@@ -182,6 +205,53 @@ impl LiveSessionStoreHandle {
     ) {
         let mut store = self.inner.lock().await;
         store.fulfill_get_commands(connection_id, request_id, commands, error);
+    }
+
+    pub async fn send_ui_dialog_action(
+        &self,
+        session_id: &str,
+        dialog_id: &str,
+        action: SessionUiDialogAction,
+    ) -> Result<(), UiDialogActionError> {
+        let (sender, request_id, receiver) = {
+            let mut store = self.inner.lock().await;
+            store.purge_expired();
+            store.prepare_ui_dialog_action(session_id, dialog_id)?
+        };
+
+        if sender
+            .send(LiveAgentCommand::UiDialogAction {
+                request_id: request_id.clone(),
+                session_id: session_id.to_string(),
+                dialog_id: dialog_id.to_string(),
+                action,
+            })
+            .is_err()
+        {
+            let mut store = self.inner.lock().await;
+            store.cancel_ui_dialog_action(&request_id);
+            return Err(UiDialogActionError::Unavailable);
+        }
+
+        match tokio::time::timeout(UI_DIALOG_ACTION_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(UiDialogActionError::Disconnected),
+            Err(_) => {
+                let mut store = self.inner.lock().await;
+                store.cancel_ui_dialog_action(&request_id);
+                Err(UiDialogActionError::TimedOut)
+            }
+        }
+    }
+
+    pub async fn fulfill_ui_dialog_action(
+        &self,
+        connection_id: u64,
+        request_id: &str,
+        error: Option<String>,
+    ) {
+        let mut store = self.inner.lock().await;
+        store.fulfill_ui_dialog_action(connection_id, request_id, error);
     }
 
     pub async fn send_user_message(
@@ -408,6 +478,15 @@ async fn start_listener_impl(
                                         )
                                         .await;
                                 }
+                                LiveSessionIpcMessage::UiDialogActionResult {
+                                    request_id,
+                                    session_id: _,
+                                    error,
+                                } => {
+                                    store
+                                        .fulfill_ui_dialog_action(connection_id, &request_id, error)
+                                        .await;
+                                }
                                 LiveSessionIpcMessage::SessionAttached {
                                     session_id,
                                     metadata,
@@ -423,7 +502,7 @@ async fn start_listener_impl(
                                         let active_session = store
                                             .listed_session_for_session(&snapshot.session_id)
                                             .await;
-                                        let _ = updates.send(LiveUpdate {
+                                        let _ = updates.send(LiveUpdate::Transcript {
                                             snapshot,
                                             active_session,
                                         });
@@ -454,7 +533,7 @@ async fn start_listener_impl(
                                         let active_session = store
                                             .listed_session_for_session(&snapshot.session_id)
                                             .await;
-                                        let _ = updates.send(LiveUpdate {
+                                        let _ = updates.send(LiveUpdate::Transcript {
                                             snapshot,
                                             active_session,
                                         });
@@ -481,7 +560,7 @@ async fn start_listener_impl(
                                         let active_session = store
                                             .listed_session_for_session(&snapshot.session_id)
                                             .await;
-                                        let _ = updates.send(LiveUpdate {
+                                        let _ = updates.send(LiveUpdate::Transcript {
                                             snapshot,
                                             active_session,
                                         });
@@ -508,7 +587,7 @@ async fn start_listener_impl(
                                         let active_session = store
                                             .listed_session_for_session(&snapshot.session_id)
                                             .await;
-                                        let _ = updates.send(LiveUpdate {
+                                        let _ = updates.send(LiveUpdate::Transcript {
                                             snapshot,
                                             active_session,
                                         });
@@ -528,11 +607,41 @@ async fn start_listener_impl(
                                     };
 
                                     if let Some(snapshot) = snapshot {
-                                        let _ = updates.send(LiveUpdate {
+                                        let _ = updates.send(LiveUpdate::Transcript {
                                             snapshot,
                                             active_session: None,
                                         });
                                     }
+                                }
+                                LiveSessionIpcMessage::UiState { session_id, state } => {
+                                    {
+                                        let mut guard = store.inner.lock().await;
+                                        guard.purge_expired();
+                                        guard.apply_event(LiveSessionEvent::UiState {
+                                            session_id: session_id.clone(),
+                                            state: state.clone(),
+                                        });
+                                    }
+
+                                    let _ = updates.send(LiveUpdate::UiState {
+                                        session_id,
+                                        ui_state: state,
+                                    });
+                                }
+                                LiveSessionIpcMessage::UiDialogState { session_id, state } => {
+                                    {
+                                        let mut guard = store.inner.lock().await;
+                                        guard.purge_expired();
+                                        guard.apply_event(LiveSessionEvent::UiDialogState {
+                                            session_id: session_id.clone(),
+                                            state: state.clone(),
+                                        });
+                                    }
+
+                                    let _ = updates.send(LiveUpdate::UiDialogState {
+                                        session_id,
+                                        ui_dialog_state: state,
+                                    });
                                 }
                                 LiveSessionIpcMessage::SessionDetached { session_id } => {
                                     if supports_commands {
@@ -556,7 +665,7 @@ async fn start_listener_impl(
                                         let active_session = store
                                             .listed_session_for_session(&snapshot.session_id)
                                             .await;
-                                        let _ = updates.send(LiveUpdate {
+                                        let _ = updates.send(LiveUpdate::Transcript {
                                             snapshot,
                                             active_session,
                                         });
@@ -579,7 +688,7 @@ async fn start_listener_impl(
                 {
                     let active_session =
                         store.listed_session_for_session(&snapshot.session_id).await;
-                    let _ = updates.send(LiveUpdate {
+                    let _ = updates.send(LiveUpdate::Transcript {
                         snapshot,
                         active_session,
                     });
@@ -647,6 +756,28 @@ impl std::fmt::Display for GetCommandsError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiDialogActionError {
+    Unavailable,
+    Disconnected,
+    TimedOut,
+    Rejected(String),
+}
+
+impl std::fmt::Display for UiDialogActionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => write!(
+                f,
+                "no live attached pimux extension is available for this session"
+            ),
+            Self::Disconnected => write!(f, "live session command connection disconnected"),
+            Self::TimedOut => write!(f, "timed out waiting for ui dialog action acknowledgement"),
+            Self::Rejected(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -678,6 +809,14 @@ enum LiveSessionIpcMessage {
         session_id: String,
         message: Message,
     },
+    UiState {
+        session_id: String,
+        state: SessionUiState,
+    },
+    UiDialogState {
+        session_id: String,
+        state: Option<SessionUiDialogState>,
+    },
     SessionDetached {
         session_id: String,
     },
@@ -691,6 +830,11 @@ enum LiveSessionIpcMessage {
         session_id: String,
         commands: Vec<SessionCommand>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    UiDialogActionResult {
+        request_id: String,
+        session_id: String,
         error: Option<String>,
     },
 }
@@ -712,6 +856,12 @@ enum LiveAgentCommand {
     GetCommands {
         request_id: String,
         session_id: String,
+    },
+    UiDialogAction {
+        request_id: String,
+        session_id: String,
+        dialog_id: String,
+        action: SessionUiDialogAction,
     },
 }
 
@@ -737,6 +887,14 @@ pub enum LiveSessionEvent {
         session_id: String,
         message: Message,
     },
+    UiState {
+        session_id: String,
+        state: SessionUiState,
+    },
+    UiDialogState {
+        session_id: String,
+        state: Option<SessionUiDialogState>,
+    },
     SessionDetached {
         session_id: String,
     },
@@ -752,6 +910,7 @@ struct LiveSessionStore {
     command_session_connections: HashMap<String, u64>,
     inflight_send_user_messages: HashMap<String, InflightSendUserMessage>,
     inflight_get_commands: HashMap<String, InflightGetCommands>,
+    inflight_ui_dialog_actions: HashMap<String, InflightUiDialogAction>,
     next_send_request_id: u64,
     detached_capacity: usize,
     detached_ttl: Duration,
@@ -769,6 +928,7 @@ impl LiveSessionStore {
             command_session_connections: HashMap::new(),
             inflight_send_user_messages: HashMap::new(),
             inflight_get_commands: HashMap::new(),
+            inflight_ui_dialog_actions: HashMap::new(),
             next_send_request_id: 1,
             detached_capacity,
             detached_ttl,
@@ -788,7 +948,12 @@ impl LiveSessionStore {
                     if let Some(detached) = self.recent_detached_sessions.remove(&session_id) {
                         self.detached_order
                             .retain(|existing| existing != &session_id);
-                        LiveSessionState::from_response(detached.response, detached.metadata)
+                        LiveSessionState::from_response(
+                            detached.response,
+                            detached.metadata,
+                            detached.ui_state,
+                            detached.ui_dialog_state,
+                        )
                     } else {
                         LiveSessionState::new(session_id.clone())
                     };
@@ -850,6 +1015,22 @@ impl LiveSessionStore {
                 state.last_update_at = message.created_at;
                 Some(state.as_response(true, true))
             }
+            LiveSessionEvent::UiState { session_id, state } => {
+                let entry = self
+                    .active_sessions
+                    .entry(session_id.clone())
+                    .or_insert_with(|| LiveSessionState::new(session_id.clone()));
+                entry.ui_state = (!state.is_empty()).then_some(state);
+                None
+            }
+            LiveSessionEvent::UiDialogState { session_id, state } => {
+                let entry = self
+                    .active_sessions
+                    .entry(session_id.clone())
+                    .or_insert_with(|| LiveSessionState::new(session_id.clone()));
+                entry.ui_dialog_state = state;
+                None
+            }
             LiveSessionEvent::SessionDetached { session_id } => {
                 let mut state = self.active_sessions.remove(&session_id)?;
                 if let Some(in_progress) = state.in_progress_assistant.take() {
@@ -858,8 +1039,10 @@ impl LiveSessionStore {
 
                 state.last_update_at = state.latest_message_timestamp();
                 let metadata = state.metadata.clone();
+                let ui_state = state.ui_state.clone();
+                let ui_dialog_state = state.ui_dialog_state.clone();
                 let response = state.as_response(false, false);
-                self.insert_detached(response.clone(), metadata);
+                self.insert_detached(response.clone(), metadata, ui_state, ui_dialog_state);
                 Some(response)
             }
         }
@@ -909,6 +1092,52 @@ impl LiveSessionStore {
         }
 
         snapshots
+    }
+
+    fn all_ui_states(&self) -> HashMap<String, SessionUiState> {
+        let mut ui_states = self
+            .active_sessions
+            .iter()
+            .filter_map(|(session_id, state)| {
+                state
+                    .ui_state
+                    .clone()
+                    .map(|ui_state| (session_id.clone(), ui_state))
+            })
+            .collect::<HashMap<_, _>>();
+
+        for (session_id, state) in &self.recent_detached_sessions {
+            if let Some(ui_state) = &state.ui_state {
+                ui_states
+                    .entry(session_id.clone())
+                    .or_insert_with(|| ui_state.clone());
+            }
+        }
+
+        ui_states
+    }
+
+    fn all_ui_dialog_states(&self) -> HashMap<String, SessionUiDialogState> {
+        let mut ui_dialog_states = self
+            .active_sessions
+            .iter()
+            .filter_map(|(session_id, state)| {
+                state
+                    .ui_dialog_state
+                    .clone()
+                    .map(|ui_dialog_state| (session_id.clone(), ui_dialog_state))
+            })
+            .collect::<HashMap<_, _>>();
+
+        for (session_id, state) in &self.recent_detached_sessions {
+            if let Some(ui_dialog_state) = &state.ui_dialog_state {
+                ui_dialog_states
+                    .entry(session_id.clone())
+                    .or_insert_with(|| ui_dialog_state.clone());
+            }
+        }
+
+        ui_dialog_states
     }
 
     fn upsert_session_metadata(&mut self, session_id: &str, metadata: LiveSessionMetadata) {
@@ -1138,6 +1367,79 @@ impl LiveSessionStore {
         self.inflight_get_commands.remove(request_id);
     }
 
+    fn prepare_ui_dialog_action(
+        &mut self,
+        session_id: &str,
+        dialog_id: &str,
+    ) -> Result<
+        (
+            UnboundedSender<LiveAgentCommand>,
+            String,
+            oneshot::Receiver<Result<(), UiDialogActionError>>,
+        ),
+        UiDialogActionError,
+    > {
+        let Some(connection_id) = self.command_session_connections.get(session_id).copied() else {
+            return Err(UiDialogActionError::Unavailable);
+        };
+        let Some(connection) = self.command_connections.get(&connection_id) else {
+            self.command_session_connections.remove(session_id);
+            return Err(UiDialogActionError::Unavailable);
+        };
+        let Some(state) = self.active_sessions.get(session_id) else {
+            return Err(UiDialogActionError::Unavailable);
+        };
+        if state
+            .ui_dialog_state
+            .as_ref()
+            .map(|state| state.id.as_str())
+            != Some(dialog_id)
+        {
+            return Err(UiDialogActionError::Rejected(format!(
+                "dialog {dialog_id} is not active for session {session_id}"
+            )));
+        }
+
+        let request_id = format!("live-ui-dialog-{}", self.next_send_request_id);
+        self.next_send_request_id += 1;
+
+        let (sender, receiver) = oneshot::channel();
+        self.inflight_ui_dialog_actions.insert(
+            request_id.clone(),
+            InflightUiDialogAction {
+                connection_id,
+                sender,
+            },
+        );
+
+        Ok((connection.sender.clone(), request_id, receiver))
+    }
+
+    fn fulfill_ui_dialog_action(
+        &mut self,
+        connection_id: u64,
+        request_id: &str,
+        error: Option<String>,
+    ) {
+        let Some(inflight) = self.inflight_ui_dialog_actions.remove(request_id) else {
+            return;
+        };
+
+        if inflight.connection_id != connection_id {
+            return;
+        }
+
+        let result = match error {
+            Some(error) => Err(UiDialogActionError::Rejected(error)),
+            None => Ok(()),
+        };
+        let _ = inflight.sender.send(result);
+    }
+
+    fn cancel_ui_dialog_action(&mut self, request_id: &str) {
+        self.inflight_ui_dialog_actions.remove(request_id);
+    }
+
     fn disconnect_command_connection(
         &mut self,
         connection_id: u64,
@@ -1151,6 +1453,10 @@ impl LiveSessionStore {
         self.fail_inflight_get_commands_for_connection(
             connection_id,
             GetCommandsError::Disconnected,
+        );
+        self.fail_inflight_ui_dialog_actions_for_connection(
+            connection_id,
+            UiDialogActionError::Disconnected,
         );
 
         let session_id = connection.current_session_id?;
@@ -1201,10 +1507,32 @@ impl LiveSessionStore {
         }
     }
 
+    fn fail_inflight_ui_dialog_actions_for_connection(
+        &mut self,
+        connection_id: u64,
+        error: UiDialogActionError,
+    ) {
+        let request_ids = self
+            .inflight_ui_dialog_actions
+            .iter()
+            .filter_map(|(request_id, inflight)| {
+                (inflight.connection_id == connection_id).then_some(request_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for request_id in request_ids {
+            if let Some(inflight) = self.inflight_ui_dialog_actions.remove(&request_id) {
+                let _ = inflight.sender.send(Err(error.clone()));
+            }
+        }
+    }
+
     fn insert_detached(
         &mut self,
         response: SessionMessagesResponse,
         metadata: Option<LiveSessionMetadata>,
+        ui_state: Option<SessionUiState>,
+        ui_dialog_state: Option<SessionUiDialogState>,
     ) {
         let session_id = response.session_id.clone();
         self.detached_order
@@ -1216,6 +1544,8 @@ impl LiveSessionStore {
                 response,
                 expires_at: Instant::now() + self.detached_ttl,
                 metadata,
+                ui_state,
+                ui_dialog_state,
             },
         );
         self.enforce_detached_capacity();
@@ -1254,6 +1584,8 @@ struct LiveSessionState {
     in_progress_assistant: Option<Message>,
     last_update_at: chrono::DateTime<chrono::Utc>,
     metadata: Option<LiveSessionMetadata>,
+    ui_state: Option<SessionUiState>,
+    ui_dialog_state: Option<SessionUiDialogState>,
 }
 
 impl LiveSessionState {
@@ -1264,12 +1596,16 @@ impl LiveSessionState {
             in_progress_assistant: None,
             last_update_at: Utc::now(),
             metadata: None,
+            ui_state: None,
+            ui_dialog_state: None,
         }
     }
 
     fn from_response(
         response: SessionMessagesResponse,
         metadata: Option<LiveSessionMetadata>,
+        ui_state: Option<SessionUiState>,
+        ui_dialog_state: Option<SessionUiDialogState>,
     ) -> Self {
         let last_update_at = response
             .messages
@@ -1283,6 +1619,8 @@ impl LiveSessionState {
             in_progress_assistant: None,
             last_update_at,
             metadata,
+            ui_state,
+            ui_dialog_state,
         }
     }
 
@@ -1373,6 +1711,8 @@ struct DetachedSessionState {
     response: SessionMessagesResponse,
     expires_at: Instant,
     metadata: Option<LiveSessionMetadata>,
+    ui_state: Option<SessionUiState>,
+    ui_dialog_state: Option<SessionUiDialogState>,
 }
 
 impl DetachedSessionState {
@@ -1429,6 +1769,11 @@ struct InflightSendUserMessage {
 struct InflightGetCommands {
     connection_id: u64,
     sender: oneshot::Sender<Result<Vec<SessionCommand>, GetCommandsError>>,
+}
+
+struct InflightUiDialogAction {
+    connection_id: u64,
+    sender: oneshot::Sender<Result<(), UiDialogActionError>>,
 }
 
 fn sanitize_message(mut message: Message) -> Message {
@@ -1505,6 +1850,61 @@ mod tests {
                 .await,
             Err(SendUserMessageError::Unavailable)
         );
+    }
+
+    #[tokio::test]
+    async fn ui_dialog_action_dispatches_to_attached_command_connection() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+
+        handle.register_command_connection(1, command_tx).await;
+        handle
+            .apply_event(LiveSessionEvent::SessionAttached {
+                session_id: "session-1".to_string(),
+            })
+            .await;
+        handle
+            .bind_command_connection_to_session(1, "session-1".to_string())
+            .await;
+        handle
+            .apply_event(LiveSessionEvent::UiDialogState {
+                session_id: "session-1".to_string(),
+                state: Some(SessionUiDialogState {
+                    id: "dialog-1".to_string(),
+                    kind: crate::transcript::SessionUiDialogKind::Confirm,
+                    title: "Confirm".to_string(),
+                    message: "Proceed?".to_string(),
+                    options: vec!["Yes".to_string(), "No".to_string()],
+                    selected_index: 0,
+                }),
+            })
+            .await;
+
+        let sender_handle = handle.clone();
+        let action_task = tokio::spawn(async move {
+            sender_handle
+                .send_ui_dialog_action("session-1", "dialog-1", SessionUiDialogAction::Submit)
+                .await
+        });
+
+        let command = command_rx.recv().await.unwrap();
+        let LiveAgentCommand::UiDialogAction {
+            request_id,
+            session_id,
+            dialog_id,
+            action,
+        } = command
+        else {
+            panic!("expected UiDialogAction command");
+        };
+        assert_eq!(request_id, "live-ui-dialog-1");
+        assert_eq!(session_id, "session-1");
+        assert_eq!(dialog_id, "dialog-1");
+        assert_eq!(action, SessionUiDialogAction::Submit);
+
+        handle.fulfill_ui_dialog_action(1, &request_id, None).await;
+
+        assert_eq!(action_task.await.unwrap(), Ok(()));
     }
 
     #[tokio::test]

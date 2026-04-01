@@ -1,9 +1,14 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import {
+	ExtensionSelectorComponent,
+	type ExtensionAPI,
+	type ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
+import { setKeybindings, setKittyProtocolActive } from "@mariozechner/pi-tui";
 import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const LIVE_PROTOCOL_VERSION = 2;
+const LIVE_PROTOCOL_VERSION = 3;
 const PARTIAL_UPDATE_THROTTLE_MS = 150;
 const SOCKET_RECONNECT_DELAY_MS = 500;
 
@@ -48,15 +53,85 @@ interface PimuxSessionMetadata {
 	contextUsage?: PimuxSessionContextUsage;
 }
 
+type PimuxUiWidgetPlacement = "aboveEditor" | "belowEditor";
+
+interface PimuxUiWidget {
+	key: string;
+	lines: string[];
+	placement: PimuxUiWidgetPlacement;
+}
+
+interface PimuxUiState {
+	statuses?: Record<string, string>;
+	widgets?: PimuxUiWidget[];
+	title?: string;
+	editorText?: string;
+	workingMessage?: string;
+	hiddenThinkingLabel?: string;
+}
+
+interface RuntimeUiState {
+	statuses: Map<string, string>;
+	widgets: Map<string, PimuxUiWidget>;
+	title?: string;
+	editorText?: string;
+	workingMessage?: string;
+	hiddenThinkingLabel?: string;
+}
+
+type PimuxUiDialogKind = "confirm" | "select";
+
+type PimuxUiDialogMoveDirection = "up" | "down";
+
+interface PimuxUiDialogState {
+	id: string;
+	kind: PimuxUiDialogKind;
+	title: string;
+	message: string;
+	options: string[];
+	selectedIndex: number;
+}
+
+type PimuxUiDialogAction =
+	| { type: "move"; direction: PimuxUiDialogMoveDirection }
+	| { type: "selectIndex"; index: number }
+	| { type: "submit" }
+	| { type: "cancel" };
+
+interface RuntimeSelectorDialog<Result, Kind extends PimuxUiDialogKind = PimuxUiDialogKind> {
+	sessionId: string;
+	state: PimuxUiDialogState & { kind: Kind };
+	selector?: ExtensionSelectorComponent;
+	done?: (result: Result) => void;
+	finished: boolean;
+	result: Result;
+}
+
+type RuntimeConfirmDialog = RuntimeSelectorDialog<boolean, "confirm">;
+type RuntimeSelectDialog = RuntimeSelectorDialog<string | undefined, "select">;
+type RuntimeUiDialog = RuntimeConfirmDialog | RuntimeSelectDialog;
+type RuntimeUiDialogSelectorState = Pick<RuntimeUiDialog, "sessionId" | "state" | "selector">;
+
+function isConfirmDialog(dialog: RuntimeUiDialog): dialog is RuntimeConfirmDialog {
+	return dialog.state.kind === "confirm";
+}
+
+function isSelectDialog(dialog: RuntimeUiDialog): dialog is RuntimeSelectDialog {
+	return dialog.state.kind === "select";
+}
+
 type BridgeToAgentMessage =
 	| { type: "hello"; protocolVersion: number }
 	| { type: "sessionAttached"; sessionId: string; metadata: PimuxSessionMetadata }
 	| { type: "sessionSnapshot"; sessionId: string; messages: PimuxMessage[]; metadata: PimuxSessionMetadata }
 	| { type: "sessionAppend"; sessionId: string; messages: PimuxMessage[]; metadata: PimuxSessionMetadata }
 	| { type: "assistantPartial"; sessionId: string; message: PimuxMessage }
+	| { type: "uiState"; sessionId: string; state: PimuxUiState }
+	| { type: "uiDialogState"; sessionId: string; state: PimuxUiDialogState | null }
 	| { type: "sessionDetached"; sessionId: string }
 	| { type: "sendUserMessageResult"; requestId: string; sessionId: string; error?: string }
-	| { type: "getCommandsResult"; requestId: string; sessionId: string; commands: PimuxSessionCommand[]; error?: string };
+	| { type: "getCommandsResult"; requestId: string; sessionId: string; commands: PimuxSessionCommand[]; error?: string }
+	| { type: "uiDialogActionResult"; requestId: string; sessionId: string; error?: string };
 
 interface PimuxInputImage {
 	type: "image";
@@ -76,6 +151,13 @@ type AgentToBridgeMessage =
 			type: "getCommands";
 			requestId: string;
 			sessionId: string;
+	  }
+	| {
+			type: "uiDialogAction";
+			requestId: string;
+			sessionId: string;
+			dialogId: string;
+			action: PimuxUiDialogAction;
 	  };
 
 interface PimuxSessionCommand {
@@ -94,6 +176,8 @@ interface BridgeStateSnapshot {
 	latestSnapshotMessages: PimuxMessage[];
 	latestMetadata?: PimuxSessionMetadata;
 	currentAssistantPartial?: PimuxMessage;
+	currentUiState?: PimuxUiState;
+	currentUiDialogState?: PimuxUiDialogState;
 }
 
 class LiveBridgeClient {
@@ -209,6 +293,20 @@ class LiveBridgeClient {
 				message: state.currentAssistantPartial,
 			});
 		}
+		if (state.currentUiState) {
+			this.writeNow({
+				type: "uiState",
+				sessionId: state.currentSessionId,
+				state: state.currentUiState,
+			});
+		}
+		if (state.currentUiDialogState) {
+			this.writeNow({
+				type: "uiDialogState",
+				sessionId: state.currentSessionId,
+				state: state.currentUiDialogState,
+			});
+		}
 	}
 
 	private drainIncomingBuffer() {
@@ -247,17 +345,68 @@ export default function (pi: ExtensionAPI) {
 		latestSnapshotMessages: PimuxMessage[];
 		latestMetadata?: PimuxSessionMetadata;
 		currentAssistantPartial?: PimuxMessage;
+		currentUiState: RuntimeUiState;
+		currentUiDialog?: RuntimeUiDialog;
+		nextDialogId: number;
 		isAgentBusy: boolean;
 	} = {
 		currentSessionId: undefined,
 		latestSnapshotMessages: [],
 		latestMetadata: undefined,
 		currentAssistantPartial: undefined,
+		currentUiState: createEmptyRuntimeUiState(),
+		currentUiDialog: undefined,
+		nextDialogId: 1,
 		isAgentBusy: false,
 	};
 
 	const pendingPartials = new Map<string, PendingPartial>();
 	let bridge!: LiveBridgeClient;
+	let uiPatched = false;
+
+	pi.registerCommand("pimux-debug", {
+		description: "Run pimux live UI debug helpers like test-confirm and test-select",
+		handler: async (args, ctx) => {
+			ensureUiPatched(ctx);
+			await attachCurrentSession(ctx);
+
+			const [subcommand, ...rest] = args
+				.trim()
+				.split(/\s+/)
+				.filter(Boolean);
+
+			switch (subcommand) {
+				case "test-confirm": {
+					const prompt =
+						rest.join(" ") ||
+						"Choose from either the Pi TUI or the iOS app. Does this confirm stay mirrored and resolve correctly?";
+					const confirmed = await ctx.ui.confirm("Pimux Live Confirm Test", prompt);
+					ctx.ui.notify(
+						confirmed ? "pimux confirm test: confirmed" : "pimux confirm test: cancelled",
+						"info"
+					);
+					return;
+				}
+				case "test-select": {
+					const title =
+						rest.join(" ") ||
+						"Pick an option from either the Pi TUI or the iOS app. Does this select stay mirrored and resolve correctly?";
+					const selection = await ctx.ui.select(title, ["Alpha", "Beta", "Gamma"]);
+					ctx.ui.notify(
+						selection ? `pimux select test: ${selection}` : "pimux select test: cancelled",
+						"info"
+					);
+					return;
+				}
+				default:
+					ctx.ui.notify(
+						"Usage: /pimux-debug test-confirm [prompt] or /pimux-debug test-select [title]",
+						"info"
+					);
+					return;
+			}
+		},
+	});
 
 	function bridgeStateSnapshot(): BridgeStateSnapshot {
 		return {
@@ -265,7 +414,390 @@ export default function (pi: ExtensionAPI) {
 			latestSnapshotMessages: state.latestSnapshotMessages,
 			latestMetadata: state.latestMetadata,
 			currentAssistantPartial: state.currentAssistantPartial,
+			currentUiState: serializeUiState(state.currentUiState),
+			currentUiDialogState: state.currentUiDialog?.state,
 		};
+	}
+
+	function sendCurrentUiState(sessionId: string | undefined = state.currentSessionId) {
+		if (!sessionId) return;
+		bridge.send({
+			type: "uiState",
+			sessionId,
+			state: serializeUiState(state.currentUiState),
+		});
+	}
+
+	function clearCurrentUiState(sessionId: string | undefined = state.currentSessionId) {
+		if (sessionId) {
+			bridge.send({ type: "uiState", sessionId, state: {} });
+		}
+		state.currentUiState = createEmptyRuntimeUiState();
+	}
+
+	function sendCurrentUiDialogState(sessionId: string | undefined = state.currentSessionId) {
+		if (!sessionId) return;
+		const dialog = state.currentUiDialog;
+		bridge.send({
+			type: "uiDialogState",
+			sessionId,
+			state: dialog && dialog.sessionId === sessionId ? dialog.state : null,
+		});
+	}
+
+	function clearCurrentUiDialogState(sessionId: string | undefined = state.currentSessionId) {
+		if (sessionId) {
+			bridge.send({ type: "uiDialogState", sessionId, state: null });
+		}
+		if (!sessionId || state.currentUiDialog?.sessionId === sessionId) {
+			state.currentUiDialog = undefined;
+		}
+	}
+
+	function setSelectorDialogSelectedIndex(
+		dialog: RuntimeUiDialogSelectorState,
+		nextIndex: number
+	) {
+		if (dialog.state.options.length === 0) return;
+		const clampedIndex = Math.max(0, Math.min(dialog.state.options.length - 1, nextIndex));
+		if (dialog.state.selectedIndex === clampedIndex) return;
+		dialog.state.selectedIndex = clampedIndex;
+		const selector = dialog.selector as any;
+		if (selector) {
+			selector.selectedIndex = clampedIndex;
+			selector.updateList?.();
+		}
+		sendCurrentUiDialogState(dialog.sessionId);
+	}
+
+	function finishSelectorDialog<Result>(dialog: RuntimeSelectorDialog<Result>, result: Result) {
+		if (dialog.finished) return;
+		dialog.finished = true;
+		dialog.result = result;
+		if (state.currentUiDialog === dialog) {
+			clearCurrentUiDialogState(dialog.sessionId);
+		}
+		const done = dialog.done;
+		dialog.done = undefined;
+		done?.(dialog.result);
+	}
+
+	function finishCurrentConfirmDialog(
+		 dialog: RuntimeConfirmDialog,
+		 result: { confirmed?: boolean; cancelled?: boolean }
+	) {
+		finishSelectorDialog(dialog, result.cancelled ? false : result.confirmed === true);
+	}
+
+	function finishCurrentSelectDialog(
+		 dialog: RuntimeSelectDialog,
+		 result: { selected?: string; cancelled?: boolean }
+	) {
+		finishSelectorDialog(dialog, result.cancelled ? undefined : result.selected);
+	}
+
+	function attachSelectorDialogSelector<Result>(
+		dialog: RuntimeSelectorDialog<Result>,
+		selector: ExtensionSelectorComponent,
+		done: (result: Result) => void
+	) {
+		dialog.selector = selector;
+		dialog.done = done;
+
+		const selectorAny = selector as any;
+		selectorAny.selectedIndex = dialog.state.selectedIndex;
+		selectorAny.updateList?.();
+
+		const originalHandleInput = selector.handleInput.bind(selector);
+		selector.handleInput = ((keyData: string) => {
+			const before =
+				typeof selectorAny.selectedIndex === "number" ? selectorAny.selectedIndex : dialog.state.selectedIndex;
+			originalHandleInput(keyData);
+			const after = typeof selectorAny.selectedIndex === "number" ? selectorAny.selectedIndex : before;
+			if (after !== before) {
+				dialog.state.selectedIndex = after;
+				sendCurrentUiDialogState(dialog.sessionId);
+			}
+		}) as typeof selector.handleInput;
+
+		if (dialog.finished) {
+			const result = dialog.result;
+			dialog.done = undefined;
+			done(result);
+		}
+	}
+
+	function cancelCurrentUiDialog(sessionId: string | undefined = state.currentSessionId) {
+		const dialog = state.currentUiDialog;
+		if (!dialog) {
+			clearCurrentUiDialogState(sessionId);
+			return;
+		}
+		if (!sessionId || dialog.sessionId === sessionId) {
+			if (isConfirmDialog(dialog)) {
+				finishCurrentConfirmDialog(dialog, { cancelled: true });
+			} else if (isSelectDialog(dialog)) {
+				finishCurrentSelectDialog(dialog, { cancelled: true });
+			}
+		}
+	}
+
+	function respondToUiDialogActionRequest(requestId: string, sessionId: string, error?: string) {
+		bridge.send({ type: "uiDialogActionResult", requestId, sessionId, error });
+	}
+
+	function handleUiDialogAction(
+		requestId: string,
+		sessionId: string,
+		dialogId: string,
+		action: PimuxUiDialogAction
+	) {
+		const dialog = state.currentUiDialog;
+		if (!dialog || dialog.sessionId !== sessionId) {
+			respondToUiDialogActionRequest(requestId, sessionId, `no active ui dialog for session ${sessionId}`);
+			return;
+		}
+		if (dialog.state.id !== dialogId) {
+			respondToUiDialogActionRequest(requestId, sessionId, `dialog ${dialogId} is not active for session ${sessionId}`);
+			return;
+		}
+
+		switch (action.type) {
+			case "move":
+				setSelectorDialogSelectedIndex(
+					dialog,
+					dialog.state.selectedIndex + (action.direction === "up" ? -1 : 1)
+				);
+				break;
+			case "selectIndex":
+				setSelectorDialogSelectedIndex(dialog, action.index);
+				break;
+			case "submit":
+				if (isConfirmDialog(dialog)) {
+					finishCurrentConfirmDialog(dialog, {
+						confirmed: dialog.state.selectedIndex === 0,
+						cancelled: false,
+					});
+				} else if (isSelectDialog(dialog)) {
+					finishCurrentSelectDialog(dialog, {
+						selected: dialog.state.options[dialog.state.selectedIndex],
+						cancelled: false,
+					});
+				}
+				break;
+			case "cancel":
+				if (isConfirmDialog(dialog)) {
+					finishCurrentConfirmDialog(dialog, { cancelled: true });
+				} else if (isSelectDialog(dialog)) {
+					finishCurrentSelectDialog(dialog, { cancelled: true });
+				}
+				break;
+		}
+
+		respondToUiDialogActionRequest(requestId, sessionId);
+	}
+
+	function ensureUiPatched(ctx: ExtensionContext) {
+		if (uiPatched) return;
+		uiPatched = true;
+
+		const ui = ctx.ui;
+		const originalSelect = ui.select.bind(ui);
+		const originalConfirm = ui.confirm.bind(ui);
+		const originalSetStatus = ui.setStatus.bind(ui);
+		const originalSetWidget = ui.setWidget.bind(ui) as (key: string, content: unknown, options?: unknown) => void;
+		const originalSetTitle = ui.setTitle.bind(ui);
+		const originalSetEditorText = ui.setEditorText.bind(ui);
+		const originalPasteToEditor = ui.pasteToEditor.bind(ui);
+		const originalSetWorkingMessage = ui.setWorkingMessage.bind(ui);
+		const originalSetHiddenThinkingLabel = ui.setHiddenThinkingLabel.bind(ui);
+
+		ui.select = (async (title: string, options: string[], opts?: { signal?: AbortSignal; timeout?: number }) => {
+			const sessionId = state.currentSessionId;
+			if (!sessionId || state.currentUiDialog || options.length === 0) {
+				return originalSelect(title, options, opts);
+			}
+			if (opts?.signal?.aborted) {
+				return undefined;
+			}
+
+			const dialog: RuntimeSelectDialog = {
+				sessionId,
+				state: {
+					id: `select-${state.nextDialogId++}`,
+					kind: "select",
+					title,
+					message: "",
+					options: [...options],
+					selectedIndex: 0,
+				},
+				selector: undefined,
+				done: undefined,
+				finished: false,
+				result: undefined,
+			};
+			state.currentUiDialog = dialog;
+			sendCurrentUiDialogState(sessionId);
+
+			const onAbort = () => {
+				finishCurrentSelectDialog(dialog, { cancelled: true });
+			};
+			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+			try {
+				return await ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+					setKeybindings(keybindings);
+					setKittyProtocolActive(tui.terminal.kittyProtocolActive);
+
+					const selector = new ExtensionSelectorComponent(
+						title,
+						dialog.state.options,
+						(option) => {
+							const selectedIndex = dialog.state.options.indexOf(option);
+							if (selectedIndex !== -1) {
+								setSelectorDialogSelectedIndex(dialog, selectedIndex);
+							}
+							finishCurrentSelectDialog(dialog, {
+								selected: option,
+								cancelled: false,
+							});
+						},
+						() => {
+							finishCurrentSelectDialog(dialog, { cancelled: true });
+						},
+						{ tui, timeout: opts?.timeout }
+					);
+					attachSelectorDialogSelector(dialog, selector, done);
+					return selector;
+				});
+			} finally {
+				opts?.signal?.removeEventListener("abort", onAbort);
+				if (state.currentUiDialog === dialog && !dialog.finished) {
+					clearCurrentUiDialogState(dialog.sessionId);
+				}
+			}
+		}) as typeof ui.select;
+
+		ui.confirm = (async (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
+			const sessionId = state.currentSessionId;
+			if (!sessionId || state.currentUiDialog) {
+				return originalConfirm(title, message, opts);
+			}
+			if (opts?.signal?.aborted) {
+				return false;
+			}
+
+			const dialog: RuntimeConfirmDialog = {
+				sessionId,
+				state: {
+					id: `confirm-${state.nextDialogId++}`,
+					kind: "confirm",
+					title,
+					message,
+					options: ["Yes", "No"],
+					selectedIndex: 0,
+				},
+				selector: undefined,
+				done: undefined,
+				finished: false,
+				result: false,
+			};
+			state.currentUiDialog = dialog;
+			sendCurrentUiDialogState(sessionId);
+
+			const onAbort = () => {
+				finishCurrentConfirmDialog(dialog, { cancelled: true });
+			};
+			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+			try {
+				return await ui.custom<boolean>((tui, _theme, keybindings, done) => {
+					setKeybindings(keybindings);
+					setKittyProtocolActive(tui.terminal.kittyProtocolActive);
+
+					const selector = new ExtensionSelectorComponent(
+						`${title}\n${message}`,
+						dialog.state.options,
+						(option) => {
+							setSelectorDialogSelectedIndex(dialog, option === "Yes" ? 0 : 1);
+							finishCurrentConfirmDialog(dialog, {
+								confirmed: option === "Yes",
+								cancelled: false,
+							});
+						},
+						() => {
+							finishCurrentConfirmDialog(dialog, { cancelled: true });
+						},
+						{ tui, timeout: opts?.timeout }
+					);
+					attachSelectorDialogSelector(dialog, selector, done);
+					return selector;
+				});
+			} finally {
+				opts?.signal?.removeEventListener("abort", onAbort);
+				if (state.currentUiDialog === dialog && !dialog.finished) {
+					clearCurrentUiDialogState(dialog.sessionId);
+				}
+			}
+		}) as typeof ui.confirm;
+
+		ui.setStatus = ((key: string, text: string | undefined) => {
+			originalSetStatus(key, text);
+			if (text === undefined) {
+				state.currentUiState.statuses.delete(key);
+			} else {
+				state.currentUiState.statuses.set(key, text);
+			}
+			sendCurrentUiState();
+		}) as typeof ui.setStatus;
+
+		ui.setWidget = ((key: string, content: string[] | undefined, options?: { placement?: PimuxUiWidgetPlacement }) => {
+			originalSetWidget(key, content, options);
+			if (content === undefined) {
+				state.currentUiState.widgets.delete(key);
+				sendCurrentUiState();
+				return;
+			}
+			if (!Array.isArray(content)) {
+				return;
+			}
+			state.currentUiState.widgets.set(key, {
+				key,
+				lines: [...content],
+				placement: options?.placement ?? "aboveEditor",
+			});
+			sendCurrentUiState();
+		}) as typeof ui.setWidget;
+
+		ui.setTitle = ((title: string) => {
+			originalSetTitle(title);
+			state.currentUiState.title = title;
+			sendCurrentUiState();
+		}) as typeof ui.setTitle;
+
+		ui.setEditorText = ((text: string) => {
+			originalSetEditorText(text);
+			state.currentUiState.editorText = text;
+			sendCurrentUiState();
+		}) as typeof ui.setEditorText;
+
+		ui.pasteToEditor = ((text: string) => {
+			originalPasteToEditor(text);
+			state.currentUiState.editorText = ui.getEditorText();
+			sendCurrentUiState();
+		}) as typeof ui.pasteToEditor;
+
+		ui.setWorkingMessage = ((message?: string) => {
+			originalSetWorkingMessage(message);
+			state.currentUiState.workingMessage = message;
+			sendCurrentUiState();
+		}) as typeof ui.setWorkingMessage;
+
+		ui.setHiddenThinkingLabel = ((label?: string) => {
+			originalSetHiddenThinkingLabel(label);
+			state.currentUiState.hiddenThinkingLabel = label;
+			sendCurrentUiState();
+		}) as typeof ui.setHiddenThinkingLabel;
 	}
 
 	function respondToSendRequest(requestId: string, sessionId: string, error?: string) {
@@ -312,6 +844,11 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		if (command.type === "uiDialogAction") {
+			handleUiDialogAction(command.requestId, command.sessionId, command.dialogId, command.action);
+			return;
+		}
+
 		if (command.type !== "sendUserMessage") return;
 
 		if (!state.currentSessionId || command.sessionId !== state.currentSessionId) {
@@ -343,14 +880,17 @@ export default function (pi: ExtensionAPI) {
 	bridge = new LiveBridgeClient(resolveSocketPath(), handleBridgeCommand, bridgeStateSnapshot);
 
 	pi.on("session_start", async (_event, ctx) => {
+		ensureUiPatched(ctx);
 		await attachCurrentSession(ctx);
 	});
 
 	pi.on("session_switch", async (_event, ctx) => {
+		ensureUiPatched(ctx);
 		await attachCurrentSession(ctx);
 	});
 
 	pi.on("session_fork", async (_event, ctx) => {
+		ensureUiPatched(ctx);
 		await attachCurrentSession(ctx);
 	});
 
@@ -415,6 +955,8 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (state.currentSessionId) {
+			cancelCurrentUiDialog(state.currentSessionId);
+			clearCurrentUiState(state.currentSessionId);
 			bridge.send({ type: "sessionDetached", sessionId: state.currentSessionId });
 			state.currentSessionId = undefined;
 			state.latestSnapshotMessages = [];
@@ -459,10 +1001,13 @@ export default function (pi: ExtensionAPI) {
 
 		if (state.currentSessionId && state.currentSessionId !== nextSessionId) {
 			cancelPendingPartial(state.currentSessionId);
+			cancelCurrentUiDialog(state.currentSessionId);
+			clearCurrentUiState(state.currentSessionId);
 			bridge.send({ type: "sessionDetached", sessionId: state.currentSessionId });
 		}
 
 		state.currentSessionId = nextSessionId;
+		state.currentUiState = createEmptyRuntimeUiState();
 		state.latestSnapshotMessages = buildSnapshotMessages(ctx);
 		state.latestMetadata = buildSessionMetadata(ctx, state.latestSnapshotMessages);
 		state.currentAssistantPartial = undefined;
@@ -477,6 +1022,8 @@ export default function (pi: ExtensionAPI) {
 			messages: state.latestSnapshotMessages,
 			metadata: state.latestMetadata,
 		});
+		sendCurrentUiState(nextSessionId);
+		sendCurrentUiDialogState(nextSessionId);
 	}
 
 	function publishSnapshot(ctx: ExtensionContext) {
@@ -890,6 +1437,34 @@ function truncateChars(value: string, maxChars: number): string {
 	const chars = Array.from(value);
 	if (chars.length <= maxChars) return value;
 	return `${chars.slice(0, maxChars).join("")}…`;
+}
+
+function createEmptyRuntimeUiState(): RuntimeUiState {
+	return {
+		statuses: new Map(),
+		widgets: new Map(),
+		title: undefined,
+		editorText: undefined,
+		workingMessage: undefined,
+		hiddenThinkingLabel: undefined,
+	};
+}
+
+function serializeUiState(state: RuntimeUiState): PimuxUiState {
+	const serialized: PimuxUiState = {};
+	if (state.statuses.size > 0) {
+		serialized.statuses = Object.fromEntries(state.statuses.entries());
+	}
+	if (state.widgets.size > 0) {
+		serialized.widgets = Array.from(state.widgets.values()).sort((left, right) => left.key.localeCompare(right.key));
+	}
+	if (state.title !== undefined) serialized.title = state.title;
+	if (state.editorText !== undefined) serialized.editorText = state.editorText;
+	if (state.workingMessage !== undefined) serialized.workingMessage = state.workingMessage;
+	if (state.hiddenThinkingLabel !== undefined) {
+		serialized.hiddenThinkingLabel = state.hiddenThinkingLabel;
+	}
+	return serialized;
 }
 
 function resolveSocketPath(): string {

@@ -60,28 +60,28 @@ struct SidebarView: View {
 			let syncer = PiSessionSync(dbContext: dbContext)
 			await syncer.sync()
 		}
-//		.toolbar {
-//			ToolbarItem(placement: .primaryAction) {
-//				Button {
-//					isShowingServerSheet = true
-//				} label: {
-//					Label(serverConfiguration == nil ? "Connect Server" : "Server", systemImage: "server.rack")
-//				}
-//			}
-//			#if os(iOS)
-//			ToolbarItem(placement: .bottomBar) {
-//				Button { isShowingSettings = true } label: {
-//					Label("Settings", systemImage: "gearshape")
-//				}
-//			}
-//			#else
-//			ToolbarItem {
-//				Button { isShowingSettings = true } label: {
-//					Label("Settings", systemImage: "gearshape")
-//				}
-//			}
-//			#endif
-//		}
+		.toolbar {
+			ToolbarItem(placement: .primaryAction) {
+				Button {
+					isShowingServerSheet = true
+				} label: {
+					Label(serverConfiguration == nil ? "Connect Server" : "Server", systemImage: "server.rack")
+				}
+			}
+			#if os(iOS)
+			ToolbarItem(placement: .bottomBar) {
+				Button { isShowingSettings = true } label: {
+					Label("Settings", systemImage: "gearshape")
+				}
+			}
+			#else
+			ToolbarItem {
+				Button { isShowingSettings = true } label: {
+					Label("Settings", systemImage: "gearshape")
+				}
+			}
+			#endif
+		}
 		.sheet(isPresented: $isShowingServerSheet) {
 			ServerConnectionSheet(initialServerURL: serverConfiguration?.serverURL ?? "")
 		}

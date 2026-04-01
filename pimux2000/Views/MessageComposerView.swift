@@ -75,7 +75,7 @@ struct MessageComposerView: View {
 					ComposerAttachmentStrip(attachments: attachments, onRemove: onRemoveAttachment)
 				}
 
-				HStack(alignment: .bottom, spacing: 8) {
+				HStack(alignment: .center, spacing: 8) {
 					Menu {
 						Button { showPhotoPicker = true } label: {
 							Label("Photo Library", systemImage: "photo.on.rectangle")
@@ -101,19 +101,20 @@ struct MessageComposerView: View {
 
 					TextField(placeholder, text: $text, axis: .vertical)
 						.lineLimit(1 ... 6)
+						.autocorrectionDisabled()
 						#if os(iOS)
-						.textInputAutocapitalization(.sentences)
+						.textInputAutocapitalization(.never)
 						#endif
 						.padding(.horizontal, 12)
 						.padding(.vertical, 10)
 						.background(.background, in: RoundedRectangle(cornerRadius: 12))
 						.disabled(!isEnabled || isSending)
+						.onSubmit(onSend)
 
 					if isAgentActive && !isSending {
 						Button(action: onStop) {
 							Image(systemName: "stop.circle.fill")
 								.font(.system(size: 28))
-								.foregroundStyle(.red)
 						}
 						.buttonStyle(.plain)
 						.keyboardShortcut(.escape, modifiers: [])

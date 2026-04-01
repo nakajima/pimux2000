@@ -38,17 +38,18 @@ struct AssistantMessageView: View {
 			}
 
 		case "toolCall":
-			VStack(alignment: .leading, spacing: 8) {
-				Label {
+			VStack(alignment: .leading, spacing: 0) {
+				HStack {
 					Text(verbatim: block.toolCallName ?? "unknown tool")
-				} icon: {
+						.font(.caption)
+						.fontDesign(.monospaced)
+					Spacer()
 					Image(systemName: "terminal.fill")
 				}
-				.font(chatFont(style: .callout))
 				.foregroundStyle(.teal)
 				.padding(.vertical, 4)
 				.padding(.horizontal, 8)
-				.background(.teal.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+				.background(.teal.opacity(0.1))
 
 				if let text = block.text, !text.isEmpty {
 					ToolCallDetailsView(text: text)
@@ -140,6 +141,7 @@ struct ThinkingBlockView: View {
 						Color.black
 					}
 				}
+				.environment(\.markdownTextStyle, .caption)
 
 			if needsTruncation {
 				NavigationLink(value: Route.messageContext(route)) {
@@ -150,9 +152,9 @@ struct ThinkingBlockView: View {
 				.buttonStyle(.plain)
 			}
 		}
-		.padding(.vertical, 8)
+		.padding(.bottom, 8)
 		.padding(.horizontal, 10)
-		.background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+		.background(.secondary.opacity(0.08))
 	}
 }
 
@@ -163,12 +165,13 @@ struct ToolCallDetailsView: View {
 
 	var body: some View {
 		Text(verbatim: text)
+			.frame(maxWidth: .infinity, alignment: .leading)
 			.font(.system(.caption, design: .monospaced))
 			.foregroundStyle(.secondary)
 			.textSelection(.enabled)
 			.padding(.vertical, 8)
 			.padding(.horizontal, 10)
-			.background(.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+			.background(.teal.opacity(0.08))
 	}
 }
 

@@ -346,10 +346,32 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
             live_update = live_updates_rx.recv() => {
                 if let Some(live_update) = live_update {
                     if connected {
-                        let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
-                            session: session_for_transport(live_update.snapshot),
-                            active_session: live_update.active_session,
-                        });
+                        match live_update {
+                            live::LiveUpdate::Transcript {
+                                snapshot,
+                                active_session,
+                            } => {
+                                let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
+                                    session: session_for_transport(snapshot),
+                                    active_session,
+                                });
+                            }
+                            live::LiveUpdate::UiState { session_id, ui_state } => {
+                                let _ = channel_tx.send(AgentToServerMessage::LiveUiUpdate {
+                                    session_id,
+                                    ui_state,
+                                });
+                            }
+                            live::LiveUpdate::UiDialogState {
+                                session_id,
+                                ui_dialog_state,
+                            } => {
+                                let _ = channel_tx.send(AgentToServerMessage::LiveUiDialogUpdate {
+                                    session_id,
+                                    ui_dialog_state,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -409,6 +431,20 @@ async fn send_current_state(
         let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
             session: session_for_transport(snapshot),
             active_session,
+        });
+    }
+
+    for (session_id, ui_state) in live_store.all_ui_states().await {
+        let _ = channel_tx.send(AgentToServerMessage::LiveUiUpdate {
+            session_id,
+            ui_state,
+        });
+    }
+
+    for (session_id, ui_dialog_state) in live_store.all_ui_dialog_states().await {
+        let _ = channel_tx.send(AgentToServerMessage::LiveUiDialogUpdate {
+            session_id,
+            ui_dialog_state: Some(ui_dialog_state),
         });
     }
 
@@ -572,6 +608,20 @@ async fn handle_server_message(
                 commands,
                 error,
             });
+        }
+        ServerToAgentMessage::UiDialogAction {
+            request_id,
+            session_id,
+            dialog_id,
+            action,
+        } => {
+            let error = live_store
+                .send_ui_dialog_action(&session_id, &dialog_id, action)
+                .await
+                .err()
+                .map(|error| error.to_string());
+            let _ =
+                channel_tx.send(AgentToServerMessage::UiDialogActionResult { request_id, error });
         }
         ServerToAgentMessage::Ping => {
             let _ = channel_tx.send(AgentToServerMessage::Pong);

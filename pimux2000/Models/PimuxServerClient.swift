@@ -175,6 +175,101 @@ struct PimuxSessionCommandsResponse: Decodable, Sendable {
 	let commands: [PimuxSessionCommand]
 }
 
+struct PimuxSessionUIState: Decodable, Equatable, Sendable {
+	let statuses: [String: String]
+	let widgets: [PimuxSessionUIWidget]
+	let title: String?
+	let editorText: String?
+	let workingMessage: String?
+	let hiddenThinkingLabel: String?
+
+	private enum CodingKeys: String, CodingKey {
+		case statuses
+		case widgets
+		case title
+		case editorText
+		case workingMessage
+		case hiddenThinkingLabel
+	}
+
+	init(
+		statuses: [String: String] = [:],
+		widgets: [PimuxSessionUIWidget] = [],
+		title: String? = nil,
+		editorText: String? = nil,
+		workingMessage: String? = nil,
+		hiddenThinkingLabel: String? = nil
+	) {
+		self.statuses = statuses
+		self.widgets = widgets
+		self.title = title
+		self.editorText = editorText
+		self.workingMessage = workingMessage
+		self.hiddenThinkingLabel = hiddenThinkingLabel
+	}
+
+	init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: CodingKeys.self)
+		self.statuses = try container.decodeIfPresent([String: String].self, forKey: .statuses) ?? [:]
+		self.widgets = try container.decodeIfPresent([PimuxSessionUIWidget].self, forKey: .widgets) ?? []
+		self.title = try container.decodeIfPresent(String.self, forKey: .title)
+		self.editorText = try container.decodeIfPresent(String.self, forKey: .editorText)
+		self.workingMessage = try container.decodeIfPresent(String.self, forKey: .workingMessage)
+		self.hiddenThinkingLabel = try container.decodeIfPresent(String.self, forKey: .hiddenThinkingLabel)
+	}
+}
+
+struct PimuxSessionUIWidget: Decodable, Equatable, Sendable, Identifiable {
+	let key: String
+	let lines: [String]
+	let placement: String
+
+	var id: String { key }
+}
+
+struct PimuxSessionUIDialogState: Decodable, Equatable, Sendable, Identifiable {
+	let id: String
+	let kind: String
+	let title: String
+	let message: String
+	let options: [String]
+	let selectedIndex: Int
+}
+
+enum PimuxSessionUIDialogAction: Encodable, Equatable, Sendable {
+	case move(direction: String)
+	case selectIndex(index: Int)
+	case submit
+	case cancel
+
+	private enum CodingKeys: String, CodingKey {
+		case type
+		case direction
+		case index
+	}
+
+	func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		switch self {
+		case .move(let direction):
+			try container.encode("move", forKey: .type)
+			try container.encode(direction, forKey: .direction)
+		case .selectIndex(let index):
+			try container.encode("selectIndex", forKey: .type)
+			try container.encode(index, forKey: .index)
+		case .submit:
+			try container.encode("submit", forKey: .type)
+		case .cancel:
+			try container.encode("cancel", forKey: .type)
+		}
+	}
+}
+
+private struct PimuxSessionUIDialogActionRequest: Encodable {
+	let dialogId: String
+	let action: PimuxSessionUIDialogAction
+}
+
 struct PimuxTranscriptFreshness: Decodable, Equatable, Sendable {
 	let state: String
 	let source: String
@@ -189,6 +284,8 @@ struct PimuxSessionActivity: Decodable, Equatable, Sendable {
 enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 	case snapshot(sequence: UInt64, session: PimuxSessionMessagesResponse)
 	case sessionState(sequence: UInt64, connected: Bool, missing: Bool, lastSeenAt: Date?)
+	case uiState(sequence: UInt64, state: PimuxSessionUIState)
+	case uiDialogState(sequence: UInt64, state: PimuxSessionUIDialogState?)
 	case keepalive(sequence: UInt64, timestamp: Date)
 
 	private enum CodingKeys: String, CodingKey {
@@ -198,6 +295,7 @@ enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 		case connected
 		case missing
 		case lastSeenAt = "last_seen_at"
+		case state
 		case timestamp
 	}
 
@@ -218,6 +316,16 @@ enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 				connected: try container.decode(Bool.self, forKey: .connected),
 				missing: try container.decode(Bool.self, forKey: .missing),
 				lastSeenAt: try container.decodeIfPresent(Date.self, forKey: .lastSeenAt)
+			)
+		case "uiState":
+			self = .uiState(
+				sequence: sequence,
+				state: try container.decode(PimuxSessionUIState.self, forKey: .state)
+			)
+		case "uiDialogState":
+			self = .uiDialogState(
+				sequence: sequence,
+				state: try container.decodeIfPresent(PimuxSessionUIDialogState.self, forKey: .state)
 			)
 		case "keepalive":
 			self = .keepalive(
@@ -366,6 +474,29 @@ struct PimuxServerClient {
 
 		_ = try await performRequest(
 			path: "/sessions/\(sessionID)/messages",
+			queryItems: [],
+			method: "POST",
+			bodyData: requestData,
+			contentType: "application/json"
+		)
+	}
+
+	func sendUIDialogAction(
+		sessionID: String,
+		dialogID: String,
+		action: PimuxSessionUIDialogAction
+	) async throws {
+		let requestData: Data
+		do {
+			requestData = try JSONEncoder().encode(
+				PimuxSessionUIDialogActionRequest(dialogId: dialogID, action: action)
+			)
+		} catch {
+			throw PimuxServerError.invalidResponse("Couldn't encode the UI dialog action request.")
+		}
+
+		_ = try await performRequest(
+			path: "/sessions/\(sessionID)/ui-dialog-action",
 			queryItems: [],
 			method: "POST",
 			bodyData: requestData,

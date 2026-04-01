@@ -18,7 +18,7 @@ use axum::{
     },
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
@@ -40,6 +40,7 @@ use crate::{
     session::{ActiveSession, ListedSession, SessionCommand},
     transcript::{
         ApiSessionMessagesResponse, SessionMessagesResponse, SessionStreamEvent,
+        SessionUiDialogActionRequest, SessionUiDialogState, SessionUiState,
         TranscriptFreshnessState, TranscriptSource,
     },
 };
@@ -93,11 +94,14 @@ pub struct UninstallResult {
 struct AppState {
     hosts: Arc<RwLock<HashMap<String, HostRecord>>>,
     transcripts: Arc<RwLock<HashMap<String, CachedTranscript>>>,
+    ui_states: Arc<RwLock<HashMap<String, SessionUiState>>>,
+    ui_dialog_states: Arc<RwLock<HashMap<String, SessionUiDialogState>>>,
     agent_connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
     inflight_fetches: Arc<Mutex<HashMap<String, InflightFetch>>>,
     inflight_attachment_fetches: Arc<Mutex<HashMap<String, InflightAttachmentFetch>>>,
     inflight_send_messages: Arc<Mutex<HashMap<String, InflightSendMessage>>>,
     inflight_get_commands: Arc<Mutex<HashMap<String, InflightGetCommands>>>,
+    inflight_ui_dialog_actions: Arc<Mutex<HashMap<String, InflightUiDialogAction>>>,
     session_subscribers:
         Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<SessionSubscriptionEvent>>>>>,
     next_request_id: Arc<AtomicU64>,
@@ -110,11 +114,14 @@ impl AppState {
         Self {
             hosts: Arc::new(RwLock::new(hosts)),
             transcripts: Arc::new(RwLock::new(HashMap::new())),
+            ui_states: Arc::new(RwLock::new(HashMap::new())),
+            ui_dialog_states: Arc::new(RwLock::new(HashMap::new())),
             agent_connections: Arc::new(RwLock::new(HashMap::new())),
             inflight_fetches: Arc::new(Mutex::new(HashMap::new())),
             inflight_attachment_fetches: Arc::new(Mutex::new(HashMap::new())),
             inflight_send_messages: Arc::new(Mutex::new(HashMap::new())),
             inflight_get_commands: Arc::new(Mutex::new(HashMap::new())),
+            inflight_ui_dialog_actions: Arc::new(Mutex::new(HashMap::new())),
             session_subscribers: Arc::new(Mutex::new(HashMap::new())),
             next_request_id: Arc::new(AtomicU64::new(1)),
             next_connection_id: Arc::new(AtomicU64::new(1)),
@@ -198,6 +205,11 @@ struct InflightGetCommands {
     sender: oneshot::Sender<GetCommandsResult>,
 }
 
+struct InflightUiDialogAction {
+    host_location: String,
+    sender: oneshot::Sender<Result<(), String>>,
+}
+
 #[derive(Debug, Clone)]
 enum SessionSubscriptionEvent {
     Snapshot(SessionMessagesResponse),
@@ -206,6 +218,8 @@ enum SessionSubscriptionEvent {
         missing: bool,
         last_seen_at: Option<DateTime<Utc>>,
     },
+    UiState(SessionUiState),
+    UiDialogState(Option<SessionUiDialogState>),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -289,6 +303,10 @@ fn app(state: AppState) -> Router {
         )
         .route("/sessions/{id}/stream", get(session_stream))
         .route("/sessions/{id}/commands", get(session_commands))
+        .route(
+            "/sessions/{id}/ui-dialog-action",
+            post(session_ui_dialog_action),
+        )
         .route("/agent/connect", get(agent_connect))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .with_state(state)
@@ -532,6 +550,59 @@ async fn session_commands(
     }
 }
 
+async fn session_ui_dialog_action(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SessionUiDialogActionRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let Some(host_location) = host_for_session(&state, &session_id).await else {
+        return Err(not_found(format!(
+            "session {session_id} is not known to the server"
+        )));
+    };
+
+    let request_id = next_request_id(&state, "ui-dialog");
+    let (sender, receiver) = oneshot::channel();
+    {
+        let mut inflight = state.inflight_ui_dialog_actions.lock().await;
+        inflight.insert(
+            request_id.clone(),
+            InflightUiDialogAction {
+                host_location: host_location.clone(),
+                sender,
+            },
+        );
+    }
+
+    send_to_agent(
+        &state,
+        &host_location,
+        ServerToAgentMessage::UiDialogAction {
+            request_id: request_id.clone(),
+            session_id: session_id.clone(),
+            dialog_id: request.dialog_id,
+            action: request.action,
+        },
+    )
+    .await?;
+
+    match tokio::time::timeout(GET_COMMANDS_TIMEOUT, receiver).await {
+        Ok(Ok(Ok(()))) => Ok(StatusCode::NO_CONTENT),
+        Ok(Ok(Err(error))) => Err((StatusCode::CONFLICT, Json(ErrorResponse { error }))),
+        Ok(Err(_)) => Err(bad_gateway(format!(
+            "host {} disconnected before confirming ui dialog action for session {}",
+            host_location, session_id
+        ))),
+        Err(_) => {
+            cancel_ui_dialog_action(&state, &request_id).await;
+            Err(gateway_timeout(format!(
+                "timed out waiting for host {} to confirm ui dialog action for session {}",
+                host_location, session_id
+            )))
+        }
+    }
+}
+
 async fn session_attachment(
     State(state): State<AppState>,
     Path((session_id, attachment_id)): Path<(String, String)>,
@@ -567,6 +638,8 @@ async fn session_stream(
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let snapshot = resolve_session_snapshot(&state, &session_id).await?;
     let initial_state = current_session_subscription_state(&state, &session_id).await;
+    let initial_ui_state = cached_ui_state(&state, &session_id).await;
+    let initial_ui_dialog_state = cached_ui_dialog_state(&state, &session_id).await;
 
     let (subscription_tx, mut subscription_rx) = mpsc::unbounded_channel();
     subscribe_session(&state, &session_id, subscription_tx).await;
@@ -603,8 +676,44 @@ async fn session_stream(
                     missing,
                     last_seen_at,
                 },
+                SessionSubscriptionEvent::UiState(state) => {
+                    SessionStreamEvent::UiState { sequence, state }
+                }
+                SessionSubscriptionEvent::UiDialogState(state) => {
+                    SessionStreamEvent::UiDialogState { sequence, state }
+                }
             };
             if send_stream_event(&body_tx, stream_event).is_err() {
+                return;
+            }
+            sequence += 1;
+        }
+
+        if let Some(ui_state) = initial_ui_state {
+            if send_stream_event(
+                &body_tx,
+                SessionStreamEvent::UiState {
+                    sequence,
+                    state: ui_state,
+                },
+            )
+            .is_err()
+            {
+                return;
+            }
+            sequence += 1;
+        }
+
+        if let Some(state) = initial_ui_dialog_state {
+            if send_stream_event(
+                &body_tx,
+                SessionStreamEvent::UiDialogState {
+                    sequence,
+                    state: Some(state),
+                },
+            )
+            .is_err()
+            {
                 return;
             }
             sequence += 1;
@@ -631,6 +740,14 @@ async fn session_stream(
                             connected,
                             missing,
                             last_seen_at,
+                        },
+                        SessionSubscriptionEvent::UiState(state) => SessionStreamEvent::UiState {
+                            sequence,
+                            state,
+                        },
+                        SessionSubscriptionEvent::UiDialogState(state) => SessionStreamEvent::UiDialogState {
+                            sequence,
+                            state,
                         },
                     };
                     if send_stream_event(&body_tx, stream_event).is_err() {
@@ -885,6 +1002,43 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             broadcast_session_snapshot(&state, session).await;
                         }
                     }
+                    AgentToServerMessage::LiveUiUpdate {
+                        session_id,
+                        ui_state,
+                    } => {
+                        let Some(_host) = current_host.as_ref() else {
+                            eprintln!("received live ui update before hello");
+                            continue;
+                        };
+                        let changed = {
+                            let mut ui_states = state.ui_states.write().await;
+                            upsert_cached_ui_state(&mut ui_states, session_id.clone(), ui_state)
+                        };
+                        if let Some(ui_state) = changed {
+                            broadcast_session_ui_state(&state, &session_id, ui_state).await;
+                        }
+                    }
+                    AgentToServerMessage::LiveUiDialogUpdate {
+                        session_id,
+                        ui_dialog_state,
+                    } => {
+                        let Some(_host) = current_host.as_ref() else {
+                            eprintln!("received live ui dialog update before hello");
+                            continue;
+                        };
+                        let changed = {
+                            let mut ui_dialog_states = state.ui_dialog_states.write().await;
+                            upsert_cached_ui_dialog_state(
+                                &mut ui_dialog_states,
+                                session_id.clone(),
+                                ui_dialog_state,
+                            )
+                        };
+                        if let Some(state_update) = changed {
+                            broadcast_session_ui_dialog_state(&state, &session_id, state_update)
+                                .await;
+                        }
+                    }
                     AgentToServerMessage::FetchTranscriptResult {
                         request_id,
                         session,
@@ -941,6 +1095,14 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             error,
                         )
                         .await;
+                    }
+                    AgentToServerMessage::UiDialogActionResult { request_id, error } => {
+                        let Some(host) = current_host.as_ref() else {
+                            eprintln!("received ui dialog action result before hello");
+                            continue;
+                        };
+                        fulfill_ui_dialog_action_result(&state, &host.location, &request_id, error)
+                            .await;
                     }
                     AgentToServerMessage::Ping => {
                         let _ = sender.send(ServerToAgentMessage::Pong);
@@ -1095,9 +1257,35 @@ async fn disconnect_agent(state: &AppState, host_location: &str, connection_id: 
         }
     };
 
+    let cleared_ui_session_ids = {
+        let mut ui_states = state.ui_states.write().await;
+        session_ids
+            .iter()
+            .filter_map(|session_id| ui_states.remove(session_id).map(|_| session_id.clone()))
+            .collect::<Vec<_>>()
+    };
+
+    let cleared_ui_dialog_session_ids = {
+        let mut ui_dialog_states = state.ui_dialog_states.write().await;
+        session_ids
+            .iter()
+            .filter_map(|session_id| {
+                ui_dialog_states
+                    .remove(session_id)
+                    .map(|_| session_id.clone())
+            })
+            .collect::<Vec<_>>()
+    };
+
     persist_hosts(state).await;
-    for session_id in session_ids {
-        broadcast_session_state(state, &session_id, false, true, last_seen_at.clone()).await;
+    for session_id in &session_ids {
+        broadcast_session_state(state, session_id, false, true, last_seen_at.clone()).await;
+    }
+    for session_id in cleared_ui_session_ids {
+        broadcast_session_ui_state(state, &session_id, SessionUiState::default()).await;
+    }
+    for session_id in cleared_ui_dialog_session_ids {
+        broadcast_session_ui_dialog_state(state, &session_id, None).await;
     }
     fail_inflight_for_host(state, host_location).await;
 }
@@ -1297,6 +1485,28 @@ async fn broadcast_session_state(
     .await;
 }
 
+async fn broadcast_session_ui_state(state: &AppState, session_id: &str, ui_state: SessionUiState) {
+    broadcast_session_event(
+        state,
+        session_id,
+        SessionSubscriptionEvent::UiState(ui_state),
+    )
+    .await;
+}
+
+async fn broadcast_session_ui_dialog_state(
+    state: &AppState,
+    session_id: &str,
+    ui_dialog_state: Option<SessionUiDialogState>,
+) {
+    broadcast_session_event(
+        state,
+        session_id,
+        SessionSubscriptionEvent::UiDialogState(ui_dialog_state),
+    )
+    .await;
+}
+
 async fn broadcast_session_event(
     state: &AppState,
     session_id: &str,
@@ -1421,6 +1631,26 @@ async fn fulfill_get_commands_result(
     }
 }
 
+async fn fulfill_ui_dialog_action_result(
+    state: &AppState,
+    _host_location: &str,
+    request_id: &str,
+    error: Option<String>,
+) {
+    let sender = {
+        let mut inflight = state.inflight_ui_dialog_actions.lock().await;
+        inflight.remove(request_id)
+    };
+
+    if let Some(inflight) = sender {
+        let result = match error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        };
+        let _ = inflight.sender.send(result);
+    }
+}
+
 async fn fail_inflight_for_host(state: &AppState, host_location: &str) {
     let fetch_senders = {
         let mut inflight_fetches = state.inflight_fetches.lock().await;
@@ -1501,6 +1731,26 @@ async fn fail_inflight_for_host(state: &AppState, host_location: &str) {
             host_location
         )));
     }
+
+    let ui_dialog_action_senders = {
+        let mut inflight = state.inflight_ui_dialog_actions.lock().await;
+        let request_ids = inflight
+            .iter()
+            .filter(|(_, inflight)| inflight.host_location == host_location)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        request_ids
+            .into_iter()
+            .filter_map(|request_id| inflight.remove(&request_id))
+            .collect::<Vec<_>>()
+    };
+
+    for inflight in ui_dialog_action_senders {
+        let _ = inflight.sender.send(Err(format!(
+            "host {} disconnected before confirming ui dialog action",
+            host_location
+        )));
+    }
 }
 
 async fn listed_sessions(state: &AppState) -> Vec<ListedSession> {
@@ -1577,6 +1827,17 @@ async fn cached_transcript(state: &AppState, session_id: &str) -> Option<CachedT
     state.transcripts.read().await.get(session_id).cloned()
 }
 
+async fn cached_ui_state(state: &AppState, session_id: &str) -> Option<SessionUiState> {
+    state.ui_states.read().await.get(session_id).cloned()
+}
+
+async fn cached_ui_dialog_state(
+    state: &AppState,
+    session_id: &str,
+) -> Option<SessionUiDialogState> {
+    state.ui_dialog_states.read().await.get(session_id).cloned()
+}
+
 async fn host_for_session(state: &AppState, session_id: &str) -> Option<String> {
     let hosts = state.hosts.read().await;
     preferred_listed_session(&hosts, session_id).map(|session| session.host_location)
@@ -1596,6 +1857,14 @@ async fn cancel_attachment_fetch(state: &AppState, request_id: &str) {
 
 async fn cancel_send_message(state: &AppState, request_id: &str) {
     state.inflight_send_messages.lock().await.remove(request_id);
+}
+
+async fn cancel_ui_dialog_action(state: &AppState, request_id: &str) {
+    state
+        .inflight_ui_dialog_actions
+        .lock()
+        .await
+        .remove(request_id);
 }
 
 async fn persist_hosts(state: &AppState) {
@@ -1720,6 +1989,44 @@ fn upsert_cached_transcript(
                 },
             );
             Some(response)
+        }
+    }
+}
+
+fn upsert_cached_ui_state(
+    ui_states: &mut HashMap<String, SessionUiState>,
+    session_id: String,
+    ui_state: SessionUiState,
+) -> Option<SessionUiState> {
+    if ui_state.is_empty() {
+        return ui_states
+            .remove(&session_id)
+            .map(|_| SessionUiState::default());
+    }
+
+    match ui_states.get(&session_id) {
+        Some(existing) if existing == &ui_state => None,
+        _ => {
+            ui_states.insert(session_id, ui_state.clone());
+            Some(ui_state)
+        }
+    }
+}
+
+fn upsert_cached_ui_dialog_state(
+    ui_dialog_states: &mut HashMap<String, SessionUiDialogState>,
+    session_id: String,
+    ui_dialog_state: Option<SessionUiDialogState>,
+) -> Option<Option<SessionUiDialogState>> {
+    let Some(ui_dialog_state) = ui_dialog_state else {
+        return ui_dialog_states.remove(&session_id).map(|_| None);
+    };
+
+    match ui_dialog_states.get(&session_id) {
+        Some(existing) if existing == &ui_dialog_state => None,
+        _ => {
+            ui_dialog_states.insert(session_id, ui_dialog_state.clone());
+            Some(Some(ui_dialog_state))
         }
     }
 }

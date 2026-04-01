@@ -4,8 +4,8 @@ enum MarkdownAttributedStringBuilder {
 
 	/// Full attributed string for a message — handles monospaced roles and inline-only text.
 	/// Block-level markdown is handled by ``MarkdownBlocksView`` instead.
-	static func attributedString(for text: String, role: Message.Role) -> NSAttributedString {
-		let baseFont = chatUIFont()
+	static func attributedString(for text: String, role: Message.Role, font: UIFont = chatUIFont()) -> NSAttributedString {
+		let baseFont = font
 		let monoFont = UIFont.monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
 		let textColor = UIColor.label
 		let isMonospaced = role == .toolResult || role == .bashExecution

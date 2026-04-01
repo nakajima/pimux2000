@@ -13,8 +13,8 @@ use tokio::{
 };
 
 use crate::message::{
-    ImageContent, Message, MessageContentBlock, Role, collapse_whitespace,
-    normalized_display_text, tool_call_summary,
+    ImageContent, Message, MessageContentBlock, Role, collapse_whitespace, normalized_display_text,
+    tool_call_summary,
 };
 
 use super::{
@@ -327,7 +327,7 @@ async fn publish_event(
     event: LiveSessionEvent,
 ) {
     if let Some(snapshot) = live_store.apply_event(event).await {
-        let _ = live_updates.send(LiveUpdate {
+        let _ = live_updates.send(LiveUpdate::Transcript {
             snapshot,
             active_session: None,
         });
