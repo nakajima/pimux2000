@@ -120,6 +120,12 @@ impl LiveSessionStoreHandle {
         store.all_listed_sessions()
     }
 
+    pub async fn has_command_connection(&self, session_id: &str) -> bool {
+        let mut store = self.inner.lock().await;
+        store.purge_expired();
+        store.has_command_connection(session_id)
+    }
+
     async fn register_command_connection(
         &self,
         connection_id: u64,
@@ -1140,24 +1146,6 @@ impl LiveSessionStore {
         ui_dialog_states
     }
 
-    fn upsert_session_metadata(&mut self, session_id: &str, metadata: LiveSessionMetadata) {
-        if let Some(state) = self.active_sessions.get_mut(session_id) {
-            state.last_update_at = metadata.created_at;
-            state.metadata = Some(metadata);
-            return;
-        }
-
-        if let Some(state) = self.recent_detached_sessions.get_mut(session_id) {
-            state.metadata = Some(metadata);
-            return;
-        }
-
-        let mut state = LiveSessionState::new(session_id.to_string());
-        state.last_update_at = metadata.created_at;
-        state.metadata = Some(metadata);
-        self.active_sessions.insert(session_id.to_string(), state);
-    }
-
     fn listed_session_for(&self, session_id: &str) -> Option<ActiveSession> {
         self.active_sessions
             .get(session_id)
@@ -1185,6 +1173,28 @@ impl LiveSessionStore {
         }
 
         sessions
+    }
+
+    fn has_command_connection(&self, session_id: &str) -> bool {
+        self.command_session_connections.contains_key(session_id)
+    }
+
+    fn upsert_session_metadata(&mut self, session_id: &str, metadata: LiveSessionMetadata) {
+        if let Some(state) = self.active_sessions.get_mut(session_id) {
+            state.last_update_at = metadata.created_at;
+            state.metadata = Some(metadata);
+            return;
+        }
+
+        if let Some(state) = self.recent_detached_sessions.get_mut(session_id) {
+            state.metadata = Some(metadata);
+            return;
+        }
+
+        let mut state = LiveSessionState::new(session_id.to_string());
+        state.last_update_at = metadata.created_at;
+        state.metadata = Some(metadata);
+        self.active_sessions.insert(session_id.to_string(), state);
     }
 
     fn register_command_connection(

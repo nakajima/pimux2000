@@ -1,8 +1,10 @@
+import { complete } from "@mariozechner/pi-ai";
 import {
 	ExtensionEditorComponent,
 	ExtensionInputComponent,
 	ExtensionSelectorComponent,
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
 import { setKeybindings, setKittyProtocolActive } from "@mariozechner/pi-tui";
@@ -13,6 +15,9 @@ import { join } from "node:path";
 const LIVE_PROTOCOL_VERSION = 5;
 const PARTIAL_UPDATE_THROTTLE_MS = 150;
 const SOCKET_RECONNECT_DELAY_MS = 500;
+const RESUMMARIZE_EDGE_ENTRY_COUNT = 5;
+const RESUMMARIZE_ENTRY_MAX_CHARS = 400;
+const RESUMMARIZE_TITLE_MAX_CHARS = 80;
 
 type PimuxRole =
 	| "user"
@@ -472,6 +477,28 @@ export default function (pi: ExtensionAPI) {
 						"Usage: /pimux-debug test-confirm [prompt] or /pimux-debug test-select [title] or /pimux-debug test-input [placeholder] or /pimux-debug test-editor [prefill]",
 						"info"
 					);
+					return;
+			}
+		},
+	});
+
+	pi.registerCommand("pimux", {
+		description: "Pimux helpers (usage: /pimux resummarize)",
+		handler: async (args, ctx) => {
+			ensureUiPatched(ctx);
+			await attachCurrentSession(ctx);
+
+			const [subcommand] = args
+				.trim()
+				.split(/\s+/)
+				.filter(Boolean);
+
+			switch (subcommand) {
+				case "resummarize":
+					await handlePimuxResummarizeCommand(pi, ctx);
+					return;
+				default:
+					ctx.ui.notify("Usage: /pimux resummarize", "info");
 					return;
 			}
 		},
@@ -1433,6 +1460,193 @@ function summarizeMessages(messages: PimuxMessage[]): string | undefined {
 	const collapsed = collapseWhitespace(source);
 	if (!collapsed) return undefined;
 	return truncateChars(collapsed, 120);
+}
+
+async function handlePimuxResummarizeCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
+	await ctx.waitForIdle();
+
+	const messages = buildSnapshotMessages(ctx);
+	const summaryInput = buildResummarizeInput(messages);
+	if (!summaryInput) {
+		ctx.ui.notify("No conversation text found to summarize", "warning");
+		return;
+	}
+
+	const model = await resolveResummarizeModel(ctx);
+	if (!model) {
+		ctx.ui.notify("No model available to generate a session summary", "warning");
+		return;
+	}
+
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) {
+		ctx.ui.notify(auth.error, "warning");
+		return;
+	}
+	if (!auth.apiKey) {
+		ctx.ui.notify(`No API key available for ${model.provider}/${model.id}`, "warning");
+		return;
+	}
+
+	ctx.ui.notify("Generating session summary…", "info");
+
+	try {
+		const response = await complete(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text: buildResummarizePrompt(ctx.sessionManager.getCwd(), summaryInput),
+							},
+						],
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+			}
+		);
+
+		const summary = normalizeResummarizedTitle(
+			response.content
+				.filter((block): block is { type: "text"; text: string } => block.type === "text")
+				.map((block) => block.text)
+				.join("\n")
+		);
+		if (!summary) {
+			ctx.ui.notify("The model returned an empty session summary", "warning");
+			return;
+		}
+
+		pi.setSessionName(summary);
+		publishSnapshot(ctx);
+		ctx.ui.notify(`Session summary updated: ${summary}`, "info");
+	} catch (error) {
+		ctx.ui.notify(
+			`Failed to generate session summary: ${error instanceof Error ? error.message : String(error)}`,
+			"error"
+		);
+	}
+}
+
+async function resolveResummarizeModel(ctx: ExtensionCommandContext) {
+	const requested = process.env.PIMUX_SUMMARY_MODEL?.trim();
+	if (requested) {
+		const [provider, ...rest] = requested.split("/");
+		const id = rest.join("/");
+		if (provider && id) {
+			const configured = ctx.modelRegistry.find(provider, id);
+			if (configured) {
+				return configured;
+			}
+		}
+	}
+
+	if (ctx.model) {
+		return ctx.model;
+	}
+
+	ctx.modelRegistry.refresh();
+	try {
+		const available = await ctx.modelRegistry.getAvailable();
+		return available[0];
+	} catch {
+		return undefined;
+	}
+}
+
+function buildResummarizeInput(messages: PimuxMessage[]): string | undefined {
+	const entries = messages
+		.map((message, index) => {
+			const role =
+				message.role === "user"
+					? "User"
+					: message.role === "assistant"
+						? "Assistant"
+						: undefined;
+			if (!role) return undefined;
+
+			const text = extractResummarizeMessageText(message);
+			if (!text) return undefined;
+
+			return {
+				index,
+				text: `${role}: ${truncateChars(text, RESUMMARIZE_ENTRY_MAX_CHARS)}`,
+			};
+		})
+		.filter(
+			(entry): entry is { index: number; text: string } =>
+				Boolean(entry?.text)
+		);
+	if (entries.length === 0) return undefined;
+
+	const selected = [...entries.slice(0, RESUMMARIZE_EDGE_ENTRY_COUNT)];
+	for (const entry of entries.slice(-RESUMMARIZE_EDGE_ENTRY_COUNT)) {
+		if (!selected.some((existing) => existing.index === entry.index)) {
+			selected.push(entry);
+		}
+	}
+
+	return selected.map((entry) => entry.text).join("\n\n");
+}
+
+function extractResummarizeMessageText(message: PimuxMessage): string | undefined {
+	const blockText = (message.blocks ?? [])
+		.filter((block) => block.type === "text" && typeof block.text === "string")
+		.map((block) => block.text ?? "")
+		.join(" ");
+	const collapsedBlocks = collapseWhitespace(blockText);
+	if (collapsedBlocks) return collapsedBlocks;
+
+	const collapsedBody = collapseWhitespace(message.body);
+	return collapsedBody || undefined;
+}
+
+function buildResummarizePrompt(cwd: string, summaryInput: string): string {
+	return [
+		"Summarize what this coding session is currently about in a single short title.",
+		"",
+		"Rules:",
+		"- Focus on the concrete coding task or topic",
+		"- Prefer the current or latest task over earlier work",
+		"- Ignore meta phrasing like 'Let's work this out together', 'keep planning', or 'start implementing'",
+		"- Plain text only",
+		"- No quotes",
+		"- No markdown",
+		"- No trailing punctuation",
+		"- Keep it under 60 characters if possible",
+		"",
+		`Session cwd: ${cwd}`,
+		"",
+		"Recent conversation:",
+		summaryInput,
+		"",
+		"Title:",
+	].join("\n");
+}
+
+function normalizeResummarizedTitle(summary: string): string | undefined {
+	const firstLine = summary
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.find(Boolean);
+	if (!firstLine) return undefined;
+
+	const normalized = collapseWhitespace(firstLine)
+		.replace(/^-\s+/, "")
+		.replace(/^['"`]+/, "")
+		.replace(/['"`]+$/, "")
+		.replace(/[.!?;:]+$/, "")
+		.trim();
+	if (!normalized) return undefined;
+
+	return truncateChars(normalized, RESUMMARIZE_TITLE_MAX_CHARS);
 }
 
 function buildSnapshotMessages(ctx: ExtensionContext): PimuxMessage[] {

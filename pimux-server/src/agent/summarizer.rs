@@ -348,6 +348,23 @@ pub fn apply_summaries_cached_only(
         .collect()
 }
 
+pub async fn resummarize_session(
+    discovered_session: &DiscoveredSession,
+    config: &Config,
+) -> String {
+    let Some(summary_input) = discovered_session.summary_input.as_deref() else {
+        return discovered_session.heuristic_summary.clone();
+    };
+
+    match summarize_via_pi(discovered_session, summary_input, config).await {
+        Ok(summary) => summary,
+        Err(error) => {
+            log_summary_error(discovered_session, &error);
+            discovered_session.heuristic_summary.clone()
+        }
+    }
+}
+
 async fn apply_summaries_inner(
     discovered_sessions: Vec<DiscoveredSession>,
     config: &Config,

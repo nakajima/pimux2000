@@ -33,7 +33,7 @@ pub use summarizer::DEFAULT_SUMMARY_MODEL;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-const SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
+const SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub struct Config {
     pub server_url: String,
@@ -333,6 +333,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                         if let Err(error) = handle_server_message(
                             message,
                             &pi_agent_dir,
+                            &summary_config,
                             &host,
                             &live_store,
                             &live_updates_tx,
@@ -522,6 +523,7 @@ fn merge_live_sessions(
 async fn handle_server_message(
     message: ServerToAgentMessage,
     pi_agent_dir: &Path,
+    summary_config: &summarizer::Config,
     host: &HostIdentity,
     live_store: &live::LiveSessionStoreHandle,
     live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
@@ -573,6 +575,7 @@ async fn handle_server_message(
                 body,
                 images,
                 pi_agent_dir,
+                summary_config,
                 live_store,
                 live_updates_tx,
             )
@@ -795,9 +798,24 @@ async fn handle_send_message(
     body: String,
     images: Vec<ImageContent>,
     pi_agent_dir: &Path,
+    summary_config: &summarizer::Config,
     live_store: &live::LiveSessionStoreHandle,
     live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
 ) -> Result<SendMessageDispatch, String> {
+    if is_pimux_resummarize_command(&body, &images)
+        && !live_store.has_command_connection(session_id).await
+    {
+        handle_pimux_resummarize_command(
+            session_id,
+            pi_agent_dir,
+            summary_config,
+            live_store,
+            live_updates_tx,
+        )
+        .await?;
+        return Ok(SendMessageDispatch::HeadlessRpc);
+    }
+
     match live_store
         .send_user_message(session_id, &body, images.clone())
         .await
@@ -826,6 +844,48 @@ async fn handle_send_message(
     )
     .await
     .map(|_| SendMessageDispatch::HeadlessRpc)
+}
+
+fn is_pimux_resummarize_command(body: &str, images: &[ImageContent]) -> bool {
+    if !images.is_empty() {
+        return false;
+    }
+
+    let mut parts = body.split_whitespace();
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some("/pimux"), Some("resummarize"), None)
+    )
+}
+
+async fn handle_pimux_resummarize_command(
+    session_id: &str,
+    pi_agent_dir: &Path,
+    summary_config: &summarizer::Config,
+    live_store: &live::LiveSessionStoreHandle,
+    live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
+) -> Result<(), String> {
+    let discovered_sessions =
+        discovery::discover_sessions(pi_agent_dir).map_err(|error| error.to_string())?;
+    let Some(discovered_session) = discovered_sessions
+        .into_iter()
+        .find(|session| session.id == session_id)
+    else {
+        return Err(format!("session {} was not found", session_id));
+    };
+
+    let summary = summarizer::resummarize_session(&discovered_session, summary_config).await;
+    let rename_command = format!("/name {summary}");
+
+    send::send_message_to_session(
+        discovered_session,
+        rename_command,
+        Vec::new(),
+        pi_agent_dir.to_path_buf(),
+        live_store.clone(),
+        live_updates_tx.clone(),
+    )
+    .await
 }
 
 fn build_server_url(server_url: &str, path: &str) -> Result<Url, BoxError> {
@@ -1014,6 +1074,24 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "today");
+    }
+
+    #[test]
+    fn detects_pimux_resummarize_command() {
+        assert!(is_pimux_resummarize_command("/pimux resummarize", &[]));
+        assert!(is_pimux_resummarize_command(
+            "  /pimux   resummarize  ",
+            &[]
+        ));
+        assert!(!is_pimux_resummarize_command("/pimux", &[]));
+        assert!(!is_pimux_resummarize_command("/pimux resummarize now", &[]));
+        assert!(!is_pimux_resummarize_command(
+            "/pimux resummarize",
+            &[ImageContent::new(
+                "image/png".to_string(),
+                "abc".to_string()
+            )]
+        ));
     }
 
     fn sample_discovered_session(

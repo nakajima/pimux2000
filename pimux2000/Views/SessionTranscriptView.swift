@@ -90,8 +90,30 @@ struct SessionTranscriptView: UIViewRepresentable {
 			self.parent = parent
 			let newMessages = parent.messages.reversed() as [TranscriptMessage]
 
-			if newMessages.map(\.id) != messages.map(\.id) ||
-				newMessages.map(\.fingerprint) != messages.map(\.fingerprint) {
+			let oldIDs = messages.map(\.id)
+			let newIDs = newMessages.map(\.id)
+
+			if oldIDs == newIDs {
+				// Same structure — only reload rows whose content actually changed
+				var changedRows: [IndexPath] = []
+				for i in newMessages.indices {
+					if messages[i].fingerprint != newMessages[i].fingerprint {
+						changedRows.append(IndexPath(row: i, section: 0))
+					}
+				}
+
+				if !changedRows.isEmpty {
+					messages = newMessages
+					UIView.performWithoutAnimation {
+						tableView.reloadRows(at: changedRows, with: .none)
+					}
+				}
+
+				if shouldForcePin, !messages.isEmpty {
+					tableView.scrollToRow(at: IndexPath(row: 0, section: 0), at: .bottom, animated: changedRows.isEmpty)
+				}
+			} else {
+				// Structure changed (messages added/removed) — full reload
 				let savedOffset = tableView.contentOffset
 				messages = newMessages
 				UIView.performWithoutAnimation {
@@ -104,8 +126,6 @@ struct SessionTranscriptView: UIViewRepresentable {
 						tableView.contentOffset = savedOffset
 					}
 				}
-			} else if shouldForcePin, !messages.isEmpty {
-				tableView.scrollToRow(at: IndexPath(row: 0, section: 0), at: .bottom, animated: true)
 			}
 
 			updateEmptyState(on: tableView)

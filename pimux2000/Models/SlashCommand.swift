@@ -10,6 +10,7 @@ struct SlashCommand: Identifiable, Equatable {
 
 	static let builtinCommands: [SlashCommand] = [
 		SlashCommand(name: "compact", description: "Manually compact the session context", source: "builtin"),
+		SlashCommand(name: "pimux", description: "Pimux helpers like resummarize", source: "builtin"),
 		SlashCommand(name: "model", description: "Select model", source: "builtin"),
 		SlashCommand(name: "name", description: "Set session display name", source: "builtin"),
 		SlashCommand(name: "session", description: "Show session info and stats", source: "builtin"),
