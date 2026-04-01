@@ -213,6 +213,7 @@ struct AppDatabase {
 		_ = try Message.deleteAll(db)
 		_ = try PiSession.deleteAll(db)
 		_ = try Host.deleteAll(db)
+		try? AttachmentStore.removeAll()
 	}
 
 	nonisolated private static func columnNames(in table: String, db: Database) throws -> Set<String> {

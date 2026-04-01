@@ -737,6 +737,9 @@ private struct TranscriptWarningView: View {
 
 #Preview("All message types") {
 	let db = AppDatabase.preview()
+	let previewSessionID = "test-session-1"
+	let previewAttachmentID = "img-preview"
+	let _ = PreviewAttachmentFixture.installImageAttachment(sessionID: previewSessionID, attachmentID: previewAttachmentID)
 	try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
 
 	try! db.dbQueue.write { dbConn in
@@ -780,7 +783,7 @@ private struct TranscriptWarningView: View {
 			id: nil,
 			hostID: host.id!,
 			summary: "Working on chat UI",
-			sessionID: "test-session-1",
+			sessionID: previewSessionID,
 			sessionFile: nil,
 			model: "anthropic/claude-sonnet",
 			lastMessage: "Unknown roles fall back gracefully.",
@@ -876,7 +879,7 @@ private struct TranscriptWarningView: View {
 				(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil),
 				(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil),
 				(type: "text", text: "Done — this preview now shows tool calls alongside realistic outputs, plus summaries, shell output, image attachments, and fallback cases.", toolCallName: nil, mimeType: nil, attachmentID: nil),
-				(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: "img-preview")
+				(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: previewAttachmentID)
 			]
 		)
 
@@ -929,6 +932,5 @@ private struct TranscriptWarningView: View {
 		PiSessionView(session: session, columnVisibility: .constant(.automatic))
 	}
 	.environment(\.appDatabase, db)
-	.environment(\.previewImageURL, Bundle.main.url(forResource: "preview-image", withExtension: "png"))
 	.databaseContext(.readWrite { db.dbQueue })
 }

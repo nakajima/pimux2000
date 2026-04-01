@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		A659C6662F70FA3B00E37016 /* GRDBQuery in Frameworks */ = {isa = PBXBuildFile; productRef = A659C6652F70FA3B00E37016 /* GRDBQuery */; };
 		A659C6692F70FA5000E37016 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A659C6682F70FA5000E37016 /* GRDB */; };
+		A659C66A2F70FB0000E37016 /* Nuke in Frameworks */ = {isa = PBXBuildFile; productRef = A659C66D2F70FB0000E37016 /* Nuke */; };
+		A659C66B2F70FB0000E37016 /* NukeUI in Frameworks */ = {isa = PBXBuildFile; productRef = A659C66E2F70FB0000E37016 /* NukeUI */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -59,6 +61,8 @@
 			files = (
 				A659C6662F70FA3B00E37016 /* GRDBQuery in Frameworks */,
 				A659C6692F70FA5000E37016 /* GRDB in Frameworks */,
+				A659C66A2F70FB0000E37016 /* Nuke in Frameworks */,
+				A659C66B2F70FB0000E37016 /* NukeUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -121,6 +125,8 @@
 			packageProductDependencies = (
 				A659C6652F70FA3B00E37016 /* GRDBQuery */,
 				A659C6682F70FA5000E37016 /* GRDB */,
+				A659C66D2F70FB0000E37016 /* Nuke */,
+				A659C66E2F70FB0000E37016 /* NukeUI */,
 			);
 			productName = pimux2000;
 			productReference = A659C63A2F70F81500E37016 /* pimux2000.app */;
@@ -207,6 +213,7 @@
 			packageReferences = (
 				A659C6642F70FA3B00E37016 /* XCRemoteSwiftPackageReference "GRDBQuery" */,
 				A659C6672F70FA5000E37016 /* XCRemoteSwiftPackageReference "GRDB" */,
+				A659C66C2F70FB0000E37016 /* XCRemoteSwiftPackageReference "Nuke" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A659C63B2F70F81500E37016 /* Products */;
@@ -633,6 +640,14 @@
 				kind = branch;
 			};
 		};
+		A659C66C2F70FB0000E37016 /* XCRemoteSwiftPackageReference "Nuke" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kean/Nuke";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 13.0.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -645,6 +660,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A659C6672F70FA5000E37016 /* XCRemoteSwiftPackageReference "GRDB" */;
 			productName = GRDB;
+		};
+		A659C66D2F70FB0000E37016 /* Nuke */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A659C66C2F70FB0000E37016 /* XCRemoteSwiftPackageReference "Nuke" */;
+			productName = Nuke;
+		};
+		A659C66E2F70FB0000E37016 /* NukeUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A659C66C2F70FB0000E37016 /* XCRemoteSwiftPackageReference "Nuke" */;
+			productName = NukeUI;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

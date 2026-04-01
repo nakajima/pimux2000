@@ -281,13 +281,8 @@ private struct ComposerAttachmentTile: View {
 						.fill(.quaternary)
 						.overlay { ProgressView().controlSize(.small) }
 				case .ready:
-					if let previewData = attachment.previewData,
-						let uiImage = UIImage(data: previewData)
-					{
-						Image(uiImage: uiImage)
-							.resizable()
-							.scaledToFill()
-							.clipShape(RoundedRectangle(cornerRadius: 8))
+					if let previewData = attachment.previewData {
+						InlineDataImageView(id: attachment.id.uuidString, data: previewData)
 					} else {
 						RoundedRectangle(cornerRadius: 8)
 							.fill(.quaternary)

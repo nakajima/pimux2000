@@ -8,6 +8,7 @@ struct pimux2000App: App {
 	let appDatabase: AppDatabase
 
 	init() {
+		PimuxImageLoading.configureSharedPipeline()
 		let processInfo = ProcessInfo.processInfo
 
 		if Self.isRunningForPreviews {
@@ -19,6 +20,7 @@ struct pimux2000App: App {
 
 		if processInfo.arguments.contains("--uitesting-reset-db") {
 			try? FileManager.default.removeItem(at: databaseURL)
+			try? AttachmentStore.removeAll()
 		}
 
 		try! FileManager.default.createDirectory(

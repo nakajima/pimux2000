@@ -1,5 +1,4 @@
 import SwiftUI
-import UIKit
 
 // MARK: - PendingLocalMessageView
 
@@ -38,13 +37,7 @@ private struct PendingImageStrip: View {
 	var body: some View {
 		HStack(spacing: 6) {
 			ForEach(images) { preview in
-				if let uiImage = UIImage(data: preview.previewData) {
-					Image(uiImage: uiImage)
-						.resizable()
-						.scaledToFill()
-						.frame(width: 60, height: 60)
-						.clipShape(RoundedRectangle(cornerRadius: 8))
-				}
+				InlineDataImageView(id: preview.id.uuidString, data: preview.previewData)
 			}
 		}
 	}
