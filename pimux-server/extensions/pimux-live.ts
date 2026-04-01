@@ -1,4 +1,6 @@
 import {
+	ExtensionEditorComponent,
+	ExtensionInputComponent,
 	ExtensionSelectorComponent,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -8,7 +10,7 @@ import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const LIVE_PROTOCOL_VERSION = 3;
+const LIVE_PROTOCOL_VERSION = 5;
 const PARTIAL_UPDATE_THROTTLE_MS = 150;
 const SOCKET_RECONNECT_DELAY_MS = 500;
 
@@ -79,7 +81,7 @@ interface RuntimeUiState {
 	hiddenThinkingLabel?: string;
 }
 
-type PimuxUiDialogKind = "confirm" | "select";
+type PimuxUiDialogKind = "confirm" | "select" | "input" | "editor";
 
 type PimuxUiDialogMoveDirection = "up" | "down";
 
@@ -90,15 +92,21 @@ interface PimuxUiDialogState {
 	message: string;
 	options: string[];
 	selectedIndex: number;
+	placeholder?: string;
+	value?: string;
 }
 
 type PimuxUiDialogAction =
 	| { type: "move"; direction: PimuxUiDialogMoveDirection }
 	| { type: "selectIndex"; index: number }
+	| { type: "setValue"; value: string }
 	| { type: "submit" }
 	| { type: "cancel" };
 
-interface RuntimeSelectorDialog<Result, Kind extends PimuxUiDialogKind = PimuxUiDialogKind> {
+interface RuntimeSelectorDialog<
+	Result,
+	Kind extends Extract<PimuxUiDialogKind, "confirm" | "select">
+> {
 	sessionId: string;
 	state: PimuxUiDialogState & { kind: Kind };
 	selector?: ExtensionSelectorComponent;
@@ -107,10 +115,32 @@ interface RuntimeSelectorDialog<Result, Kind extends PimuxUiDialogKind = PimuxUi
 	result: Result;
 }
 
+interface RuntimeInputDialog {
+	sessionId: string;
+	state: PimuxUiDialogState & { kind: "input"; value: string };
+	input?: ExtensionInputComponent;
+	requestRender?: () => void;
+	done?: (result: string | undefined) => void;
+	finished: boolean;
+	result: string | undefined;
+}
+
+interface RuntimeEditorDialog {
+	sessionId: string;
+	state: PimuxUiDialogState & { kind: "editor"; value: string };
+	editor?: ExtensionEditorComponent;
+	requestRender?: () => void;
+	done?: (result: string | undefined) => void;
+	finished: boolean;
+	result: string | undefined;
+}
+
 type RuntimeConfirmDialog = RuntimeSelectorDialog<boolean, "confirm">;
 type RuntimeSelectDialog = RuntimeSelectorDialog<string | undefined, "select">;
-type RuntimeUiDialog = RuntimeConfirmDialog | RuntimeSelectDialog;
-type RuntimeUiDialogSelectorState = Pick<RuntimeUiDialog, "sessionId" | "state" | "selector">;
+type RuntimeSelectorUiDialog = RuntimeConfirmDialog | RuntimeSelectDialog;
+type RuntimeTextValueDialog = RuntimeInputDialog | RuntimeEditorDialog;
+type RuntimeUiDialog = RuntimeSelectorUiDialog | RuntimeTextValueDialog;
+type RuntimeUiDialogSelectorState = Pick<RuntimeSelectorUiDialog, "sessionId" | "state" | "selector">;
 
 function isConfirmDialog(dialog: RuntimeUiDialog): dialog is RuntimeConfirmDialog {
 	return dialog.state.kind === "confirm";
@@ -118,6 +148,18 @@ function isConfirmDialog(dialog: RuntimeUiDialog): dialog is RuntimeConfirmDialo
 
 function isSelectDialog(dialog: RuntimeUiDialog): dialog is RuntimeSelectDialog {
 	return dialog.state.kind === "select";
+}
+
+function isInputDialog(dialog: RuntimeUiDialog): dialog is RuntimeInputDialog {
+	return dialog.state.kind === "input";
+}
+
+function isEditorDialog(dialog: RuntimeUiDialog): dialog is RuntimeEditorDialog {
+	return dialog.state.kind === "editor";
+}
+
+function isTextValueDialog(dialog: RuntimeUiDialog): dialog is RuntimeTextValueDialog {
+	return dialog.state.kind === "input" || dialog.state.kind === "editor";
 }
 
 type BridgeToAgentMessage =
@@ -365,7 +407,7 @@ export default function (pi: ExtensionAPI) {
 	let uiPatched = false;
 
 	pi.registerCommand("pimux-debug", {
-		description: "Run pimux live UI debug helpers like test-confirm and test-select",
+		description: "Run pimux live UI debug helpers like test-confirm, test-select, test-input, and test-editor",
 		handler: async (args, ctx) => {
 			ensureUiPatched(ctx);
 			await attachCurrentSession(ctx);
@@ -398,9 +440,29 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
+				case "test-input": {
+					const title = rest.join(" ") || "Type from either the Pi TUI or the iOS app.";
+					const value = await ctx.ui.input("Pimux Live Input Test", title);
+					ctx.ui.notify(
+						value !== undefined ? `pimux input test: ${value}` : "pimux input test: cancelled",
+						"info"
+					);
+					return;
+				}
+				case "test-editor": {
+					const prefill =
+						rest.join(" ") ||
+						"Edit this text from either the Pi TUI or the iOS app.\n\nDoes this editor stay mirrored and resolve correctly?";
+					const value = await ctx.ui.editor("Pimux Live Editor Test", prefill);
+					ctx.ui.notify(
+						value !== undefined ? `pimux editor test: ${value}` : "pimux editor test: cancelled",
+						"info"
+					);
+					return;
+				}
 				default:
 					ctx.ui.notify(
-						"Usage: /pimux-debug test-confirm [prompt] or /pimux-debug test-select [title]",
+						"Usage: /pimux-debug test-confirm [prompt] or /pimux-debug test-select [title] or /pimux-debug test-input [placeholder] or /pimux-debug test-editor [prefill]",
 						"info"
 					);
 					return;
@@ -470,7 +532,44 @@ export default function (pi: ExtensionAPI) {
 		sendCurrentUiDialogState(dialog.sessionId);
 	}
 
-	function finishSelectorDialog<Result>(dialog: RuntimeSelectorDialog<Result>, result: Result) {
+	function setTextValueDialogValue(
+		dialog: RuntimeTextValueDialog,
+		nextValue: string,
+		options?: { updateComponent?: boolean }
+	) {
+		if (dialog.state.value === nextValue) return;
+		dialog.state.value = nextValue;
+		if (options?.updateComponent !== false) {
+			if (isInputDialog(dialog)) {
+				const input = dialog.input as any;
+				input?.input?.setValue?.(nextValue);
+			} else if (isEditorDialog(dialog)) {
+				const editor = dialog.editor as any;
+				editor?.editor?.setText?.(nextValue);
+			}
+			dialog.requestRender?.();
+		}
+		sendCurrentUiDialogState(dialog.sessionId);
+	}
+
+	function finishSelectorDialog(dialog: RuntimeConfirmDialog, result: boolean): void;
+	function finishSelectorDialog(dialog: RuntimeSelectDialog, result: string | undefined): void;
+	function finishSelectorDialog(
+		dialog: RuntimeSelectorUiDialog,
+		result: boolean | string | undefined
+	) {
+		if (dialog.finished) return;
+		dialog.finished = true;
+		(dialog as RuntimeUiDialog).result = result as any;
+		if (state.currentUiDialog === dialog) {
+			clearCurrentUiDialogState(dialog.sessionId);
+		}
+		const done = dialog.done as ((result: boolean | string | undefined) => void) | undefined;
+		(dialog as RuntimeUiDialog).done = undefined as any;
+		done?.(result);
+	}
+
+	function finishTextValueDialog(dialog: RuntimeTextValueDialog, result: string | undefined) {
 		if (dialog.finished) return;
 		dialog.finished = true;
 		dialog.result = result;
@@ -483,21 +582,35 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function finishCurrentConfirmDialog(
-		 dialog: RuntimeConfirmDialog,
-		 result: { confirmed?: boolean; cancelled?: boolean }
+		dialog: RuntimeConfirmDialog,
+		result: { confirmed?: boolean; cancelled?: boolean }
 	) {
 		finishSelectorDialog(dialog, result.cancelled ? false : result.confirmed === true);
 	}
 
 	function finishCurrentSelectDialog(
-		 dialog: RuntimeSelectDialog,
-		 result: { selected?: string; cancelled?: boolean }
+		dialog: RuntimeSelectDialog,
+		result: { selected?: string; cancelled?: boolean }
 	) {
 		finishSelectorDialog(dialog, result.cancelled ? undefined : result.selected);
 	}
 
+	function finishCurrentInputDialog(
+		dialog: RuntimeInputDialog,
+		result: { value?: string; cancelled?: boolean }
+	) {
+		finishTextValueDialog(dialog, result.cancelled ? undefined : result.value);
+	}
+
+	function finishCurrentEditorDialog(
+		dialog: RuntimeEditorDialog,
+		result: { value?: string; cancelled?: boolean }
+	) {
+		finishTextValueDialog(dialog, result.cancelled ? undefined : result.value);
+	}
+
 	function attachSelectorDialogSelector<Result>(
-		dialog: RuntimeSelectorDialog<Result>,
+		dialog: RuntimeSelectorDialog<Result, "confirm" | "select">,
 		selector: ExtensionSelectorComponent,
 		done: (result: Result) => void
 	) {
@@ -527,6 +640,70 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function attachInputDialog(
+		dialog: RuntimeInputDialog,
+		inputComponent: ExtensionInputComponent,
+		requestRender: () => void,
+		done: (result: string | undefined) => void
+	) {
+		dialog.input = inputComponent;
+		dialog.requestRender = requestRender;
+		dialog.done = done;
+
+		const inputAny = inputComponent as any;
+		inputAny.input?.setValue?.(dialog.state.value);
+		requestRender();
+
+		const originalHandleInput = inputComponent.handleInput.bind(inputComponent);
+		inputComponent.handleInput = ((keyData: string) => {
+			const before = inputAny.input?.getValue?.() ?? dialog.state.value;
+			originalHandleInput(keyData);
+			const after = inputAny.input?.getValue?.() ?? before;
+			if (after !== before) {
+				dialog.state.value = after;
+				sendCurrentUiDialogState(dialog.sessionId);
+			}
+		}) as typeof inputComponent.handleInput;
+
+		if (dialog.finished) {
+			const result = dialog.result;
+			dialog.done = undefined;
+			done(result);
+		}
+	}
+
+	function attachEditorDialog(
+		dialog: RuntimeEditorDialog,
+		editorComponent: ExtensionEditorComponent,
+		requestRender: () => void,
+		done: (result: string | undefined) => void
+	) {
+		dialog.editor = editorComponent;
+		dialog.requestRender = requestRender;
+		dialog.done = done;
+
+		const editorAny = editorComponent as any;
+		editorAny.editor?.setText?.(dialog.state.value);
+		requestRender();
+
+		const originalHandleInput = editorComponent.handleInput.bind(editorComponent);
+		editorComponent.handleInput = ((keyData: string) => {
+			const before = editorAny.editor?.getExpandedText?.() ?? editorAny.editor?.getText?.() ?? dialog.state.value;
+			originalHandleInput(keyData);
+			const after = editorAny.editor?.getExpandedText?.() ?? editorAny.editor?.getText?.() ?? before;
+			if (after !== before && !dialog.finished) {
+				dialog.state.value = after;
+				sendCurrentUiDialogState(dialog.sessionId);
+			}
+		}) as typeof editorComponent.handleInput;
+
+		if (dialog.finished) {
+			const result = dialog.result;
+			dialog.done = undefined;
+			done(result);
+		}
+	}
+
 	function cancelCurrentUiDialog(sessionId: string | undefined = state.currentSessionId) {
 		const dialog = state.currentUiDialog;
 		if (!dialog) {
@@ -538,6 +715,10 @@ export default function (pi: ExtensionAPI) {
 				finishCurrentConfirmDialog(dialog, { cancelled: true });
 			} else if (isSelectDialog(dialog)) {
 				finishCurrentSelectDialog(dialog, { cancelled: true });
+			} else if (isInputDialog(dialog)) {
+				finishCurrentInputDialog(dialog, { cancelled: true });
+			} else if (isEditorDialog(dialog)) {
+				finishCurrentEditorDialog(dialog, { cancelled: true });
 			}
 		}
 	}
@@ -564,13 +745,28 @@ export default function (pi: ExtensionAPI) {
 
 		switch (action.type) {
 			case "move":
+				if (!isConfirmDialog(dialog) && !isSelectDialog(dialog)) {
+					respondToUiDialogActionRequest(requestId, sessionId, `dialog ${dialogId} does not support move`);
+					return;
+				}
 				setSelectorDialogSelectedIndex(
 					dialog,
 					dialog.state.selectedIndex + (action.direction === "up" ? -1 : 1)
 				);
 				break;
 			case "selectIndex":
+				if (!isConfirmDialog(dialog) && !isSelectDialog(dialog)) {
+					respondToUiDialogActionRequest(requestId, sessionId, `dialog ${dialogId} does not support selectIndex`);
+					return;
+				}
 				setSelectorDialogSelectedIndex(dialog, action.index);
+				break;
+			case "setValue":
+				if (!isTextValueDialog(dialog)) {
+					respondToUiDialogActionRequest(requestId, sessionId, `dialog ${dialogId} does not support setValue`);
+					return;
+				}
+				setTextValueDialogValue(dialog, action.value);
 				break;
 			case "submit":
 				if (isConfirmDialog(dialog)) {
@@ -583,6 +779,16 @@ export default function (pi: ExtensionAPI) {
 						selected: dialog.state.options[dialog.state.selectedIndex],
 						cancelled: false,
 					});
+				} else if (isInputDialog(dialog)) {
+					finishCurrentInputDialog(dialog, {
+						value: dialog.state.value,
+						cancelled: false,
+					});
+				} else if (isEditorDialog(dialog)) {
+					finishCurrentEditorDialog(dialog, {
+						value: dialog.state.value,
+						cancelled: false,
+					});
 				}
 				break;
 			case "cancel":
@@ -590,6 +796,10 @@ export default function (pi: ExtensionAPI) {
 					finishCurrentConfirmDialog(dialog, { cancelled: true });
 				} else if (isSelectDialog(dialog)) {
 					finishCurrentSelectDialog(dialog, { cancelled: true });
+				} else if (isInputDialog(dialog)) {
+					finishCurrentInputDialog(dialog, { cancelled: true });
+				} else if (isEditorDialog(dialog)) {
+					finishCurrentEditorDialog(dialog, { cancelled: true });
 				}
 				break;
 		}
@@ -603,6 +813,8 @@ export default function (pi: ExtensionAPI) {
 
 		const ui = ctx.ui;
 		const originalSelect = ui.select.bind(ui);
+		const originalInput = ui.input.bind(ui);
+		const originalEditor = ui.editor.bind(ui);
 		const originalConfirm = ui.confirm.bind(ui);
 		const originalSetStatus = ui.setStatus.bind(ui);
 		const originalSetWidget = ui.setWidget.bind(ui) as (key: string, content: unknown, options?: unknown) => void;
@@ -677,6 +889,129 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 		}) as typeof ui.select;
+
+		ui.input = (async (title: string, placeholder?: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
+			const sessionId = state.currentSessionId;
+			if (!sessionId || state.currentUiDialog) {
+				return originalInput(title, placeholder, opts);
+			}
+			if (opts?.signal?.aborted) {
+				return undefined;
+			}
+
+			const dialog: RuntimeInputDialog = {
+				sessionId,
+				state: {
+					id: `input-${state.nextDialogId++}`,
+					kind: "input",
+					title,
+					message: "",
+					options: [],
+					selectedIndex: 0,
+					placeholder,
+					value: "",
+				},
+				input: undefined,
+				requestRender: undefined,
+				done: undefined,
+				finished: false,
+				result: undefined,
+			};
+			state.currentUiDialog = dialog;
+			sendCurrentUiDialogState(sessionId);
+
+			const onAbort = () => {
+				finishCurrentInputDialog(dialog, { cancelled: true });
+			};
+			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+			try {
+				return await ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+					setKeybindings(keybindings);
+					setKittyProtocolActive(tui.terminal.kittyProtocolActive);
+
+					const inputComponent = new ExtensionInputComponent(
+						title,
+						placeholder,
+						(value) => {
+							setTextValueDialogValue(dialog, value, { updateComponent: false });
+							finishCurrentInputDialog(dialog, {
+								value,
+								cancelled: false,
+							});
+						},
+						() => {
+							finishCurrentInputDialog(dialog, { cancelled: true });
+						},
+						{ tui, timeout: opts?.timeout }
+					);
+					attachInputDialog(dialog, inputComponent, () => tui.requestRender(), done);
+					return inputComponent;
+				});
+			} finally {
+				opts?.signal?.removeEventListener("abort", onAbort);
+				if (state.currentUiDialog === dialog && !dialog.finished) {
+					clearCurrentUiDialogState(dialog.sessionId);
+				}
+			}
+		}) as typeof ui.input;
+
+		ui.editor = (async (title: string, prefill?: string) => {
+			const sessionId = state.currentSessionId;
+			if (!sessionId || state.currentUiDialog) {
+				return originalEditor(title, prefill);
+			}
+
+			const dialog: RuntimeEditorDialog = {
+				sessionId,
+				state: {
+					id: `editor-${state.nextDialogId++}`,
+					kind: "editor",
+					title,
+					message: "",
+					options: [],
+					selectedIndex: 0,
+					value: prefill ?? "",
+				},
+				editor: undefined,
+				requestRender: undefined,
+				done: undefined,
+				finished: false,
+				result: undefined,
+			};
+			state.currentUiDialog = dialog;
+			sendCurrentUiDialogState(sessionId);
+
+			try {
+				return await ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+					setKeybindings(keybindings);
+					setKittyProtocolActive(tui.terminal.kittyProtocolActive);
+
+					const editorComponent = new ExtensionEditorComponent(
+						tui,
+						keybindings,
+						title,
+						prefill,
+						(value) => {
+							setTextValueDialogValue(dialog, value, { updateComponent: false });
+							finishCurrentEditorDialog(dialog, {
+								value,
+								cancelled: false,
+							});
+						},
+						() => {
+							finishCurrentEditorDialog(dialog, { cancelled: true });
+						}
+					);
+					attachEditorDialog(dialog, editorComponent, () => tui.requestRender(), done);
+					return editorComponent;
+				});
+			} finally {
+				if (state.currentUiDialog === dialog && !dialog.finished) {
+					clearCurrentUiDialogState(dialog.sessionId);
+				}
+			}
+		}) as typeof ui.editor;
 
 		ui.confirm = (async (title: string, message: string, opts?: { signal?: AbortSignal; timeout?: number }) => {
 			const sessionId = state.currentSessionId;

@@ -234,11 +234,14 @@ struct PimuxSessionUIDialogState: Decodable, Equatable, Sendable, Identifiable {
 	let message: String
 	let options: [String]
 	let selectedIndex: Int
+	let placeholder: String?
+	let value: String?
 }
 
 enum PimuxSessionUIDialogAction: Encodable, Equatable, Sendable {
 	case move(direction: String)
 	case selectIndex(index: Int)
+	case setValue(value: String)
 	case submit
 	case cancel
 
@@ -246,6 +249,7 @@ enum PimuxSessionUIDialogAction: Encodable, Equatable, Sendable {
 		case type
 		case direction
 		case index
+		case value
 	}
 
 	func encode(to encoder: Encoder) throws {
@@ -257,6 +261,9 @@ enum PimuxSessionUIDialogAction: Encodable, Equatable, Sendable {
 		case .selectIndex(let index):
 			try container.encode("selectIndex", forKey: .type)
 			try container.encode(index, forKey: .index)
+		case .setValue(let value):
+			try container.encode("setValue", forKey: .type)
+			try container.encode(value, forKey: .value)
 		case .submit:
 			try container.encode("submit", forKey: .type)
 		case .cancel:

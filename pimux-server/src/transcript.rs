@@ -131,6 +131,8 @@ impl SessionUiState {
 pub enum SessionUiDialogKind {
     Confirm,
     Select,
+    Input,
+    Editor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +151,10 @@ pub struct SessionUiDialogState {
     pub message: String,
     pub options: Vec<String>,
     pub selected_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +165,9 @@ pub enum SessionUiDialogAction {
     },
     SelectIndex {
         index: usize,
+    },
+    SetValue {
+        value: String,
     },
     Submit,
     Cancel,

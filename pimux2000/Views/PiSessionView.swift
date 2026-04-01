@@ -64,6 +64,7 @@ struct PiSessionView: View {
 	@State private var currentUIDialog: PimuxSessionUIDialogState?
 	@State private var isUIDialogActionInFlight = false
 	@State private var uiDialogActionError: String?
+	@State private var uiDialogValueSyncTask: Task<Void, Never>?
 	@State private var agentIdleTask: Task<Void, Never>?
 	@State private var deferredStartupGeneration = 0
 	@State private var deferredStartupRequestID = 0
@@ -111,10 +112,17 @@ struct PiSessionView: View {
 
 				SessionUIDialogOverlay(
 					dialog: currentUIDialog,
+					inputText: Binding(
+						get: { currentUIDialog.value ?? "" },
+						set: { updateUIDialogTextValue($0) }
+					),
 					isSendingAction: isUIDialogActionInFlight,
 					errorMessage: uiDialogActionError,
 					onSelectOption: { index in
 						Task { await chooseUIDialogOption(index) }
+					},
+					onSubmitInput: {
+						Task { await submitUIDialogTextValue() }
 					},
 					onCancel: {
 						Task { await cancelUIDialog() }
@@ -369,6 +377,8 @@ struct PiSessionView: View {
 			currentUIDialog = nil
 			uiDialogActionError = nil
 			isUIDialogActionInFlight = false
+			uiDialogValueSyncTask?.cancel()
+			uiDialogValueSyncTask = nil
 			return
 		}
 
@@ -439,6 +449,8 @@ struct PiSessionView: View {
 		case .uiDialogState(let sequence, let state):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
+			uiDialogValueSyncTask?.cancel()
+			uiDialogValueSyncTask = nil
 			currentUIDialog = state
 			uiDialogActionError = nil
 		case .keepalive(let sequence, _):
@@ -671,7 +683,9 @@ struct PiSessionView: View {
 					title: dialog.title,
 					message: dialog.message,
 					options: dialog.options,
-					selectedIndex: index
+					selectedIndex: index,
+					placeholder: dialog.placeholder,
+					value: dialog.value
 				)
 				try await client.sendUIDialogAction(
 					sessionID: session.sessionID,
@@ -689,6 +703,81 @@ struct PiSessionView: View {
 		}
 	}
 
+	private func updateUIDialogTextValue(_ value: String) {
+		guard let dialog = currentUIDialog, dialog.kind == "input" || dialog.kind == "editor" else { return }
+		currentUIDialog = PimuxSessionUIDialogState(
+			id: dialog.id,
+			kind: dialog.kind,
+			title: dialog.title,
+			message: dialog.message,
+			options: dialog.options,
+			selectedIndex: dialog.selectedIndex,
+			placeholder: dialog.placeholder,
+			value: value
+		)
+		uiDialogActionError = nil
+		uiDialogValueSyncTask?.cancel()
+
+		guard let serverConfiguration else {
+			uiDialogActionError = "No pimux server configured."
+			uiDialogValueSyncTask = nil
+			return
+		}
+
+		let sessionID = session.sessionID
+		let dialogID = dialog.id
+		uiDialogValueSyncTask = Task {
+			do {
+				try await Task.sleep(for: .milliseconds(150))
+				let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+				try await client.sendUIDialogAction(
+					sessionID: sessionID,
+					dialogID: dialogID,
+					action: .setValue(value: value)
+				)
+			} catch is CancellationError {
+				return
+			} catch {
+				guard !Task.isCancelled else { return }
+				await MainActor.run {
+					if currentUIDialog?.id == dialogID {
+						uiDialogActionError = error.localizedDescription
+					}
+				}
+			}
+		}
+	}
+
+	private func submitUIDialogTextValue() async {
+		guard let dialog = currentUIDialog, dialog.kind == "input" || dialog.kind == "editor" else { return }
+		guard let serverConfiguration else {
+			uiDialogActionError = "No pimux server configured."
+			return
+		}
+
+		uiDialogValueSyncTask?.cancel()
+		uiDialogValueSyncTask = nil
+		isUIDialogActionInFlight = true
+		uiDialogActionError = nil
+		defer { isUIDialogActionInFlight = false }
+
+		do {
+			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+			try await client.sendUIDialogAction(
+				sessionID: session.sessionID,
+				dialogID: dialog.id,
+				action: .setValue(value: dialog.value ?? "")
+			)
+			try await client.sendUIDialogAction(
+				sessionID: session.sessionID,
+				dialogID: dialog.id,
+				action: .submit
+			)
+		} catch {
+			uiDialogActionError = error.localizedDescription
+		}
+	}
+
 	private func cancelUIDialog() async {
 		guard let dialog = currentUIDialog else { return }
 		guard let serverConfiguration else {
@@ -696,6 +785,8 @@ struct PiSessionView: View {
 			return
 		}
 
+		uiDialogValueSyncTask?.cancel()
+		uiDialogValueSyncTask = nil
 		isUIDialogActionInFlight = true
 		uiDialogActionError = nil
 		defer { isUIDialogActionInFlight = false }
@@ -834,9 +925,11 @@ private struct TranscriptWarningView: View {
 
 private struct SessionUIDialogOverlay: View {
 	let dialog: PimuxSessionUIDialogState
+	let inputText: Binding<String>
 	let isSendingAction: Bool
 	let errorMessage: String?
 	let onSelectOption: (Int) -> Void
+	let onSubmitInput: () -> Void
 	let onCancel: () -> Void
 
 	var body: some View {
@@ -850,36 +943,80 @@ private struct SessionUIDialogOverlay: View {
 					.foregroundStyle(.secondary)
 			}
 
-			VStack(spacing: 10) {
-				ForEach(Array(dialog.options.enumerated()), id: \.offset) { index, option in
-					Button {
-						onSelectOption(index)
-					} label: {
-						HStack(spacing: 12) {
-							Text(option)
-								.fontWeight(dialog.selectedIndex == index ? .semibold : .regular)
-							Spacer()
-							if dialog.selectedIndex == index {
-								Image(systemName: "checkmark.circle.fill")
-									.foregroundStyle(.tint)
-							}
-						}
-						.padding(.horizontal, 14)
-						.padding(.vertical, 12)
-						.frame(maxWidth: .infinity)
-						.background(
-							dialog.selectedIndex == index
-								? AnyShapeStyle(.tint.opacity(0.14))
-								: AnyShapeStyle(.regularMaterial),
-							in: RoundedRectangle(cornerRadius: 12)
-						)
-						.overlay(
-							RoundedRectangle(cornerRadius: 12)
-								.stroke(dialog.selectedIndex == index ? Color.accentColor : Color.secondary.opacity(0.18), lineWidth: 1)
-						)
-					}
-					.buttonStyle(.plain)
+			if dialog.kind == "input" {
+				TextField(dialog.placeholder ?? "", text: inputText)
+					.textFieldStyle(.roundedBorder)
+					.submitLabel(.done)
 					.disabled(isSendingAction)
+					.onSubmit(onSubmitInput)
+
+				HStack {
+					Spacer()
+					Button("Cancel", role: .cancel, action: onCancel)
+						.disabled(isSendingAction)
+					Button("Submit", action: onSubmitInput)
+						.disabled(isSendingAction)
+				}
+			} else if dialog.kind == "editor" {
+				TextEditor(text: inputText)
+					.font(.system(.body, design: .monospaced))
+					.frame(minHeight: 220)
+					.padding(8)
+					.background(
+						RoundedRectangle(cornerRadius: 12)
+							.fill(.regularMaterial)
+					)
+					.overlay(
+						RoundedRectangle(cornerRadius: 12)
+							.stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+					)
+					.disabled(isSendingAction)
+
+				HStack {
+					Spacer()
+					Button("Cancel", role: .cancel, action: onCancel)
+						.disabled(isSendingAction)
+					Button("Submit", action: onSubmitInput)
+						.disabled(isSendingAction)
+				}
+			} else {
+				VStack(spacing: 10) {
+					ForEach(Array(dialog.options.enumerated()), id: \.offset) { index, option in
+						Button {
+							onSelectOption(index)
+						} label: {
+							HStack(spacing: 12) {
+								Text(option)
+									.fontWeight(dialog.selectedIndex == index ? .semibold : .regular)
+								Spacer()
+								if dialog.selectedIndex == index {
+									Image(systemName: "checkmark.circle.fill")
+										.foregroundStyle(.tint)
+								}
+							}
+							.padding(.horizontal, 14)
+							.padding(.vertical, 12)
+							.frame(maxWidth: .infinity)
+							.background(
+								dialog.selectedIndex == index
+									? AnyShapeStyle(.tint.opacity(0.14))
+									: AnyShapeStyle(.regularMaterial),
+								in: RoundedRectangle(cornerRadius: 12)
+							)
+							.overlay(
+								RoundedRectangle(cornerRadius: 12)
+									.stroke(dialog.selectedIndex == index ? Color.accentColor : Color.secondary.opacity(0.18), lineWidth: 1)
+							)
+						}
+						.buttonStyle(.plain)
+						.disabled(isSendingAction)
+					}
+				}
+
+				HStack {
+					Spacer()
+					Button("Cancel", role: .cancel, action: onCancel)
+						.disabled(isSendingAction)
 				}
 			}
 
@@ -897,12 +1034,6 @@ private struct SessionUIDialogOverlay: View {
 				Text(verbatim: errorMessage)
 					.font(.caption)
 					.foregroundStyle(.red)
-			}
-
-			HStack {
-				Spacer()
-				Button("Cancel", role: .cancel, action: onCancel)
-					.disabled(isSendingAction)
 			}
 		}
 		.padding(20)
@@ -928,11 +1059,15 @@ private struct SessionUIDialogOverlay: View {
 				title: "Pimux Live Confirm Test",
 				message: "Choose from either the Pi TUI or the iOS app. Does this confirm stay mirrored and resolve correctly?",
 				options: ["Yes", "No"],
-				selectedIndex: 0
+				selectedIndex: 0,
+				placeholder: nil,
+				value: nil
 			),
+			inputText: .constant(""),
 			isSendingAction: false,
 			errorMessage: nil,
 			onSelectOption: { _ in },
+			onSubmitInput: {},
 			onCancel: {}
 		)
 		.padding()
@@ -949,11 +1084,65 @@ private struct SessionUIDialogOverlay: View {
 				title: "Pimux Live Select Test",
 				message: "",
 				options: ["Alpha", "Beta", "Gamma"],
-				selectedIndex: 1
+				selectedIndex: 1,
+				placeholder: nil,
+				value: nil
 			),
+			inputText: .constant(""),
 			isSendingAction: false,
 			errorMessage: nil,
 			onSelectOption: { _ in },
+			onSubmitInput: {},
+			onCancel: {}
+		)
+		.padding()
+	}
+}
+
+#Preview("Session UI input dialog") {
+	ZStack {
+		Color(.systemBackground)
+		SessionUIDialogOverlay(
+			dialog: PimuxSessionUIDialogState(
+				id: "input-1",
+				kind: "input",
+				title: "Pimux Live Input Test",
+				message: "",
+				options: [],
+				selectedIndex: 0,
+				placeholder: "Type from either the Pi TUI or the iOS app.",
+				value: "hello"
+			),
+			inputText: .constant("hello"),
+			isSendingAction: false,
+			errorMessage: nil,
+			onSelectOption: { _ in },
+			onSubmitInput: {},
+			onCancel: {}
+		)
+		.padding()
+	}
+}
+
+#Preview("Session UI editor dialog") {
+	ZStack {
+		Color(.systemBackground)
+		SessionUIDialogOverlay(
+			dialog: PimuxSessionUIDialogState(
+				id: "editor-1",
+				kind: "editor",
+				title: "Pimux Live Editor Test",
+				message: "",
+				options: [],
+				selectedIndex: 0,
+				placeholder: nil,
+				value: "Edit this text from either the Pi TUI or the iOS app.\n\nDoes this editor stay mirrored and resolve correctly?"
+			),
+			inputText: .constant("Edit this text from either the Pi TUI or the iOS app.\n\nDoes this editor stay mirrored and resolve correctly?"),
+			isSendingAction: false,
+			errorMessage: nil,
+			onSelectOption: { _ in },
+			onSubmitInput: {},
 			onCancel: {}
 		)
 		.padding()

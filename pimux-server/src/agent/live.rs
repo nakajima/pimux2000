@@ -31,7 +31,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub const DEFAULT_DETACHED_CAPACITY: usize = 3;
 pub const DEFAULT_DETACHED_TTL: Duration = Duration::from_secs(180);
 const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
-const LIVE_PROTOCOL_VERSION: u32 = 3;
+const LIVE_PROTOCOL_VERSION: u32 = 5;
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const GET_COMMANDS_TIMEOUT: Duration = Duration::from_secs(5);
 const UI_DIALOG_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1876,6 +1876,8 @@ mod tests {
                     message: "Proceed?".to_string(),
                     options: vec!["Yes".to_string(), "No".to_string()],
                     selected_index: 0,
+                    placeholder: None,
+                    value: None,
                 }),
             })
             .await;
