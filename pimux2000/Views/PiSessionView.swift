@@ -566,13 +566,18 @@ struct PiSessionView: View {
 			return
 		}
 
-		let pendingMessage = PendingLocalMessage(
-			body: body,
-			images: readyImages,
-			confirmedUserMessageBaseline: confirmedUserMessageCount
-		)
-		transcriptForcePinToken &+= 1
-		pendingMessages.append(pendingMessage)
+		let showsPendingMessage = !isRecognizedNonBuiltinSlashCommand(body)
+		let pendingMessage = showsPendingMessage
+			? PendingLocalMessage(
+				body: body,
+				images: readyImages,
+				confirmedUserMessageBaseline: confirmedUserMessageCount
+			)
+			: nil
+		if let pendingMessage {
+			transcriptForcePinToken &+= 1
+			pendingMessages.append(pendingMessage)
+		}
 		let savedDraftImages = draftImages
 		draftMessage = ""
 		draftImages = []
@@ -587,12 +592,34 @@ struct PiSessionView: View {
 			markAgentBusy()
 			await loadMessages()
 		} catch {
-			pendingMessages.removeAll { $0.id == pendingMessage.id }
+			if let pendingMessage {
+				pendingMessages.removeAll { $0.id == pendingMessage.id }
+			}
 			draftMessage = body
 			draftImages = savedDraftImages
 			sendError = error.localizedDescription
 			print("Error sending message for \(session.sessionID): \(error)")
 		}
+	}
+
+	private func isRecognizedNonBuiltinSlashCommand(_ body: String) -> Bool {
+		guard let context = SlashCommand.draftContext(for: body) else { return false }
+
+		let commandName: String = switch context.phase {
+		case .commandName(let prefix):
+			prefix
+		case .arguments(let commandName, _):
+			commandName
+		}
+
+		guard let command = SlashCommand.command(
+			named: commandName,
+			from: SlashCommand.merged(custom: customCommands)
+		) else {
+			return false
+		}
+
+		return command.source != "builtin"
 	}
 
 	private enum BuiltinSlashCommand {

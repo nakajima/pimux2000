@@ -9,6 +9,9 @@ use std::{
     },
 };
 
+use tower_http::trace::TraceLayer;
+use tracing::{error, info, warn};
+
 use axum::{
     Json, Router,
     body::Body,
@@ -144,9 +147,10 @@ impl AppState {
         let hosts = match load_host_registry(&path) {
             Ok(hosts) => hosts,
             Err(error) => {
-                eprintln!(
-                    "warning: failed to load persisted host registry from {}: {error}",
-                    path.display()
+                warn!(
+                    path = %path.display(),
+                    %error,
+                    "failed to load persisted host registry"
                 );
                 HashMap::new()
             }
@@ -272,12 +276,12 @@ pub async fn start() -> Result<(), BoxError> {
     let port = port_from_env()?;
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-    println!("server listening on http://{}", listener.local_addr()?);
+    info!("server listening on http://{}", listener.local_addr()?);
 
     let _mdns = match start_mdns_advertisement(port) {
         Ok(advertisement) => advertisement,
         Err(error) => {
-            eprintln!("warning: failed to start Bonjour advertisement: {error}");
+            warn!(%error, "failed to start Bonjour advertisement");
             None
         }
     };
@@ -341,6 +345,7 @@ fn app(state: AppState) -> Router {
         )
         .route("/agent/connect", get(agent_connect))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
@@ -366,7 +371,7 @@ fn start_mdns_advertisement(port: u16) -> Result<Option<MdnsAdvertisement>, BoxE
         std::thread::spawn(move || {
             while let Ok(event) = receiver.recv() {
                 if let DaemonEvent::Error(error) = event {
-                    eprintln!("warning: pimux Bonjour error: {error}");
+                    warn!(%error, "Bonjour daemon error");
                 }
             }
         });
@@ -389,7 +394,7 @@ fn start_mdns_advertisement(port: u16) -> Result<Option<MdnsAdvertisement>, BoxE
     .enable_addr_auto();
 
     daemon.register(service_info)?;
-    println!(
+    info!(
         "advertising {PIMUX_MDNS_SERVICE_TYPE} via Bonjour as `{instance_name}` on {host_name}:{port}"
     );
 
@@ -1135,7 +1140,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
         let message = match message {
             Ok(message) => message,
             Err(error) => {
-                eprintln!("agent websocket error: {error}");
+                error!(%error, "agent websocket error");
                 break;
             }
         };
@@ -1145,7 +1150,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                 let incoming = match serde_json::from_str::<AgentToServerMessage>(&text) {
                     Ok(incoming) => incoming,
                     Err(error) => {
-                        eprintln!("invalid agent websocket message: {error}");
+                        warn!(%error, "invalid agent websocket message");
                         continue;
                     }
                 };
@@ -1167,7 +1172,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                     }
                     AgentToServerMessage::HostSnapshot { sessions } => {
                         let Some(host) = current_host.clone() else {
-                            eprintln!("received host snapshot before hello");
+                            warn!("received host snapshot before hello");
                             continue;
                         };
                         update_host_snapshot(&state, host, sessions).await;
@@ -1177,7 +1182,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         active_session,
                     } => {
                         let Some(host) = current_host.as_ref() else {
-                            eprintln!("received live session update before hello");
+                            warn!("received live session update before hello");
                             continue;
                         };
                         let changed = {
@@ -1200,7 +1205,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         ui_state,
                     } => {
                         let Some(_host) = current_host.as_ref() else {
-                            eprintln!("received live ui update before hello");
+                            warn!("received live ui update before hello");
                             continue;
                         };
                         let changed = {
@@ -1216,7 +1221,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         ui_dialog_state,
                     } => {
                         let Some(_host) = current_host.as_ref() else {
-                            eprintln!("received live ui dialog update before hello");
+                            warn!("received live ui dialog update before hello");
                             continue;
                         };
                         let changed = {
@@ -1237,7 +1242,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         terminal_only_ui_state,
                     } => {
                         let Some(_host) = current_host.as_ref() else {
-                            eprintln!("received terminal-only ui update before hello");
+                            warn!("received terminal-only ui update before hello");
                             continue;
                         };
                         let changed = {
@@ -1264,7 +1269,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         error,
                     } => {
                         let Some(host) = current_host.as_ref() else {
-                            eprintln!("received transcript result before hello");
+                            warn!("received transcript result before hello");
                             continue;
                         };
                         fulfill_fetch_result(&state, &host.location, &request_id, session, error)
@@ -1277,7 +1282,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         error,
                     } => {
                         let Some(host) = current_host.as_ref() else {
-                            eprintln!("received attachment result before hello");
+                            warn!("received attachment result before hello");
                             continue;
                         };
                         fulfill_attachment_fetch_result(
@@ -1292,7 +1297,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                     }
                     AgentToServerMessage::SendMessageResult { request_id, error } => {
                         let Some(host) = current_host.as_ref() else {
-                            eprintln!("received send message result before hello");
+                            warn!("received send message result before hello");
                             continue;
                         };
                         fulfill_send_result(&state, &host.location, &request_id, error).await;
@@ -1303,7 +1308,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         error,
                     } => {
                         let Some(host) = current_host.as_ref() else {
-                            eprintln!("received get commands result before hello");
+                            warn!("received get commands result before hello");
                             continue;
                         };
                         fulfill_get_commands_result(
@@ -1321,7 +1326,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         error,
                     } => {
                         let Some(host) = current_host.as_ref() else {
-                            eprintln!("received get command argument completions result before hello");
+                            warn!("received get command argument completions result before hello");
                             continue;
                         };
                         fulfill_get_command_argument_completions_result(
@@ -1335,7 +1340,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                     }
                     AgentToServerMessage::UiDialogActionResult { request_id, error } => {
                         let Some(host) = current_host.as_ref() else {
-                            eprintln!("received ui dialog action result before hello");
+                            warn!("received ui dialog action result before hello");
                             continue;
                         };
                         fulfill_ui_dialog_action_result(&state, &host.location, &request_id, error)
@@ -1347,7 +1352,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         error,
                     } => {
                         let Some(host) = current_host.as_ref() else {
-                            eprintln!("received builtin command result before hello");
+                            warn!("received builtin command result before hello");
                             continue;
                         };
                         fulfill_builtin_command_result(
@@ -2261,9 +2266,10 @@ async fn persist_hosts(state: &AppState) {
 
     let hosts = state.hosts.read().await.clone();
     if let Err(error) = persist_host_registry(&path, &hosts) {
-        eprintln!(
-            "warning: failed to persist host registry to {}: {error}",
-            path.display()
+        warn!(
+            path = %path.display(),
+            %error,
+            "failed to persist host registry"
         );
     }
 }

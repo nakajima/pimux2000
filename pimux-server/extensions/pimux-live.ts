@@ -176,10 +176,12 @@ type BoundCommandContextActions = {
 	reload?: () => Promise<void>;
 };
 
+type BoundExtensionRunner = Pick<ExtensionRunner, "getCommand" | "createCommandContext">;
 type BoundAgentSession = Pick<AgentSession, "prompt" | "sessionManager" | "extensionRunner">;
 
 type PimuxLiveGlobalState = typeof globalThis & {
 	__pimuxLiveBoundCommandContextActions?: BoundCommandContextActions;
+	__pimuxLiveBoundExtensionRunner?: BoundExtensionRunner;
 	__pimuxLiveCommandContextBindingsPatched?: boolean;
 	__pimuxLiveAgentSession?: BoundAgentSession;
 	__pimuxLiveAgentSessionBindingPatched?: boolean;
@@ -193,6 +195,10 @@ function currentBoundCommandContextActions() {
 	return pimuxLiveGlobalState().__pimuxLiveBoundCommandContextActions;
 }
 
+function currentExtensionRunner() {
+	return pimuxLiveGlobalState().__pimuxLiveBoundExtensionRunner;
+}
+
 function ensureCommandContextBindingsPatched() {
 	const globalState = pimuxLiveGlobalState();
 	if (globalState.__pimuxLiveCommandContextBindingsPatched) return;
@@ -201,7 +207,16 @@ function ensureCommandContextBindingsPatched() {
 	const originalBindCommandContext = ExtensionRunner.prototype.bindCommandContext;
 	ExtensionRunner.prototype.bindCommandContext = function (actions: BoundCommandContextActions | undefined) {
 		globalState.__pimuxLiveBoundCommandContextActions = actions;
+		globalState.__pimuxLiveBoundExtensionRunner = this as BoundExtensionRunner;
 		return originalBindCommandContext.call(this, actions);
+	};
+
+	const originalGetRegisteredCommands = ExtensionRunner.prototype.getRegisteredCommands;
+	ExtensionRunner.prototype.getRegisteredCommands = function (
+		...args: Parameters<ExtensionRunner["getRegisteredCommands"]>
+	) {
+		globalState.__pimuxLiveBoundExtensionRunner = this as BoundExtensionRunner;
+		return originalGetRegisteredCommands.apply(this, args);
 	};
 }
 
@@ -221,6 +236,18 @@ function ensureAgentSessionBindingPatched() {
 		globalState.__pimuxLiveAgentSession = this as BoundAgentSession;
 		return await originalBindExtensions.apply(this, args);
 	};
+
+	const originalBindExtensionCore = (AgentSession.prototype as any)._bindExtensionCore;
+	if (typeof originalBindExtensionCore === "function") {
+		(AgentSession.prototype as any)._bindExtensionCore = function (...args: unknown[]) {
+			globalState.__pimuxLiveAgentSession = this as BoundAgentSession;
+			const [runner] = args;
+			if (runner && typeof runner === "object") {
+				globalState.__pimuxLiveBoundExtensionRunner = runner as BoundExtensionRunner;
+			}
+			return originalBindExtensionCore.apply(this, args);
+		};
+	}
 }
 
 function isConfirmDialog(dialog: RuntimeUiDialog): dialog is RuntimeConfirmDialog {
@@ -1417,31 +1444,80 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	function dispatchUserMessage(sessionId: string, body: string, images: PimuxInputImage[] = []): string | undefined {
-		const agentSession = currentAgentSession();
-		if (!agentSession) {
-			return "no live pi agent session is available";
-		}
+	function userMessageContent(
+		body: string,
+		images: PimuxInputImage[]
+	): string | Array<{ type: "text"; text: string } | PimuxInputImage> {
+		if (images.length === 0) return body;
 
-		const activeAgentSessionId = agentSession.sessionManager.getSessionId();
-		if (!activeAgentSessionId || activeAgentSessionId !== sessionId) {
+		const content: Array<{ type: "text"; text: string } | PimuxInputImage> = [];
+		if (body) {
+			content.push({ type: "text", text: body });
+		}
+		content.push(...images);
+		return content;
+	}
+
+	function dispatchUserMessage(sessionId: string, body: string, images: PimuxInputImage[] = []): string | undefined {
+		const extensionRunner = currentExtensionRunner();
+		const agentSession = currentAgentSession();
+		const activeSessionId =
+			state.currentSessionContext?.sessionManager.getSessionId() ||
+			agentSession?.sessionManager.getSessionId() ||
+			state.currentSessionId;
+		if (!activeSessionId || activeSessionId !== sessionId) {
 			return `session ${sessionId} is not currently attached in this pi runtime`;
 		}
 
-		void agentSession
-			.prompt(body, {
-				images: images.length > 0 ? images : undefined,
-				streamingBehavior: state.isAgentBusy ? "followUp" : undefined,
-			})
-			.catch((error: unknown) => {
+		const trimmedBody = body.trim();
+		const spaceIndex = trimmedBody.indexOf(" ");
+		const commandName =
+			trimmedBody.startsWith("/") && trimmedBody.length > 1
+				? (spaceIndex === -1 ? trimmedBody.slice(1) : trimmedBody.slice(1, spaceIndex))
+				: undefined;
+		const extensionCommand = commandName ? extensionRunner?.getCommand(commandName) : undefined;
+		if (extensionCommand) {
+			const ctx = extensionRunner?.createCommandContext();
+			if (!ctx) {
+				return "no live pi command context is available";
+			}
+
+			const args = spaceIndex === -1 ? "" : trimmedBody.slice(spaceIndex + 1);
+			void Promise.resolve(extensionCommand.handler(args, ctx)).catch((error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
-				const ctx = state.currentSessionContext;
-				if (ctx && ctx.sessionManager.getSessionId() === sessionId) {
-					ctx.ui.notify(`Failed to submit input: ${message}`, "error");
-					return;
-				}
-				console.error(`pimux live send failed for session ${sessionId}: ${message}`);
+				ctx.ui.notify(`Failed to execute /${commandName}: ${message}`, "error");
 			});
+			return;
+		}
+
+		if (agentSession && agentSession.sessionManager.getSessionId() === sessionId) {
+			void agentSession
+				.prompt(body, {
+					images: images.length > 0 ? images : undefined,
+					streamingBehavior: state.isAgentBusy ? "followUp" : undefined,
+				})
+				.catch((error: unknown) => {
+					const message = error instanceof Error ? error.message : String(error);
+					const ctx = state.currentSessionContext;
+					if (ctx && ctx.sessionManager.getSessionId() === sessionId) {
+						ctx.ui.notify(`Failed to submit input: ${message}`, "error");
+						return;
+					}
+					console.error(`pimux live send failed for session ${sessionId}: ${message}`);
+				});
+			return;
+		}
+
+		if (trimmedBody.startsWith("/")) {
+			return "no live pi agent session is available";
+		}
+
+		const content = userMessageContent(body, images);
+		if (state.isAgentBusy) {
+			pi.sendUserMessage(content, { deliverAs: "followUp" });
+		} else {
+			pi.sendUserMessage(content);
+		}
 	}
 
 	function handleGetCommands(requestId: string, sessionId: string) {
@@ -1481,7 +1557,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			const command = currentAgentSession()?.extensionRunner?.getCommand(commandName);
+			const command =
+				currentExtensionRunner()?.getCommand(commandName) ||
+				currentAgentSession()?.extensionRunner?.getCommand(commandName);
 			const completions = command?.getArgumentCompletions?.(argumentPrefix) ?? [];
 			respondToCommandArgumentCompletionsRequest(
 				requestId,

@@ -174,8 +174,6 @@ struct SessionTranscriptView: UIViewRepresentable {
 
 			if structureChanged {
 				// Structure changed (messages added/removed).
-				// The flipped transform inverts the diffable data source's automatic
-				// offset adjustment, so use reloadData semantics + manual preservation.
 				var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
 				snapshot.appendSections([0])
 				snapshot.appendItems(newItemIDs, toSection: 0)

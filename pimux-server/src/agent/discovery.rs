@@ -12,6 +12,7 @@ use std::{
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracing::warn;
 use walkdir::WalkDir;
 
 use crate::session::{ActiveSession, SessionContextUsage};
@@ -107,9 +108,10 @@ pub fn discover_sessions(pi_agent_dir: &Path) -> Result<Vec<DiscoveredSession>, 
 
         match parse_session_file(entry.path()) {
             Ok(session) => sessions.push(session),
-            Err(error) => eprintln!(
-                "skipping unreadable session file {}: {error}",
-                entry.path().display()
+            Err(error) => warn!(
+                path = %entry.path().display(),
+                %error,
+                "skipping unreadable session file"
             ),
         }
     }
@@ -357,7 +359,7 @@ fn model_capabilities(model: &str) -> Option<ModelCapabilities> {
         .get_or_init(|| match load_model_capabilities() {
             Ok(caps) => caps,
             Err(error) => {
-                eprintln!("warning: failed to load pi model capabilities: {error}");
+                warn!(%error, "failed to load pi model capabilities");
                 HashMap::new()
             }
         })

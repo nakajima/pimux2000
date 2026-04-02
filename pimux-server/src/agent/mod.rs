@@ -13,6 +13,8 @@ use std::{
     time::Instant,
 };
 
+use tracing::{error, info, warn};
+
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use reqwest::{Client, Url};
 use tokio::{
@@ -209,13 +211,10 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     let client = Client::new();
     match ensure_server_reachable(&client, &config.server_url, &health_url, &version_url).await {
         Ok(()) => {
-            println!("verified pimux server at {}", config.server_url);
+            info!("verified pimux server at {}", config.server_url);
         }
         Err(error) => {
-            eprintln!("{error}");
-            eprintln!(
-                "server is unavailable at startup; agent will keep retrying the websocket connection in the background"
-            );
+            warn!(%error, "server is unavailable at startup; agent will keep retrying the websocket connection in the background");
         }
     }
     let live_store = live::LiveSessionStoreHandle::new(
@@ -227,30 +226,30 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     match extension::ensure_current(&pi_agent_dir) {
         Ok(result) => match result.status {
             extension::SyncStatus::AlreadyCurrent => {
-                println!(
+                info!(
                     "pimux live extension is current at {}",
                     result.path.display()
                 );
             }
             extension::SyncStatus::Installed => {
-                println!(
+                info!(
                     "installed bundled pimux live extension to {}",
                     result.path.display()
                 );
             }
             extension::SyncStatus::Updated => {
-                eprintln!(
+                warn!(
                     "updated bundled pimux live extension at {}; newly started pi sessions will pick it up, but already-running pi sessions may still be using older loaded extension code",
                     result.path.display()
                 );
             }
         },
         Err(error) => {
-            eprintln!("failed to sync bundled pimux live extension at startup: {error}");
+            warn!(%error, "failed to sync bundled pimux live extension at startup");
         }
     }
 
-    println!(
+    info!(
         "agent watching {} and connecting to {} as {}",
         session_root.display(),
         websocket_url,
@@ -268,11 +267,11 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     .await
     {
         Ok(()) => {
-            println!("live ipc listening on {}", live_socket_path.display());
+            info!("live ipc listening on {}", live_socket_path.display());
             None
         }
         Err(error) => {
-            eprintln!("live ipc disabled: {error}");
+            warn!(%error, "live ipc disabled");
             Some(live_updates_tx.clone())
         }
     };
@@ -297,13 +296,13 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     )
     .await
     {
-        eprintln!("initial snapshot build failed: {error}");
+        error!(%error, "initial snapshot build failed");
     }
 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                println!("agent shutting down");
+                info!("agent shutting down");
                 break;
             }
             connection_event = connection_events_rx.recv() => {
@@ -314,7 +313,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                 match connection_event {
                     connection::Event::Connected => {
                         connected = true;
-                        println!("connected to server websocket");
+                        info!("connected to server websocket");
                         if let Err(error) = send_current_state(
                             &pi_agent_dir,
                             &summary_config,
@@ -325,12 +324,12 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                             &mut last_full_summary_at,
                             &channel_tx,
                         ).await {
-                            eprintln!("failed to publish current state after connect: {error}");
+                            error!(%error, "failed to publish current state after connect");
                         }
                     }
                     connection::Event::Disconnected => {
                         connected = false;
-                        eprintln!("server websocket disconnected; waiting to reconnect...");
+                        warn!("server websocket disconnected; waiting to reconnect...");
                     }
                     connection::Event::Message(message) => {
                         if let Err(error) = handle_server_message(
@@ -342,7 +341,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                             &live_updates_tx,
                             &channel_tx,
                         ).await {
-                            eprintln!("failed to handle server message: {error}");
+                            error!(%error, "failed to handle server message");
                         }
                     }
                 }
@@ -407,7 +406,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                     connected,
                     &channel_tx,
                 ).await {
-                    eprintln!("failed to refresh host snapshot: {error}");
+                    error!(%error, "failed to refresh host snapshot");
                 }
             }
         }
@@ -512,7 +511,7 @@ async fn refresh_host_snapshot(
         let _ = channel_tx.send(AgentToServerMessage::HostSnapshot {
             sessions: report.active_sessions.clone(),
         });
-        println!("reported {} sessions", report.active_sessions.len());
+        info!("reported {} sessions", report.active_sessions.len());
     }
 
     Ok(())
@@ -1242,7 +1241,7 @@ fn create_watcher(
                     let _ = tx.send(());
                 }
             }
-            Err(error) => eprintln!("watch error: {error}"),
+            Err(error) => warn!(%error, "watch error"),
         })?;
 
     watcher.watch(&watched_path, RecursiveMode::Recursive)?;

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use tracing::{error, warn};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     time::sleep,
@@ -48,7 +49,7 @@ async fn run(
                 )
                 .await
                 {
-                    eprintln!("agent websocket hello failed: {error}");
+                    error!(%error, "agent websocket hello failed");
                     sleep(RECONNECT_DELAY).await;
                     continue;
                 }
@@ -61,7 +62,7 @@ async fn run(
                             match maybe_outgoing {
                                 Some(message) => {
                                     if let Err(error) = send_json(&mut sender, &message).await {
-                                        eprintln!("agent websocket send failed: {error}");
+                                        error!(%error, "agent websocket send failed");
                                         break;
                                     }
                                 }
@@ -76,14 +77,14 @@ async fn run(
                                             let _ = events.send(Event::Message(message));
                                         }
                                         Err(error) => {
-                                            eprintln!("invalid server websocket message: {error}");
+                                            warn!(%error, "invalid server websocket message");
                                         }
                                     }
                                 }
                                 Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) | Some(Ok(Message::Binary(_))) | Some(Ok(Message::Frame(_))) => {}
                                 Some(Ok(Message::Close(_))) => break,
                                 Some(Err(error)) => {
-                                    eprintln!("agent websocket receive failed: {error}");
+                                    error!(%error, "agent websocket receive failed");
                                     break;
                                 }
                                 None => break,
@@ -95,8 +96,9 @@ async fn run(
                 let _ = events.send(Event::Disconnected);
             }
             Err(error) => {
-                eprintln!(
-                    "agent websocket connect failed: {error}; retrying in {}s",
+                warn!(
+                    %error,
+                    "agent websocket connect failed; retrying in {}s",
                     RECONNECT_DELAY.as_secs()
                 );
             }

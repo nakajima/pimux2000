@@ -11,6 +11,7 @@ use tokio::{
     process::Command,
     sync::{mpsc::UnboundedSender, oneshot},
 };
+use tracing::{error, warn};
 
 use crate::message::{
     ImageContent, Message, MessageContentBlock, Role, collapse_whitespace, normalized_display_text,
@@ -283,7 +284,7 @@ async fn run_headless_prompt(
         }
 
         if let Err(error) = child.kill().await {
-            eprintln!("failed to stop pi rpc runner for {}: {error}", session_id);
+            warn!(session_id, %error, "failed to stop pi rpc runner");
         }
         let _ = child.wait().await;
         Ok(())
@@ -294,7 +295,7 @@ async fn run_headless_prompt(
         if let Some(ack_tx) = ack_tx.take() {
             let _ = ack_tx.send(Err(error.clone()));
         }
-        eprintln!("headless pi runner failed for {}: {error}", session_id);
+        error!(session_id, %error, "headless pi runner failed");
     }
 
     if !was_active {
@@ -360,7 +361,7 @@ async fn log_stderr(session_id: String, stderr: tokio::process::ChildStderr) {
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim();
         if !line.is_empty() {
-            eprintln!("pi rpc stderr [{}]: {}", session_id, line);
+            warn!(session_id, "pi rpc stderr: {}", line);
         }
     }
 }
@@ -657,7 +658,7 @@ async fn run_rpc_commands(
     }
 
     if let Err(error) = child.kill().await {
-        eprintln!("failed to stop pi rpc runner for {}: {error}", session_id);
+        warn!(session_id, %error, "failed to stop pi rpc runner");
     }
     let _ = child.wait().await;
 
