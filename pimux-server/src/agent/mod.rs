@@ -25,7 +25,10 @@ use crate::{
     host::{HostAuth, HostIdentity},
     message::{ImageContent, attachment_payload, strip_inline_image_data},
     report::{ReportPayload, VersionResponse},
-    session::{parse_local_date_filter, utc_range_for_local_date},
+    session::{
+        ForkMessage, SessionBuiltinCommandRequest, SessionBuiltinCommandResponse,
+        parse_local_date_filter, utc_range_for_local_date,
+    },
     transcript::{SessionMessagesResponse, TranscriptFetchFulfillment},
 };
 
@@ -372,6 +375,17 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                                     ui_dialog_state,
                                 });
                             }
+                            live::LiveUpdate::TerminalOnlyUiState {
+                                session_id,
+                                terminal_only_ui_state,
+                            } => {
+                                let _ = channel_tx.send(
+                                    AgentToServerMessage::LiveTerminalOnlyUiUpdate {
+                                        session_id,
+                                        terminal_only_ui_state,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -446,6 +460,13 @@ async fn send_current_state(
         let _ = channel_tx.send(AgentToServerMessage::LiveUiDialogUpdate {
             session_id,
             ui_dialog_state: Some(ui_dialog_state),
+        });
+    }
+
+    for (session_id, terminal_only_ui_state) in live_store.all_terminal_only_ui_states().await {
+        let _ = channel_tx.send(AgentToServerMessage::LiveTerminalOnlyUiUpdate {
+            session_id,
+            terminal_only_ui_state: Some(terminal_only_ui_state),
         });
     }
 
@@ -625,6 +646,29 @@ async fn handle_server_message(
                 .map(|error| error.to_string());
             let _ =
                 channel_tx.send(AgentToServerMessage::UiDialogActionResult { request_id, error });
+        }
+        ServerToAgentMessage::BuiltinCommand {
+            request_id,
+            session_id,
+            action,
+        } => {
+            let (response, error) = match handle_builtin_command(
+                &session_id,
+                action,
+                pi_agent_dir,
+                live_store,
+                live_updates_tx,
+            )
+            .await
+            {
+                Ok(response) => (Some(response), None),
+                Err(error) => (None, Some(error)),
+            };
+            let _ = channel_tx.send(AgentToServerMessage::BuiltinCommandResult {
+                request_id,
+                response,
+                error,
+            });
         }
         ServerToAgentMessage::Ping => {
             let _ = channel_tx.send(AgentToServerMessage::Pong);
@@ -886,6 +930,170 @@ async fn handle_pimux_resummarize_command(
         live_updates_tx.clone(),
     )
     .await
+}
+
+async fn handle_builtin_command(
+    session_id: &str,
+    action: SessionBuiltinCommandRequest,
+    pi_agent_dir: &Path,
+    live_store: &live::LiveSessionStoreHandle,
+    live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
+) -> Result<SessionBuiltinCommandResponse, String> {
+    match action {
+        SessionBuiltinCommandRequest::SetSessionName { name } => {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                return Err("session name must not be empty".to_string());
+            }
+
+            let live_command = format!("/name {name}");
+            if try_run_live_builtin_command(session_id, &live_command, live_store).await? {
+                return Ok(SessionBuiltinCommandResponse::default());
+            }
+
+            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            send::set_session_name(discovered_session, name, pi_agent_dir.to_path_buf()).await?;
+            Ok(SessionBuiltinCommandResponse::default())
+        }
+        SessionBuiltinCommandRequest::Compact {
+            custom_instructions,
+        } => {
+            let custom_instructions = custom_instructions.and_then(trimmed_non_empty);
+            let live_command = match custom_instructions.as_deref() {
+                Some(custom_instructions) => format!("/compact {custom_instructions}"),
+                None => "/compact".to_string(),
+            };
+            if try_run_live_builtin_command(session_id, &live_command, live_store).await? {
+                return Ok(SessionBuiltinCommandResponse::default());
+            }
+
+            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            send::compact_session(
+                discovered_session,
+                custom_instructions,
+                pi_agent_dir.to_path_buf(),
+            )
+            .await?;
+            publish_persisted_snapshot_for_session(session_id, pi_agent_dir, live_updates_tx).await;
+            Ok(SessionBuiltinCommandResponse::default())
+        }
+        SessionBuiltinCommandRequest::Reload => {
+            if try_run_live_builtin_command(session_id, "/reload", live_store).await? {
+                return Ok(SessionBuiltinCommandResponse::default());
+            }
+
+            Err("reload requires an attached live pi session".to_string())
+        }
+        SessionBuiltinCommandRequest::NewSession => {
+            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            let state = send::new_session(discovered_session, pi_agent_dir.to_path_buf()).await?;
+            publish_persisted_snapshot_for_session(
+                &state.session_id,
+                pi_agent_dir,
+                live_updates_tx,
+            )
+            .await;
+            Ok(SessionBuiltinCommandResponse {
+                session_id: Some(state.session_id),
+                fork_messages: None,
+            })
+        }
+        SessionBuiltinCommandRequest::GetForkMessages => {
+            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            let messages = send::get_fork_messages(discovered_session, pi_agent_dir.to_path_buf())
+                .await?
+                .into_iter()
+                .map(|message| ForkMessage {
+                    entry_id: message.entry_id,
+                    text: message.text,
+                })
+                .collect();
+            Ok(SessionBuiltinCommandResponse {
+                session_id: None,
+                fork_messages: Some(messages),
+            })
+        }
+        SessionBuiltinCommandRequest::Fork { entry_id } => {
+            let entry_id = entry_id.trim().to_string();
+            if entry_id.is_empty() {
+                return Err("fork entry id must not be empty".to_string());
+            }
+
+            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            let state =
+                send::fork_session(discovered_session, entry_id, pi_agent_dir.to_path_buf())
+                    .await?;
+            publish_persisted_snapshot_for_session(
+                &state.session_id,
+                pi_agent_dir,
+                live_updates_tx,
+            )
+            .await;
+            Ok(SessionBuiltinCommandResponse {
+                session_id: Some(state.session_id),
+                fork_messages: None,
+            })
+        }
+    }
+}
+
+fn find_discovered_session(
+    pi_agent_dir: &Path,
+    session_id: &str,
+) -> Result<discovery::DiscoveredSession, String> {
+    let discovered_sessions =
+        discovery::discover_sessions(pi_agent_dir).map_err(|error| error.to_string())?;
+    discovered_sessions
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| format!("session {} was not found", session_id))
+}
+
+fn trimmed_non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+async fn try_run_live_builtin_command(
+    session_id: &str,
+    body: &str,
+    live_store: &live::LiveSessionStoreHandle,
+) -> Result<bool, String> {
+    match live_store
+        .send_user_message(session_id, body, Vec::new())
+        .await
+    {
+        Ok(()) => Ok(true),
+        Err(live::SendUserMessageError::Unavailable) => Ok(false),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+async fn publish_persisted_snapshot_for_session(
+    session_id: &str,
+    pi_agent_dir: &Path,
+    live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
+) {
+    let Ok(discovered_sessions) = discovery::discover_sessions(pi_agent_dir) else {
+        return;
+    };
+    let Some(discovered_session) = discovered_sessions
+        .into_iter()
+        .find(|session| session.id == session_id)
+    else {
+        return;
+    };
+    let Ok(snapshot) = transcript::build_persisted_snapshot(&discovered_session) else {
+        return;
+    };
+    let _ = live_updates_tx.send(live::LiveUpdate::Transcript {
+        snapshot,
+        active_session: None,
+    });
 }
 
 fn build_server_url(server_url: &str, path: &str) -> Result<Url, BoxError> {

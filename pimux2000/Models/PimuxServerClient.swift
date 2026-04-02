@@ -107,6 +107,7 @@ struct PimuxSessionMessagesResponse: Decodable, Equatable, Sendable {
 }
 
 struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
+	let messageId: Int?
 	let createdAt: Date
 	let role: String
 	let body: String
@@ -114,6 +115,7 @@ struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 	let blocks: [PimuxTranscriptMessageBlock]
 
 	enum CodingKeys: String, CodingKey {
+		case messageId
 		case createdAt = "created_at"
 		case role
 		case body
@@ -121,7 +123,8 @@ struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 		case blocks
 	}
 
-	init(createdAt: Date, role: String, body: String, toolName: String? = nil, blocks: [PimuxTranscriptMessageBlock]? = nil) {
+	init(messageId: Int? = nil, createdAt: Date, role: String, body: String, toolName: String? = nil, blocks: [PimuxTranscriptMessageBlock]? = nil) {
+		self.messageId = messageId
 		self.createdAt = createdAt
 		self.role = role
 		self.body = body
@@ -137,12 +140,13 @@ struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 
 	init(from decoder: Decoder) throws {
 		let container = try decoder.container(keyedBy: CodingKeys.self)
+		let messageId = try container.decodeIfPresent(Int.self, forKey: .messageId)
 		let createdAt = try container.decode(Date.self, forKey: .createdAt)
 		let role = try container.decode(String.self, forKey: .role)
 		let body = try container.decodeIfPresent(String.self, forKey: .body) ?? ""
 		let toolName = try container.decodeIfPresent(String.self, forKey: .toolName)
 		let blocks = try container.decodeIfPresent([PimuxTranscriptMessageBlock].self, forKey: .blocks)
-		self.init(createdAt: createdAt, role: role, body: body, toolName: toolName, blocks: blocks)
+		self.init(messageId: messageId, createdAt: createdAt, role: role, body: body, toolName: toolName, blocks: blocks)
 	}
 }
 
@@ -173,6 +177,60 @@ struct PimuxSessionCommand: Decodable, Equatable, Identifiable, Sendable {
 struct PimuxSessionCommandsResponse: Decodable, Sendable {
 	let sessionId: String
 	let commands: [PimuxSessionCommand]
+}
+
+struct PimuxSessionForkMessage: Decodable, Equatable, Sendable, Identifiable {
+	let entryID: String
+	let text: String
+
+	var id: String { entryID }
+
+	enum CodingKeys: String, CodingKey {
+		case entryID = "entryId"
+		case text
+	}
+}
+
+struct PimuxSessionBuiltinCommandResponse: Decodable, Equatable, Sendable {
+	let sessionId: String?
+	let forkMessages: [PimuxSessionForkMessage]?
+}
+
+enum PimuxSessionBuiltinCommandRequest: Encodable, Equatable, Sendable {
+	case setSessionName(name: String)
+	case compact(customInstructions: String?)
+	case reload
+	case newSession
+	case getForkMessages
+	case fork(entryID: String)
+
+	private enum CodingKeys: String, CodingKey {
+		case type
+		case name
+		case customInstructions
+		case entryID = "entryId"
+	}
+
+	func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		switch self {
+		case .setSessionName(let name):
+			try container.encode("setSessionName", forKey: .type)
+			try container.encode(name, forKey: .name)
+		case .compact(let customInstructions):
+			try container.encode("compact", forKey: .type)
+			try container.encodeIfPresent(customInstructions, forKey: .customInstructions)
+		case .reload:
+			try container.encode("reload", forKey: .type)
+		case .newSession:
+			try container.encode("newSession", forKey: .type)
+		case .getForkMessages:
+			try container.encode("getForkMessages", forKey: .type)
+		case .fork(let entryID):
+			try container.encode("fork", forKey: .type)
+			try container.encode(entryID, forKey: .entryID)
+		}
+	}
 }
 
 struct PimuxSessionUIState: Decodable, Equatable, Sendable {
@@ -236,6 +294,11 @@ struct PimuxSessionUIDialogState: Decodable, Equatable, Sendable, Identifiable {
 	let selectedIndex: Int
 	let placeholder: String?
 	let value: String?
+}
+
+struct PimuxSessionTerminalOnlyUIState: Decodable, Equatable, Sendable {
+	let kind: String
+	let reason: String
 }
 
 extension PimuxSessionUIDialogState {
@@ -337,6 +400,7 @@ enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 	case sessionState(sequence: UInt64, connected: Bool, missing: Bool, lastSeenAt: Date?)
 	case uiState(sequence: UInt64, state: PimuxSessionUIState)
 	case uiDialogState(sequence: UInt64, state: PimuxSessionUIDialogState?)
+	case terminalOnlyUiState(sequence: UInt64, state: PimuxSessionTerminalOnlyUIState?)
 	case keepalive(sequence: UInt64, timestamp: Date)
 
 	private enum CodingKeys: String, CodingKey {
@@ -377,6 +441,11 @@ enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 			self = .uiDialogState(
 				sequence: sequence,
 				state: try container.decodeIfPresent(PimuxSessionUIDialogState.self, forKey: .state)
+			)
+		case "terminalOnlyUiState":
+			self = .terminalOnlyUiState(
+				sequence: sequence,
+				state: try container.decodeIfPresent(PimuxSessionTerminalOnlyUIState.self, forKey: .state)
 			)
 		case "keepalive":
 			self = .keepalive(
@@ -515,6 +584,62 @@ struct PimuxServerClient {
 		)
 	}
 
+	func executeBuiltinCommand(
+		sessionID: String,
+		action: PimuxSessionBuiltinCommandRequest
+	) async throws -> PimuxSessionBuiltinCommandResponse {
+		let requestData: Data
+		do {
+			requestData = try JSONEncoder().encode(action)
+		} catch {
+			throw PimuxServerError.invalidResponse("Couldn't encode the builtin command request.")
+		}
+
+		return try await requestJSON(
+			PimuxSessionBuiltinCommandResponse.self,
+			path: "/sessions/\(sessionID)/builtin-command",
+			method: "POST",
+			bodyData: requestData,
+			contentType: "application/json"
+		)
+	}
+
+	func setSessionName(sessionID: String, name: String) async throws {
+		_ = try await executeBuiltinCommand(sessionID: sessionID, action: .setSessionName(name: name))
+	}
+
+	func compactSession(sessionID: String, customInstructions: String? = nil) async throws {
+		_ = try await executeBuiltinCommand(
+			sessionID: sessionID,
+			action: .compact(customInstructions: customInstructions)
+		)
+	}
+
+	func reloadSession(sessionID: String) async throws {
+		_ = try await executeBuiltinCommand(sessionID: sessionID, action: .reload)
+	}
+
+	func createNewSession(sessionID: String) async throws -> String {
+		let response = try await executeBuiltinCommand(sessionID: sessionID, action: .newSession)
+		guard let newSessionID = response.sessionId, !newSessionID.isEmpty else {
+			throw PimuxServerError.invalidResponse("Builtin new-session response did not include a sessionId.")
+		}
+		return newSessionID
+	}
+
+	func getForkMessages(sessionID: String) async throws -> [PimuxSessionForkMessage] {
+		let response = try await executeBuiltinCommand(sessionID: sessionID, action: .getForkMessages)
+		return response.forkMessages ?? []
+	}
+
+	func forkSession(sessionID: String, entryID: String) async throws -> String {
+		let response = try await executeBuiltinCommand(sessionID: sessionID, action: .fork(entryID: entryID))
+		guard let newSessionID = response.sessionId, !newSessionID.isEmpty else {
+			throw PimuxServerError.invalidResponse("Builtin fork response did not include a sessionId.")
+		}
+		return newSessionID
+	}
+
 	func sendMessage(sessionID: String, body: String, images: [PimuxInputImage] = []) async throws {
 		let requestData: Data
 		do {
@@ -605,9 +730,18 @@ struct PimuxServerClient {
 	private nonisolated func requestJSON<Response: Decodable>(
 		_ type: Response.Type,
 		path: String,
-		queryItems: [URLQueryItem] = []
+		queryItems: [URLQueryItem] = [],
+		method: String = "GET",
+		bodyData: Data? = nil,
+		contentType: String? = nil
 	) async throws -> Response {
-		let (data, _) = try await performRequest(path: path, queryItems: queryItems)
+		let (data, _) = try await performRequest(
+			path: path,
+			queryItems: queryItems,
+			method: method,
+			bodyData: bodyData,
+			contentType: contentType
+		)
 		do {
 			return try await Self.decodeJSON(Response.self, from: data)
 		} catch {

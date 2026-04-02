@@ -403,6 +403,282 @@ fn working_dir(discovered_session: &DiscoveredSession, pi_agent_dir: &Path) -> P
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadlessSessionState {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeadlessForkMessage {
+    pub entry_id: String,
+    pub text: String,
+}
+
+pub async fn set_session_name(
+    discovered_session: DiscoveredSession,
+    name: String,
+    pi_agent_dir: PathBuf,
+) -> Result<(), String> {
+    run_rpc_commands(
+        discovered_session,
+        vec![RpcCommand {
+            command: "set_session_name",
+            payload: json!({
+                "type": "set_session_name",
+                "name": name,
+            }),
+        }],
+        pi_agent_dir,
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn compact_session(
+    discovered_session: DiscoveredSession,
+    custom_instructions: Option<String>,
+    pi_agent_dir: PathBuf,
+) -> Result<(), String> {
+    run_rpc_commands(
+        discovered_session,
+        vec![RpcCommand {
+            command: "compact",
+            payload: json!({
+                "type": "compact",
+                "customInstructions": custom_instructions,
+            }),
+        }],
+        pi_agent_dir,
+    )
+    .await
+    .map(|_| ())
+}
+
+pub async fn new_session(
+    discovered_session: DiscoveredSession,
+    pi_agent_dir: PathBuf,
+) -> Result<HeadlessSessionState, String> {
+    let responses = run_rpc_commands(
+        discovered_session,
+        vec![
+            RpcCommand {
+                command: "new_session",
+                payload: json!({ "type": "new_session" }),
+            },
+            RpcCommand {
+                command: "get_state",
+                payload: json!({ "type": "get_state" }),
+            },
+        ],
+        pi_agent_dir,
+    )
+    .await?;
+
+    let cancelled = rpc_response_data(&responses[0])
+        .and_then(|data| data.get("cancelled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if cancelled {
+        return Err("new session cancelled".to_string());
+    }
+
+    extract_session_state(&responses[1])
+}
+
+pub async fn get_fork_messages(
+    discovered_session: DiscoveredSession,
+    pi_agent_dir: PathBuf,
+) -> Result<Vec<HeadlessForkMessage>, String> {
+    let responses = run_rpc_commands(
+        discovered_session,
+        vec![RpcCommand {
+            command: "get_fork_messages",
+            payload: json!({ "type": "get_fork_messages" }),
+        }],
+        pi_agent_dir,
+    )
+    .await?;
+
+    let Some(messages) = rpc_response_data(&responses[0])
+        .and_then(|data| data.get("messages"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+
+    Ok(messages
+        .iter()
+        .filter_map(|message| {
+            Some(HeadlessForkMessage {
+                entry_id: message.get("entryId")?.as_str()?.to_string(),
+                text: message.get("text")?.as_str()?.to_string(),
+            })
+        })
+        .collect())
+}
+
+pub async fn fork_session(
+    discovered_session: DiscoveredSession,
+    entry_id: String,
+    pi_agent_dir: PathBuf,
+) -> Result<HeadlessSessionState, String> {
+    let responses = run_rpc_commands(
+        discovered_session,
+        vec![
+            RpcCommand {
+                command: "fork",
+                payload: json!({
+                    "type": "fork",
+                    "entryId": entry_id,
+                }),
+            },
+            RpcCommand {
+                command: "get_state",
+                payload: json!({ "type": "get_state" }),
+            },
+        ],
+        pi_agent_dir,
+    )
+    .await?;
+
+    let cancelled = rpc_response_data(&responses[0])
+        .and_then(|data| data.get("cancelled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if cancelled {
+        return Err("fork cancelled".to_string());
+    }
+
+    extract_session_state(&responses[1])
+}
+
+struct RpcCommand {
+    command: &'static str,
+    payload: Value,
+}
+
+async fn run_rpc_commands(
+    discovered_session: DiscoveredSession,
+    commands: Vec<RpcCommand>,
+    pi_agent_dir: PathBuf,
+) -> Result<Vec<Value>, String> {
+    let session_id = discovered_session.id.clone();
+    let mut command = Command::new("pi");
+    command
+        .arg("--mode")
+        .arg("rpc")
+        .arg("--session")
+        .arg(&discovered_session.session_file)
+        .arg("--no-extensions")
+        .env("PI_SKIP_VERSION_CHECK", "1")
+        .env("PI_CODING_AGENT_DIR", &pi_agent_dir)
+        .current_dir(working_dir(&discovered_session, &pi_agent_dir))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start pi rpc runner: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "pi rpc runner did not expose stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "pi rpc runner did not expose stdout".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "pi rpc runner did not expose stderr".to_string())?;
+
+    tokio::spawn(log_stderr(session_id.clone(), stderr));
+
+    let mut lines = BufReader::new(stdout).lines();
+    let mut responses = Vec::with_capacity(commands.len());
+
+    for (index, rpc_command) in commands.into_iter().enumerate() {
+        let request_id = format!("rpc-{session_id}-{index}");
+        let mut payload = rpc_command.payload;
+        let Some(object) = payload.as_object_mut() else {
+            return Err("rpc command payload must be an object".to_string());
+        };
+        object.insert("id".to_string(), Value::String(request_id.clone()));
+
+        stdin
+            .write_all(payload.to_string().as_bytes())
+            .await
+            .map_err(|error| format!("failed to write command to pi rpc runner: {error}"))?;
+        stdin
+            .write_all(b"\n")
+            .await
+            .map_err(|error| format!("failed to write newline to pi rpc runner: {error}"))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|error| format!("failed to flush pi rpc runner stdin: {error}"))?;
+
+        let response = loop {
+            let Some(line) = lines
+                .next_line()
+                .await
+                .map_err(|error| format!("failed reading pi rpc output: {error}"))?
+            else {
+                return Err(format!(
+                    "pi rpc runner for session {} ended before responding to {}",
+                    session_id, rpc_command.command
+                ));
+            };
+
+            let event: Value = serde_json::from_str(&line)
+                .map_err(|error| format!("failed to parse pi rpc event: {error}"))?;
+            let is_response = event.get("type").and_then(Value::as_str) == Some("response");
+            let matches_id = event.get("id").and_then(Value::as_str) == Some(request_id.as_str());
+            let matches_command =
+                event.get("command").and_then(Value::as_str) == Some(rpc_command.command);
+            if !is_response || (!matches_id && !matches_command) {
+                continue;
+            }
+
+            let success = event
+                .get("success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !success {
+                return Err(response_error_message(&event));
+            }
+
+            break event;
+        };
+
+        responses.push(response);
+    }
+
+    if let Err(error) = child.kill().await {
+        eprintln!("failed to stop pi rpc runner for {}: {error}", session_id);
+    }
+    let _ = child.wait().await;
+
+    Ok(responses)
+}
+
+fn rpc_response_data(response: &Value) -> Option<&Value> {
+    response.get("data")
+}
+
+fn extract_session_state(response: &Value) -> Result<HeadlessSessionState, String> {
+    let session_id = rpc_response_data(response)
+        .and_then(|data| data.get("sessionId"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "pi rpc get_state response did not include sessionId".to_string())?;
+
+    Ok(HeadlessSessionState {
+        session_id: session_id.to_string(),
+    })
+}
+
 fn rpc_message_to_message(value: &Value) -> Option<Message> {
     let role = match value.get("role").and_then(Value::as_str)? {
         "user" => Role::User,

@@ -1,1 +1,3 @@
 streaming should not disrupt scroll position if the user has scrolled up
+content doesn't stream in when we view full thinking context
+add a "Scroll to bottom" pill when we've scrolled up

@@ -21,8 +21,9 @@ use crate::{
     message::{ImageContent, Message, Role, truncate_text},
     session::{ActiveSession, SessionCommand, SessionContextUsage},
     transcript::{
-        SessionActivity, SessionMessagesResponse, SessionUiDialogAction, SessionUiDialogState,
-        SessionUiState, TranscriptFreshness, TranscriptFreshnessState, TranscriptSource,
+        SessionActivity, SessionMessagesResponse, SessionTerminalOnlyUiState,
+        SessionUiDialogAction, SessionUiDialogState, SessionUiState, TranscriptFreshness,
+        TranscriptFreshnessState, TranscriptSource,
     },
 };
 
@@ -31,7 +32,7 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub const DEFAULT_DETACHED_CAPACITY: usize = 3;
 pub const DEFAULT_DETACHED_TTL: Duration = Duration::from_secs(180);
 const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
-const LIVE_PROTOCOL_VERSION: u32 = 5;
+const LIVE_PROTOCOL_VERSION: u32 = 6;
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const GET_COMMANDS_TIMEOUT: Duration = Duration::from_secs(5);
 const UI_DIALOG_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -60,6 +61,10 @@ pub enum LiveUpdate {
     UiDialogState {
         session_id: String,
         ui_dialog_state: Option<SessionUiDialogState>,
+    },
+    TerminalOnlyUiState {
+        session_id: String,
+        terminal_only_ui_state: Option<SessionTerminalOnlyUiState>,
     },
 }
 
@@ -106,6 +111,12 @@ impl LiveSessionStoreHandle {
         let mut store = self.inner.lock().await;
         store.purge_expired();
         store.all_ui_dialog_states()
+    }
+
+    pub async fn all_terminal_only_ui_states(&self) -> HashMap<String, SessionTerminalOnlyUiState> {
+        let mut store = self.inner.lock().await;
+        store.purge_expired();
+        store.all_terminal_only_ui_states()
     }
 
     pub async fn listed_session_for_session(&self, session_id: &str) -> Option<ActiveSession> {
@@ -649,6 +660,24 @@ async fn start_listener_impl(
                                         ui_dialog_state: state,
                                     });
                                 }
+                                LiveSessionIpcMessage::TerminalOnlyUiState {
+                                    session_id,
+                                    state,
+                                } => {
+                                    {
+                                        let mut guard = store.inner.lock().await;
+                                        guard.purge_expired();
+                                        guard.apply_event(LiveSessionEvent::TerminalOnlyUiState {
+                                            session_id: session_id.clone(),
+                                            state: state.clone(),
+                                        });
+                                    }
+
+                                    let _ = updates.send(LiveUpdate::TerminalOnlyUiState {
+                                        session_id,
+                                        terminal_only_ui_state: state,
+                                    });
+                                }
                                 LiveSessionIpcMessage::SessionDetached { session_id } => {
                                     if supports_commands {
                                         store
@@ -823,6 +852,10 @@ enum LiveSessionIpcMessage {
         session_id: String,
         state: Option<SessionUiDialogState>,
     },
+    TerminalOnlyUiState {
+        session_id: String,
+        state: Option<SessionTerminalOnlyUiState>,
+    },
     SessionDetached {
         session_id: String,
     },
@@ -901,6 +934,10 @@ pub enum LiveSessionEvent {
         session_id: String,
         state: Option<SessionUiDialogState>,
     },
+    TerminalOnlyUiState {
+        session_id: String,
+        state: Option<SessionTerminalOnlyUiState>,
+    },
     SessionDetached {
         session_id: String,
     },
@@ -959,6 +996,7 @@ impl LiveSessionStore {
                             detached.metadata,
                             detached.ui_state,
                             detached.ui_dialog_state,
+                            detached.terminal_only_ui_state,
                         )
                     } else {
                         LiveSessionState::new(session_id.clone())
@@ -1037,6 +1075,14 @@ impl LiveSessionStore {
                 entry.ui_dialog_state = state;
                 None
             }
+            LiveSessionEvent::TerminalOnlyUiState { session_id, state } => {
+                let entry = self
+                    .active_sessions
+                    .entry(session_id.clone())
+                    .or_insert_with(|| LiveSessionState::new(session_id.clone()));
+                entry.terminal_only_ui_state = state;
+                None
+            }
             LiveSessionEvent::SessionDetached { session_id } => {
                 let mut state = self.active_sessions.remove(&session_id)?;
                 if let Some(in_progress) = state.in_progress_assistant.take() {
@@ -1047,8 +1093,15 @@ impl LiveSessionStore {
                 let metadata = state.metadata.clone();
                 let ui_state = state.ui_state.clone();
                 let ui_dialog_state = state.ui_dialog_state.clone();
+                let terminal_only_ui_state = state.terminal_only_ui_state.clone();
                 let response = state.as_response(false, false);
-                self.insert_detached(response.clone(), metadata, ui_state, ui_dialog_state);
+                self.insert_detached(
+                    response.clone(),
+                    metadata,
+                    ui_state,
+                    ui_dialog_state,
+                    terminal_only_ui_state,
+                );
                 Some(response)
             }
         }
@@ -1144,6 +1197,29 @@ impl LiveSessionStore {
         }
 
         ui_dialog_states
+    }
+
+    fn all_terminal_only_ui_states(&self) -> HashMap<String, SessionTerminalOnlyUiState> {
+        let mut terminal_only_ui_states = self
+            .active_sessions
+            .iter()
+            .filter_map(|(session_id, state)| {
+                state
+                    .terminal_only_ui_state
+                    .clone()
+                    .map(|terminal_only_ui_state| (session_id.clone(), terminal_only_ui_state))
+            })
+            .collect::<HashMap<_, _>>();
+
+        for (session_id, state) in &self.recent_detached_sessions {
+            if let Some(terminal_only_ui_state) = &state.terminal_only_ui_state {
+                terminal_only_ui_states
+                    .entry(session_id.clone())
+                    .or_insert_with(|| terminal_only_ui_state.clone());
+            }
+        }
+
+        terminal_only_ui_states
     }
 
     fn listed_session_for(&self, session_id: &str) -> Option<ActiveSession> {
@@ -1543,6 +1619,7 @@ impl LiveSessionStore {
         metadata: Option<LiveSessionMetadata>,
         ui_state: Option<SessionUiState>,
         ui_dialog_state: Option<SessionUiDialogState>,
+        terminal_only_ui_state: Option<SessionTerminalOnlyUiState>,
     ) {
         let session_id = response.session_id.clone();
         self.detached_order
@@ -1556,6 +1633,7 @@ impl LiveSessionStore {
                 metadata,
                 ui_state,
                 ui_dialog_state,
+                terminal_only_ui_state,
             },
         );
         self.enforce_detached_capacity();
@@ -1596,6 +1674,7 @@ struct LiveSessionState {
     metadata: Option<LiveSessionMetadata>,
     ui_state: Option<SessionUiState>,
     ui_dialog_state: Option<SessionUiDialogState>,
+    terminal_only_ui_state: Option<SessionTerminalOnlyUiState>,
 }
 
 impl LiveSessionState {
@@ -1608,6 +1687,7 @@ impl LiveSessionState {
             metadata: None,
             ui_state: None,
             ui_dialog_state: None,
+            terminal_only_ui_state: None,
         }
     }
 
@@ -1616,6 +1696,7 @@ impl LiveSessionState {
         metadata: Option<LiveSessionMetadata>,
         ui_state: Option<SessionUiState>,
         ui_dialog_state: Option<SessionUiDialogState>,
+        terminal_only_ui_state: Option<SessionTerminalOnlyUiState>,
     ) -> Self {
         let last_update_at = response
             .messages
@@ -1631,6 +1712,7 @@ impl LiveSessionState {
             metadata,
             ui_state,
             ui_dialog_state,
+            terminal_only_ui_state,
         }
     }
 
@@ -1723,6 +1805,7 @@ struct DetachedSessionState {
     metadata: Option<LiveSessionMetadata>,
     ui_state: Option<SessionUiState>,
     ui_dialog_state: Option<SessionUiDialogState>,
+    terminal_only_ui_state: Option<SessionTerminalOnlyUiState>,
 }
 
 impl DetachedSessionState {

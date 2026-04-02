@@ -72,6 +72,40 @@ pub struct SessionCommand {
     pub source: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkMessage {
+    pub entry_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SessionBuiltinCommandRequest {
+    SetSessionName {
+        name: String,
+    },
+    Compact {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        custom_instructions: Option<String>,
+    },
+    Reload,
+    NewSession,
+    GetForkMessages,
+    Fork {
+        entry_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionBuiltinCommandResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fork_messages: Option<Vec<ForkMessage>>,
+}
+
 pub fn parse_local_date_filter(value: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .map_err(|_| format!("invalid date `{value}`; expected YYYY-MM-DD"))

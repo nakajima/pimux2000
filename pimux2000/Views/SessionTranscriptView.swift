@@ -56,7 +56,6 @@ struct SessionTranscriptView: UIViewRepresentable {
 	func makeUIView(context: Context) -> UITableView {
 		let tableView = UITableView(frame: .zero, style: .plain)
 		tableView.transform = CGAffineTransform(scaleX: 1, y: -1)
-		tableView.dataSource = context.coordinator
 		tableView.delegate = context.coordinator
 		tableView.separatorStyle = .none
 		tableView.backgroundColor = .clear
@@ -65,6 +64,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 		tableView.contentInset.top = 16
 		tableView.showsVerticalScrollIndicator = true
 		tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+		context.coordinator.configureDataSource(for: tableView)
 		return tableView
 	}
 
@@ -74,14 +74,35 @@ struct SessionTranscriptView: UIViewRepresentable {
 
 	// MARK: - Coordinator
 
-	final class Coordinator: NSObject, UITableViewDataSource, UITableViewDelegate {
+	final class Coordinator: NSObject, UITableViewDelegate {
 		private var parent: SessionTranscriptView
-		private var messages: [TranscriptMessage] = []
 		private var lastForcePinToken: Int = 0
+		private var messagesByID: [String: TranscriptMessage] = [:]
+		private var dataSource: UITableViewDiffableDataSource<Int, String>!
 
 		init(parent: SessionTranscriptView) {
 			self.parent = parent
 			super.init()
+		}
+
+		func configureDataSource(for tableView: UITableView) {
+			dataSource = UITableViewDiffableDataSource<Int, String>(tableView: tableView) {
+				[weak self] tableView, indexPath, messageID in
+				let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
+				guard let self, let message = self.messagesByID[messageID] else { return cell }
+
+				cell.transform = CGAffineTransform(scaleX: 1, y: -1)
+				let ctx = self.renderContext
+				cell.contentConfiguration = UIHostingConfiguration {
+					TranscriptRowSwiftUIView(message: message, context: ctx)
+						.transaction { $0.animation = nil }
+				}
+				.margins(.all, 0)
+				cell.backgroundColor = .clear
+				cell.selectionStyle = .none
+				return cell
+			}
+			dataSource.defaultRowAnimation = .none
 		}
 
 		func update(parent: SessionTranscriptView, tableView: UITableView) {
@@ -90,76 +111,60 @@ struct SessionTranscriptView: UIViewRepresentable {
 			self.parent = parent
 			let newMessages = parent.messages.reversed() as [TranscriptMessage]
 
-			let oldIDs = messages.map(\.id)
-			let newIDs = newMessages.map(\.id)
+			// Capture old fingerprints before updating the lookup
+			let oldFingerprints = messagesByID.mapValues(\.fingerprint)
+			messagesByID = Dictionary(uniqueKeysWithValues: newMessages.map { ($0.id, $0) })
 
-			if oldIDs == newIDs {
-				// Same structure — only reload rows whose content actually changed
-				var changedRows: [IndexPath] = []
-				for i in newMessages.indices {
-					if messages[i].fingerprint != newMessages[i].fingerprint {
-						changedRows.append(IndexPath(row: i, section: 0))
-					}
-				}
+			let newItemIDs = newMessages.map(\.id)
+			let structureChanged = dataSource.snapshot().itemIdentifiers != newItemIDs
 
-				if !changedRows.isEmpty {
-					messages = newMessages
-					UIView.performWithoutAnimation {
-						tableView.reloadRows(at: changedRows, with: .none)
-					}
-				}
+			if structureChanged {
+				// Structure changed (messages added/removed).
+				// The flipped transform inverts the diffable data source's automatic
+				// offset adjustment, so use reloadData semantics + manual preservation.
+				var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
+				snapshot.appendSections([0])
+				snapshot.appendItems(newItemIDs, toSection: 0)
 
-				if shouldForcePin, !messages.isEmpty {
-					tableView.scrollToRow(at: IndexPath(row: 0, section: 0), at: .bottom, animated: changedRows.isEmpty)
+				let savedOffset = tableView.contentOffset
+				dataSource.applySnapshotUsingReloadData(snapshot)
+				if shouldForcePin, !newMessages.isEmpty {
+					tableView.scrollToRow(at: IndexPath(row: 0, section: 0), at: .bottom, animated: false)
+				} else {
+					tableView.contentOffset = savedOffset
 				}
 			} else {
-				// Structure changed (messages added/removed) — full reload
-				let savedOffset = tableView.contentOffset
-				messages = newMessages
-				UIView.performWithoutAnimation {
-					tableView.reloadData()
-					if shouldForcePin {
-						if !messages.isEmpty {
-							tableView.scrollToRow(at: IndexPath(row: 0, section: 0), at: .bottom, animated: false)
-						}
-					} else {
-						tableView.contentOffset = savedOffset
-					}
+				// Same structure — reconfigure only changed items
+				let changedIDs = newMessages.compactMap { message -> String? in
+					guard let oldFP = oldFingerprints[message.id], oldFP != message.fingerprint else { return nil }
+					return message.id
+				}
+
+				if !changedIDs.isEmpty {
+					var snapshot = dataSource.snapshot()
+					snapshot.reconfigureItems(changedIDs)
+					dataSource.apply(snapshot, animatingDifferences: false)
+				}
+
+				if shouldForcePin, !newMessages.isEmpty {
+					tableView.scrollToRow(
+						at: IndexPath(row: 0, section: 0),
+						at: .bottom,
+						animated: changedIDs.isEmpty
+					)
 				}
 			}
 
 			updateEmptyState(on: tableView)
 		}
 
-		// MARK: UITableViewDataSource
-
-		func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-			messages.count
-		}
-
-		func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-			let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
-			guard messages.indices.contains(indexPath.row) else { return cell }
-
-			cell.transform = CGAffineTransform(scaleX: 1, y: -1)
-			let message = messages[indexPath.row]
-			let ctx = renderContext
-			cell.contentConfiguration = UIHostingConfiguration {
-				TranscriptRowSwiftUIView(message: message, context: ctx)
-					.transaction { $0.animation = nil }
-			}
-			.margins(.all, 0)
-			cell.backgroundColor = .clear
-			cell.selectionStyle = .none
-			return cell
-		}
-
 		// MARK: UITableViewDelegate
 
 		func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
-			guard let tableView = scrollView as? UITableView, !messages.isEmpty else { return false }
-			let lastRow = IndexPath(row: messages.count - 1, section: 0)
-			tableView.scrollToRow(at: lastRow, at: .bottom, animated: true)
+			guard let tableView = scrollView as? UITableView else { return false }
+			let itemCount = dataSource.snapshot().numberOfItems
+			guard itemCount > 0 else { return false }
+			tableView.scrollToRow(at: IndexPath(row: itemCount - 1, section: 0), at: .bottom, animated: true)
 			return false
 		}
 
@@ -171,7 +176,7 @@ struct SessionTranscriptView: UIViewRepresentable {
 		// MARK: Empty state
 
 		private func updateEmptyState(on tableView: UITableView) {
-			if messages.isEmpty, let emptyState = parent.emptyState {
+			if messagesByID.isEmpty, let emptyState = parent.emptyState {
 				if !(tableView.backgroundView is TranscriptEmptyStateView) {
 					let view = TranscriptEmptyStateView(state: emptyState, onRetry: parent.onRetry)
 					view.transform = CGAffineTransform(scaleX: 1, y: -1)

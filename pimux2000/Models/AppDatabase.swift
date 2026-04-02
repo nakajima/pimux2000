@@ -149,6 +149,13 @@ struct AppDatabase {
 			try db.execute(sql: "UPDATE piSessions SET lastUserMessageAt = lastMessageAt WHERE lastUserMessageAt IS NULL")
 		}
 
+		migrator.registerMigration("addMessageServerID") { db in
+			let columnNames = try Self.columnNames(in: "messages", db: db)
+			if !columnNames.contains("serverMessageID") {
+				try db.execute(sql: "ALTER TABLE messages ADD COLUMN serverMessageID INTEGER")
+			}
+		}
+
 		return migrator
 	}
 

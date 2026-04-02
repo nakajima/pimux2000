@@ -180,6 +180,20 @@ pub struct SessionUiDialogActionRequest {
     pub action: SessionUiDialogAction,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionTerminalOnlyUiKind {
+    CustomUi,
+    DialogFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTerminalOnlyUiState {
+    pub kind: SessionTerminalOnlyUiKind,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SessionStreamEvent {
@@ -200,6 +214,10 @@ pub enum SessionStreamEvent {
     UiDialogState {
         sequence: u64,
         state: Option<SessionUiDialogState>,
+    },
+    TerminalOnlyUiState {
+        sequence: u64,
+        state: Option<SessionTerminalOnlyUiState>,
     },
     Keepalive {
         sequence: u64,

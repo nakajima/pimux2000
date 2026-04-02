@@ -3,9 +3,12 @@ use serde::{Deserialize, Serialize};
 use crate::{
     host::HostIdentity,
     message::ImageContent,
-    session::{ActiveSession, SessionCommand},
+    session::{
+        ActiveSession, SessionBuiltinCommandRequest, SessionBuiltinCommandResponse, SessionCommand,
+    },
     transcript::{
-        SessionMessagesResponse, SessionUiDialogAction, SessionUiDialogState, SessionUiState,
+        SessionMessagesResponse, SessionTerminalOnlyUiState, SessionUiDialogAction,
+        SessionUiDialogState, SessionUiState,
     },
 };
 
@@ -30,6 +33,10 @@ pub enum AgentToServerMessage {
         session_id: String,
         ui_dialog_state: Option<SessionUiDialogState>,
     },
+    LiveTerminalOnlyUiUpdate {
+        session_id: String,
+        terminal_only_ui_state: Option<SessionTerminalOnlyUiState>,
+    },
     FetchTranscriptResult {
         request_id: String,
         session: Option<SessionMessagesResponse>,
@@ -52,6 +59,11 @@ pub enum AgentToServerMessage {
     },
     UiDialogActionResult {
         request_id: String,
+        error: Option<String>,
+    },
+    BuiltinCommandResult {
+        request_id: String,
+        response: Option<SessionBuiltinCommandResponse>,
         error: Option<String>,
     },
     Ping,
@@ -86,6 +98,11 @@ pub enum ServerToAgentMessage {
         session_id: String,
         dialog_id: String,
         action: SessionUiDialogAction,
+    },
+    BuiltinCommand {
+        request_id: String,
+        session_id: String,
+        action: SessionBuiltinCommandRequest,
     },
     Ping,
     Pong,

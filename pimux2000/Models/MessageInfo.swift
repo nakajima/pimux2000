@@ -6,7 +6,12 @@ struct MessageInfo: Identifiable {
 	let message: Message
 	let contentBlocks: [MessageContentBlock]
 	let contentFingerprint: UInt64
-	var id: String { "\(message.piSessionID)-\(message.position)" }
+	var id: String {
+		if let serverID = message.serverMessageID {
+			return "\(message.piSessionID)-s\(serverID)"
+		}
+		return "\(message.piSessionID)-\(message.position)"
+	}
 
 	init(message: Message, contentBlocks: [MessageContentBlock]) {
 		self.message = message

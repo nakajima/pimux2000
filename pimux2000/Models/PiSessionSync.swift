@@ -196,15 +196,134 @@ struct PiSessionSync {
 
 	nonisolated static func storeMessages(_ remoteMessages: [PimuxTranscriptMessage], piSessionID: Int64, in db: Database) throws {
 		let incomingPayloads = messagePayloads(from: remoteMessages)
-		let existingPayloads = try messagePayloads(in: db, piSessionID: piSessionID)
 
-		guard incomingPayloads != existingPayloads else { return }
+		if !incomingPayloads.isEmpty && incomingPayloads.allSatisfy({ $0.serverMessageID != nil }) {
+			try storeMessagesIncrementally(incomingPayloads, piSessionID: piSessionID, in: db)
+		} else {
+			let existingPayloads = try messagePayloads(in: db, piSessionID: piSessionID)
+			guard incomingPayloads != existingPayloads else { return }
+			try replaceAllMessages(incomingPayloads, piSessionID: piSessionID, in: db)
+		}
+	}
 
+	nonisolated private static func storeMessagesIncrementally(
+		_ incomingPayloads: [MessagePayload],
+		piSessionID: Int64,
+		in db: Database
+	) throws {
+		let existingMessages = try Message
+			.filter(Column("piSessionID") == piSessionID)
+			.fetchAll(db)
+
+		let existingMessageIDs = existingMessages.compactMap(\.id)
+		let existingBlocks: [MessageContentBlock]
+		if existingMessageIDs.isEmpty {
+			existingBlocks = []
+		} else {
+			existingBlocks = try MessageContentBlock
+				.filter(existingMessageIDs.contains(Column("messageID")))
+				.order(Column("position").asc)
+				.fetchAll(db)
+		}
+		let blocksByMessageID = Dictionary(grouping: existingBlocks, by: \.messageID)
+
+		var existingByServerID: [Int: (message: Message, payload: MessagePayload)] = [:]
+		for message in existingMessages {
+			if let serverID = message.serverMessageID {
+				existingByServerID[serverID] = (
+					message: message,
+					payload: MessagePayload(
+						serverMessageID: serverID,
+						role: message.role,
+						toolName: message.toolName,
+						position: message.position,
+						createdAt: message.createdAt,
+						blocks: (blocksByMessageID[message.id ?? -1] ?? []).map(BlockPayload.init)
+					)
+				)
+			}
+		}
+
+		let incomingServerIDs = Set(incomingPayloads.compactMap(\.serverMessageID))
+
+		// Delete messages no longer in the transcript
+		let staleMessageIDs = existingMessages.compactMap { msg -> Int64? in
+			guard let serverID = msg.serverMessageID, incomingServerIDs.contains(serverID) else {
+				return msg.id
+			}
+			return nil
+		}
+		if !staleMessageIDs.isEmpty {
+			try MessageContentBlock.filter(staleMessageIDs.contains(Column("messageID"))).deleteAll(db)
+			try Message.filter(staleMessageIDs.contains(Column("id"))).deleteAll(db)
+		}
+
+		// Insert or update incoming messages
+		for payload in incomingPayloads {
+			guard let serverID = payload.serverMessageID else { continue }
+
+			if let existing = existingByServerID[serverID] {
+				guard existing.payload != payload else { continue }
+				guard let msgID = existing.message.id else { continue }
+
+				var updated = existing.message
+				updated.role = payload.role
+				updated.toolName = payload.toolName
+				updated.position = payload.position
+				updated.createdAt = payload.createdAt
+				try updated.update(db)
+
+				try MessageContentBlock.filter(Column("messageID") == msgID).deleteAll(db)
+				for blockPayload in payload.blocks {
+					var block = MessageContentBlock(
+						messageID: msgID,
+						type: blockPayload.type,
+						text: blockPayload.text,
+						toolCallName: blockPayload.toolCallName,
+						mimeType: blockPayload.mimeType,
+						attachmentID: blockPayload.attachmentID,
+						position: blockPayload.position
+					)
+					try block.insert(db)
+				}
+			} else {
+				var message = Message(
+					piSessionID: piSessionID,
+					serverMessageID: serverID,
+					role: payload.role,
+					toolName: payload.toolName,
+					position: payload.position,
+					createdAt: payload.createdAt
+				)
+				try message.insert(db)
+
+				for blockPayload in payload.blocks {
+					var block = MessageContentBlock(
+						messageID: message.id!,
+						type: blockPayload.type,
+						text: blockPayload.text,
+						toolCallName: blockPayload.toolCallName,
+						mimeType: blockPayload.mimeType,
+						attachmentID: blockPayload.attachmentID,
+						position: blockPayload.position
+					)
+					try block.insert(db)
+				}
+			}
+		}
+	}
+
+	nonisolated private static func replaceAllMessages(
+		_ payloads: [MessagePayload],
+		piSessionID: Int64,
+		in db: Database
+	) throws {
 		try Message.filter(Column("piSessionID") == piSessionID).deleteAll(db)
 
-		for payload in incomingPayloads {
+		for payload in payloads {
 			var message = Message(
 				piSessionID: piSessionID,
+				serverMessageID: payload.serverMessageID,
 				role: payload.role,
 				toolName: payload.toolName,
 				position: payload.position,
@@ -230,6 +349,7 @@ struct PiSessionSync {
 	nonisolated private static func messagePayloads(from remoteMessages: [PimuxTranscriptMessage]) -> [MessagePayload] {
 		remoteMessages.enumerated().map { index, remoteMessage in
 			MessagePayload(
+				serverMessageID: remoteMessage.messageId,
 				role: Message.Role(remoteMessage.role),
 				toolName: {
 					guard let toolName = remoteMessage.toolName?.trimmingCharacters(in: .whitespacesAndNewlines), !toolName.isEmpty else {
@@ -300,6 +420,7 @@ struct PiSessionSync {
 
 		return messages.map { message in
 			MessagePayload(
+				serverMessageID: message.serverMessageID,
 				role: message.role,
 				toolName: message.toolName,
 				position: message.position,
@@ -311,6 +432,7 @@ struct PiSessionSync {
 }
 
 private struct MessagePayload: Equatable {
+	let serverMessageID: Int?
 	let role: Message.Role
 	let toolName: String?
 	let position: Int

@@ -12,7 +12,7 @@ import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const LIVE_PROTOCOL_VERSION = 5;
+const LIVE_PROTOCOL_VERSION = 6;
 const PARTIAL_UPDATE_THROTTLE_MS = 150;
 const SOCKET_RECONNECT_DELAY_MS = 500;
 const RESUMMARIZE_EDGE_ENTRY_COUNT = 5;
@@ -87,6 +87,7 @@ interface RuntimeUiState {
 }
 
 type PimuxUiDialogKind = "confirm" | "select" | "input" | "editor";
+type PimuxTerminalOnlyUiKind = "customUi" | "dialogFallback";
 
 type PimuxUiDialogMoveDirection = "up" | "down";
 
@@ -107,6 +108,11 @@ type PimuxUiDialogAction =
 	| { type: "setValue"; value: string }
 	| { type: "submit" }
 	| { type: "cancel" };
+
+interface PimuxTerminalOnlyUiState {
+	kind: PimuxTerminalOnlyUiKind;
+	reason: string;
+}
 
 type UiDialogOptions = { signal?: AbortSignal; timeout?: number };
 
@@ -154,6 +160,11 @@ type RuntimeTextValueDialog = RuntimeInputDialog | RuntimeEditorDialog;
 type RuntimeUiDialog = RuntimeSelectorUiDialog | RuntimeTextValueDialog;
 type RuntimeUiDialogSelectorState = Pick<RuntimeSelectorUiDialog, "sessionId" | "state" | "selector">;
 
+interface RuntimeTerminalOnlyUiState {
+	sessionId: string;
+	state: PimuxTerminalOnlyUiState;
+}
+
 function isConfirmDialog(dialog: RuntimeUiDialog): dialog is RuntimeConfirmDialog {
 	return dialog.state.kind === "confirm";
 }
@@ -182,6 +193,7 @@ type BridgeToAgentMessage =
 	| { type: "assistantPartial"; sessionId: string; message: PimuxMessage }
 	| { type: "uiState"; sessionId: string; state: PimuxUiState }
 	| { type: "uiDialogState"; sessionId: string; state: PimuxUiDialogState | null }
+	| { type: "terminalOnlyUiState"; sessionId: string; state: PimuxTerminalOnlyUiState | null }
 	| { type: "sessionDetached"; sessionId: string }
 	| { type: "sendUserMessageResult"; requestId: string; sessionId: string; error?: string }
 	| { type: "getCommandsResult"; requestId: string; sessionId: string; commands: PimuxSessionCommand[]; error?: string }
@@ -232,6 +244,7 @@ interface BridgeStateSnapshot {
 	currentAssistantPartial?: PimuxMessage;
 	currentUiState?: PimuxUiState;
 	currentUiDialogState?: PimuxUiDialogState;
+	currentTerminalOnlyUiState?: PimuxTerminalOnlyUiState;
 }
 
 class LiveBridgeClient {
@@ -361,6 +374,13 @@ class LiveBridgeClient {
 				state: state.currentUiDialogState,
 			});
 		}
+		if (state.currentTerminalOnlyUiState) {
+			this.writeNow({
+				type: "terminalOnlyUiState",
+				sessionId: state.currentSessionId,
+				state: state.currentTerminalOnlyUiState,
+			});
+		}
 	}
 
 	private drainIncomingBuffer() {
@@ -401,6 +421,7 @@ export default function (pi: ExtensionAPI) {
 		currentAssistantPartial?: PimuxMessage;
 		currentUiState: RuntimeUiState;
 		currentUiDialog?: RuntimeUiDialog;
+		currentTerminalOnlyUi?: RuntimeTerminalOnlyUiState;
 		nextDialogId: number;
 		isAgentBusy: boolean;
 	} = {
@@ -410,6 +431,7 @@ export default function (pi: ExtensionAPI) {
 		currentAssistantPartial: undefined,
 		currentUiState: createEmptyRuntimeUiState(),
 		currentUiDialog: undefined,
+		currentTerminalOnlyUi: undefined,
 		nextDialogId: 1,
 		isAgentBusy: false,
 	};
@@ -419,7 +441,8 @@ export default function (pi: ExtensionAPI) {
 	let uiPatched = false;
 
 	pi.registerCommand("pimux-debug", {
-		description: "Run pimux live UI debug helpers like test-confirm, test-select, test-input, and test-editor",
+		description:
+			"Run pimux live UI debug helpers like test-confirm, test-select, test-input, test-editor, and test-custom-ui",
 		handler: async (args, ctx) => {
 			ensureUiPatched(ctx);
 			await attachCurrentSession(ctx);
@@ -472,13 +495,86 @@ export default function (pi: ExtensionAPI) {
 					);
 					return;
 				}
+				case "test-custom-ui": {
+					const title =
+						rest.join(" ") ||
+						"This command intentionally opens custom Pi terminal UI. iOS should show a terminal-only banner while the TUI stays interactive.";
+					const result = await ctx.ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+						configureMirroredTuiComponent(tui as MirroredDialogTui, keybindings);
+						return new ExtensionSelectorComponent(
+							title,
+							["Finish in terminal", "Cancel"],
+							(option) => done(option),
+							() => done(undefined),
+							{ tui }
+						);
+					});
+					ctx.ui.notify(
+						result ? `pimux custom ui test: ${result}` : "pimux custom ui test: cancelled",
+						"info"
+					);
+					return;
+				}
 				default:
 					ctx.ui.notify(
-						"Usage: /pimux-debug test-confirm [prompt] or /pimux-debug test-select [title] or /pimux-debug test-input [placeholder] or /pimux-debug test-editor [prefill]",
+						"Usage: /pimux-debug test-confirm [prompt] or /pimux-debug test-select [title] or /pimux-debug test-input [placeholder] or /pimux-debug test-editor [prefill] or /pimux-debug test-custom-ui [title]",
 						"info"
 					);
 					return;
 			}
+		},
+	});
+
+	pi.registerCommand("name", {
+		description: "Set session display name",
+		handler: async (args, ctx) => {
+			ensureUiPatched(ctx);
+			await attachCurrentSession(ctx);
+
+			const name = args.trim();
+			if (!name) {
+				const currentName = pi.getSessionName();
+				ctx.ui.notify(currentName ? `Session name: ${currentName}` : "Usage: /name <name>", "info");
+				return;
+			}
+
+			pi.setSessionName(name);
+			publishSnapshot(ctx);
+			ctx.ui.notify(`Session name set: ${name}`, "info");
+		},
+	});
+
+	pi.registerCommand("compact", {
+		description: "Manually compact the session context",
+		handler: async (args, ctx) => {
+			ensureUiPatched(ctx);
+			await attachCurrentSession(ctx);
+
+			const messageCount = ctx.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "message").length;
+			if (messageCount < 2) {
+				ctx.ui.notify("Nothing to compact (no messages yet)", "warning");
+				return;
+			}
+
+			const customInstructions = args.trim() || undefined;
+			ctx.compact({ customInstructions });
+		},
+	});
+
+	pi.registerCommand("reload", {
+		description: "Reload keybindings, extensions, skills, prompts, and themes",
+		handler: async (args, ctx) => {
+			ensureUiPatched(ctx);
+			await attachCurrentSession(ctx);
+
+			if (args.trim()) {
+				ctx.ui.notify("Usage: /reload", "warning");
+				return;
+			}
+
+			await ctx.reload();
 		},
 	});
 
@@ -512,6 +608,10 @@ export default function (pi: ExtensionAPI) {
 			currentAssistantPartial: state.currentAssistantPartial,
 			currentUiState: serializeUiState(state.currentUiState),
 			currentUiDialogState: state.currentUiDialog?.state,
+			currentTerminalOnlyUiState:
+				state.currentTerminalOnlyUi?.sessionId === state.currentSessionId
+					? state.currentTerminalOnlyUi.state
+					: undefined,
 		};
 	}
 
@@ -547,6 +647,62 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!sessionId || state.currentUiDialog?.sessionId === sessionId) {
 			state.currentUiDialog = undefined;
+		}
+	}
+
+	function sendCurrentTerminalOnlyUiState(sessionId: string | undefined = state.currentSessionId) {
+		if (!sessionId) return;
+		const terminalOnlyUi = state.currentTerminalOnlyUi;
+		bridge.send({
+			type: "terminalOnlyUiState",
+			sessionId,
+			state:
+				terminalOnlyUi && terminalOnlyUi.sessionId === sessionId ? terminalOnlyUi.state : null,
+		});
+	}
+
+	function clearCurrentTerminalOnlyUiState(sessionId: string | undefined = state.currentSessionId) {
+		if (sessionId) {
+			bridge.send({ type: "terminalOnlyUiState", sessionId, state: null });
+		}
+		if (!sessionId || state.currentTerminalOnlyUi?.sessionId === sessionId) {
+			state.currentTerminalOnlyUi = undefined;
+		}
+	}
+
+	function activateTerminalOnlyUiState(
+		sessionId: string,
+		terminalOnlyUiState: PimuxTerminalOnlyUiState
+	): RuntimeTerminalOnlyUiState {
+		const runtimeState = {
+			sessionId,
+			state: terminalOnlyUiState,
+		};
+		state.currentTerminalOnlyUi = runtimeState;
+		sendCurrentTerminalOnlyUiState(sessionId);
+		return runtimeState;
+	}
+
+	function cleanupTerminalOnlyUiState(runtimeState: RuntimeTerminalOnlyUiState) {
+		if (state.currentTerminalOnlyUi === runtimeState) {
+			clearCurrentTerminalOnlyUiState(runtimeState.sessionId);
+		}
+	}
+
+	async function runWithTerminalOnlyUiState<T>(
+		sessionId: string | undefined,
+		terminalOnlyUiState: PimuxTerminalOnlyUiState,
+		operation: () => Promise<T>
+	): Promise<T> {
+		if (!sessionId) {
+			return await operation();
+		}
+
+		const runtimeState = activateTerminalOnlyUiState(sessionId, terminalOnlyUiState);
+		try {
+			return await operation();
+		} finally {
+			cleanupTerminalOnlyUiState(runtimeState);
 		}
 	}
 
@@ -878,6 +1034,7 @@ export default function (pi: ExtensionAPI) {
 		uiPatched = true;
 
 		const ui = ctx.ui;
+		const originalCustom = ui.custom.bind(ui) as any;
 		const originalSelect = ui.select.bind(ui);
 		const originalInput = ui.input.bind(ui);
 		const originalEditor = ui.editor.bind(ui);
@@ -889,6 +1046,19 @@ export default function (pi: ExtensionAPI) {
 		const originalPasteToEditor = ui.pasteToEditor.bind(ui);
 		const originalSetWorkingMessage = ui.setWorkingMessage.bind(ui);
 		const originalSetHiddenThinkingLabel = ui.setHiddenThinkingLabel.bind(ui);
+
+		ui.custom = ((...args: any[]) => {
+			const sessionId = state.currentSessionId;
+			return runWithTerminalOnlyUiState(
+				sessionId,
+				{
+					kind: "customUi",
+					reason:
+						"This extension command opened custom terminal UI that pimux iOS can’t render yet. Finish it in the Pi terminal, or interrupt the session.",
+				},
+				async () => await originalCustom(...args)
+			);
+		}) as typeof ui.custom;
 
 		ui.select = (async (title: string, options: string[], opts?: UiDialogOptions) => {
 			const sessionId = state.currentSessionId;
@@ -922,7 +1092,7 @@ export default function (pi: ExtensionAPI) {
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
 			try {
-				return await ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+				return await originalCustom((tui, _theme, keybindings, done) => {
 					configureMirroredTuiComponent(tui as MirroredDialogTui, keybindings);
 
 					const selector = new ExtensionSelectorComponent(
@@ -987,7 +1157,7 @@ export default function (pi: ExtensionAPI) {
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
 			try {
-				return await ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+				return await originalCustom((tui, _theme, keybindings, done) => {
 					configureMirroredTuiComponent(tui as MirroredDialogTui, keybindings);
 
 					const inputComponent = new ExtensionInputComponent(
@@ -1040,7 +1210,7 @@ export default function (pi: ExtensionAPI) {
 			activateMirroredUiDialog(dialog);
 
 			try {
-				return await ui.custom<string | undefined>((tui, _theme, keybindings, done) => {
+				return await originalCustom((tui, _theme, keybindings, done) => {
 					configureMirroredTuiComponent(tui as MirroredDialogTui, keybindings);
 
 					const editorComponent = new ExtensionEditorComponent(
@@ -1099,7 +1269,7 @@ export default function (pi: ExtensionAPI) {
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
 			try {
-				return await ui.custom<boolean>((tui, _theme, keybindings, done) => {
+				return await originalCustom((tui, _theme, keybindings, done) => {
 					configureMirroredTuiComponent(tui as MirroredDialogTui, keybindings);
 
 					const selector = new ExtensionSelectorComponent(
@@ -1342,6 +1512,7 @@ export default function (pi: ExtensionAPI) {
 		if (state.currentSessionId) {
 			cancelCurrentUiDialog(state.currentSessionId);
 			clearCurrentUiState(state.currentSessionId);
+			clearCurrentTerminalOnlyUiState(state.currentSessionId);
 			bridge.send({ type: "sessionDetached", sessionId: state.currentSessionId });
 			state.currentSessionId = undefined;
 			state.latestSnapshotMessages = [];
@@ -1388,6 +1559,7 @@ export default function (pi: ExtensionAPI) {
 			cancelPendingPartial(state.currentSessionId);
 			cancelCurrentUiDialog(state.currentSessionId);
 			clearCurrentUiState(state.currentSessionId);
+			clearCurrentTerminalOnlyUiState(state.currentSessionId);
 			bridge.send({ type: "sessionDetached", sessionId: state.currentSessionId });
 		}
 
@@ -1409,6 +1581,7 @@ export default function (pi: ExtensionAPI) {
 		});
 		sendCurrentUiState(nextSessionId);
 		sendCurrentUiDialogState(nextSessionId);
+		sendCurrentTerminalOnlyUiState(nextSessionId);
 	}
 
 	function publishSnapshot(ctx: ExtensionContext) {
