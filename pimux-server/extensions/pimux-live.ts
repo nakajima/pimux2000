@@ -336,6 +336,10 @@ type AgentToBridgeMessage =
 			requestId: string;
 			sessionId: string;
 			action: PimuxBuiltinCommandAction;
+	  }
+	| {
+			type: "interruptSession";
+			sessionId: string;
 	  };
 
 interface PimuxSessionCommand {
@@ -1692,6 +1696,13 @@ export default function (pi: ExtensionAPI) {
 
 		if (command.type === "builtinCommand") {
 			void handleBuiltinCommand(command.requestId, command.sessionId, command.action);
+			return;
+		}
+
+		if (command.type === "interruptSession") {
+			if (state.currentSessionId && command.sessionId === state.currentSessionId) {
+				process.kill(process.pid, "SIGINT");
+			}
 			return;
 		}
 

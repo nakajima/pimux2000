@@ -688,6 +688,11 @@ async fn handle_server_message(
                 error,
             });
         }
+        ServerToAgentMessage::InterruptSession { session_id } => {
+            if let Err(error) = live_store.interrupt_session(&session_id).await {
+                eprintln!("failed to interrupt session {session_id}: {error}");
+            }
+        }
         ServerToAgentMessage::Ping => {
             let _ = channel_tx.send(AgentToServerMessage::Pong);
         }

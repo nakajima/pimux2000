@@ -116,6 +116,9 @@ pub enum ServerToAgentMessage {
         session_id: String,
         action: SessionBuiltinCommandRequest,
     },
+    InterruptSession {
+        session_id: String,
+    },
     Ping,
     Pong,
 }

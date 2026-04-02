@@ -385,6 +385,24 @@ impl LiveSessionStoreHandle {
         store.fulfill_builtin_command(connection_id, request_id, error);
     }
 
+    pub async fn interrupt_session(
+        &self,
+        session_id: &str,
+    ) -> Result<(), BoxError> {
+        let store = self.inner.lock().await;
+        let sender = store.sender_for_session(session_id)
+            .ok_or_else(|| -> BoxError {
+                format!("session {session_id} has no live command connection").into()
+            })?;
+        sender
+            .send(LiveAgentCommand::InterruptSession {
+                session_id: session_id.to_string(),
+            })
+            .map_err(|_| -> BoxError {
+                format!("session {session_id} command connection channel is closed").into()
+            })
+    }
+
     pub async fn send_user_message(
         &self,
         session_id: &str,
@@ -1114,6 +1132,9 @@ enum LiveAgentCommand {
         session_id: String,
         action: SessionBuiltinCommandRequest,
     },
+    InterruptSession {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1470,6 +1491,12 @@ impl LiveSessionStore {
 
     fn has_command_connection(&self, session_id: &str) -> bool {
         self.command_session_connections.contains_key(session_id)
+    }
+
+    fn sender_for_session(&self, session_id: &str) -> Option<UnboundedSender<LiveAgentCommand>> {
+        let &connection_id = self.command_session_connections.get(session_id)?;
+        let connection = self.command_connections.get(&connection_id)?;
+        Some(connection.sender.clone())
     }
 
     fn upsert_session_metadata(&mut self, session_id: &str, metadata: LiveSessionMetadata) {

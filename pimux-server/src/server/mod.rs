@@ -343,6 +343,10 @@ fn app(state: AppState) -> Router {
             "/sessions/{id}/builtin-command",
             post(session_builtin_command),
         )
+        .route(
+            "/sessions/{id}/interrupt",
+            post(interrupt_session),
+        )
         .route("/agent/connect", get(agent_connect))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
@@ -778,6 +782,28 @@ async fn session_builtin_command(
             )))
         }
     }
+}
+
+async fn interrupt_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let Some(host_location) = host_for_session(&state, &session_id).await else {
+        return Err(not_found(format!(
+            "session {session_id} is not known to the server"
+        )));
+    };
+
+    send_to_agent(
+        &state,
+        &host_location,
+        ServerToAgentMessage::InterruptSession {
+            session_id,
+        },
+    )
+    .await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn session_attachment(
