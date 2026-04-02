@@ -633,6 +633,25 @@ async fn handle_server_message(
                 error,
             });
         }
+        ServerToAgentMessage::GetCommandArgumentCompletions {
+            request_id,
+            session_id,
+            command_name,
+            argument_prefix,
+        } => {
+            let result = live_store
+                .get_command_argument_completions(&session_id, &command_name, &argument_prefix)
+                .await;
+            let (completions, error) = match result {
+                Ok(completions) => (Some(completions), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let _ = channel_tx.send(AgentToServerMessage::GetCommandArgumentCompletionsResult {
+                request_id,
+                completions,
+                error,
+            });
+        }
         ServerToAgentMessage::UiDialogAction {
             request_id,
             session_id,

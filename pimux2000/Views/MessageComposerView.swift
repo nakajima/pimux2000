@@ -13,6 +13,7 @@ struct MessageComposerView: View {
 	var isSending: Bool = false
 	var isAgentActive: Bool = false
 	var errorMessage: String? = nil
+	var loadArgumentCompletions: @Sendable (String, String) async -> [SlashCommandArgumentCompletion] = { _, _ in [] }
 	var onSend: () -> Void
 	var onStop: () -> Void = {}
 	var onRemoveAttachment: (UUID) -> Void = { _ in }
@@ -24,9 +25,15 @@ struct MessageComposerView: View {
 	@State private var isCameraPresented = false
 	@State private var isDropTargeted = false
 	@State private var slashMenuSelection: Int = 0
+	@State private var slashMenuItems: [SlashCompletionMenuItem] = []
+	@State private var slashCompletionTask: Task<Void, Never>?
 
 	private var trimmedText: String {
 		text.trimmingCharacters(in: .whitespacesAndNewlines)
+	}
+
+	private var allCommands: [SlashCommand] {
+		SlashCommand.merged(custom: customCommands)
 	}
 
 	private var hasReadyAttachments: Bool {
@@ -37,16 +44,17 @@ struct MessageComposerView: View {
 		attachments.contains { if case .loading = $0.processingState { return true }; return false }
 	}
 
-	private var canSend: Bool {
-		isEnabled && !isSending && !hasLoadingAttachments && (!trimmedText.isEmpty || hasReadyAttachments)
+	private var slashValidationMessage: String? {
+		guard !hasReadyAttachments else { return nil }
+		return SlashCommand.validationMessage(for: trimmedText, commands: allCommands)
 	}
 
-	private var matchingCommands: [SlashCommand] {
-		// Only match when the text is purely a slash prefix (no spaces yet)
-		let trimmed = trimmedText
-		guard trimmed.hasPrefix("/"), !trimmed.dropFirst().contains(" ") else { return [] }
-		let allCommands = SlashCommand.merged(custom: customCommands)
-		return SlashCommand.matching(query: trimmed, from: allCommands)
+	private var canSend: Bool {
+		isEnabled
+			&& !isSending
+			&& !hasLoadingAttachments
+			&& (!trimmedText.isEmpty || hasReadyAttachments)
+			&& slashValidationMessage == nil
 	}
 
 	var body: some View {
@@ -54,9 +62,9 @@ struct MessageComposerView: View {
 			Divider()
 
 			VStack(alignment: .leading, spacing: 8) {
-				if !matchingCommands.isEmpty {
-					SlashCommandMenuView(commands: matchingCommands, selectedIndex: slashMenuSelection) { command in
-						text = command.displayName + " "
+				if !slashMenuItems.isEmpty {
+					SlashCommandMenuView(items: slashMenuItems, selectedIndex: slashMenuSelection) { item in
+						applySlashCompletion(item)
 					}
 					.transition(.move(edge: .bottom).combined(with: .opacity))
 				}
@@ -69,6 +77,16 @@ struct MessageComposerView: View {
 					}
 						.font(.caption)
 						.foregroundStyle(.red)
+				}
+
+				if let slashValidationMessage, !slashValidationMessage.isEmpty {
+					Label {
+						Text(verbatim: slashValidationMessage)
+					} icon: {
+						Image(systemName: "exclamationmark.circle.fill")
+					}
+						.font(.caption)
+						.foregroundStyle(.orange)
 				}
 
 				if !attachments.isEmpty {
@@ -109,7 +127,7 @@ struct MessageComposerView: View {
 						.padding(.vertical, 10)
 						.background(.background, in: RoundedRectangle(cornerRadius: 12))
 						.disabled(!isEnabled || isSending)
-						.onSubmit(onSend)
+						.onSubmit(handleSubmit)
 
 					if isAgentActive && !isSending {
 						Button(action: onStop) {
@@ -120,7 +138,7 @@ struct MessageComposerView: View {
 						.keyboardShortcut(.escape, modifiers: [])
 						.accessibilityLabel("Stop agent")
 					} else {
-						Button(action: onSend) {
+						Button(action: sendIfAllowed) {
 							if isSending {
 								ProgressView()
 									.controlSize(.small)
@@ -140,40 +158,54 @@ struct MessageComposerView: View {
 			.padding(.horizontal)
 			.padding(.vertical, 12)
 			.background(.thinMaterial)
-			.animation(.easeOut(duration: 0.15), value: matchingCommands.map(\.name))
+			.animation(.easeOut(duration: 0.15), value: slashMenuItems.map(\.id))
 			.animation(.easeOut(duration: 0.15), value: attachments.map(\.id))
-			.onChange(of: matchingCommands.map(\.name)) {
+			.onAppear(perform: refreshSlashMenuItems)
+			.onDisappear {
+				slashCompletionTask?.cancel()
+				slashCompletionTask = nil
+			}
+			.onChange(of: text) {
+				refreshSlashMenuItems()
+			}
+			.onChange(of: customCommands.map(\.id)) {
+				refreshSlashMenuItems()
+			}
+			.onChange(of: slashMenuItems.map(\.id)) {
 				slashMenuSelection = 0
 			}
 			.onKeyPress(phases: [.down, .repeat]) { press in
-				if matchingCommands.isEmpty {
-					if press.key == .escape && isAgentActive && !isSending {
-						onStop()
-						return .handled
-					}
-					return .ignored
-				}
-
+				let hasMenu = !slashMenuItems.isEmpty
 				let isDown = press.key == .downArrow
 					|| (press.key == KeyEquivalent("n") && press.modifiers.contains(.control))
 				let isUp = press.key == .upArrow
 					|| (press.key == KeyEquivalent("p") && press.modifiers.contains(.control))
 
-				if isDown {
-					slashMenuSelection = min(slashMenuSelection + 1, matchingCommands.count - 1)
+				if hasMenu && isDown {
+					slashMenuSelection = min(slashMenuSelection + 1, slashMenuItems.count - 1)
 					return .handled
 				}
-				if isUp {
+				if hasMenu && isUp {
 					slashMenuSelection = max(slashMenuSelection - 1, 0)
 					return .handled
 				}
 				if press.key == .escape {
-					text = ""
+					if hasMenu || SlashCommand.draftContext(for: text) != nil {
+						text = ""
+						return .handled
+					}
+					if isAgentActive && !isSending {
+						onStop()
+						return .handled
+					}
+					return .ignored
+				}
+				if hasMenu && (press.key == .return || press.key == .tab) {
+					acceptSelectedSlashCompletion()
 					return .handled
 				}
-				if press.key == .return {
-					let command = matchingCommands[slashMenuSelection]
-					text = command.displayName + " "
+				if !hasMenu && press.key == .escape && isAgentActive && !isSending {
+					onStop()
 					return .handled
 				}
 
@@ -216,6 +248,79 @@ struct MessageComposerView: View {
 		}
 	}
 
+	private func handleSubmit() {
+		if !slashMenuItems.isEmpty {
+			acceptSelectedSlashCompletion()
+			return
+		}
+
+		sendIfAllowed()
+	}
+
+	private func sendIfAllowed() {
+		guard canSend else { return }
+		onSend()
+	}
+
+	private func refreshSlashMenuItems() {
+		slashCompletionTask?.cancel()
+		slashCompletionTask = nil
+
+		guard let context = SlashCommand.draftContext(for: text) else {
+			slashMenuItems = []
+			return
+		}
+
+		switch context.phase {
+		case .commandName(let prefix):
+			let query = "/\(prefix)"
+			slashMenuItems = SlashCommand.matching(query: query, from: allCommands).map(SlashCompletionMenuItem.init)
+		case .arguments(let commandName, let argumentText):
+			guard let command = SlashCommand.command(named: commandName, from: allCommands) else {
+				slashMenuItems = []
+				return
+			}
+
+			let localItems = command.localArgumentCompletions(argumentPrefix: argumentText)
+			if !localItems.isEmpty || command.source == "builtin" {
+				slashMenuItems = localItems.map { SlashCompletionMenuItem(commandName: commandName, completion: $0) }
+				return
+			}
+
+			guard command.source == "extension" else {
+				slashMenuItems = []
+				return
+			}
+
+			let expectedText = text
+			slashMenuItems = []
+			slashCompletionTask = Task {
+				let completions = await loadArgumentCompletions(commandName, argumentText)
+				guard !Task.isCancelled else { return }
+				await MainActor.run {
+					guard text == expectedText else { return }
+					slashMenuItems = completions.map {
+						SlashCompletionMenuItem(commandName: commandName, completion: $0)
+					}
+				}
+			}
+		}
+	}
+
+	private func acceptSelectedSlashCompletion() {
+		guard slashMenuSelection >= 0, slashMenuSelection < slashMenuItems.count else { return }
+		applySlashCompletion(slashMenuItems[slashMenuSelection])
+	}
+
+	private func applySlashCompletion(_ item: SlashCompletionMenuItem) {
+		switch item.kind {
+		case .command(let command):
+			text = command.displayName + " "
+		case .argument(let commandName, let completion):
+			text = "/\(commandName) \(completion.value) "
+		}
+	}
+
 	private func pasteFromClipboard() {
 		let pasteboard = UIPasteboard.general
 		let imageTypes = [
@@ -235,6 +340,38 @@ struct MessageComposerView: View {
 		if let image = pasteboard.image, let data = image.pngData() {
 			onImportImageData(data, .paste)
 		}
+	}
+}
+
+private struct SlashCompletionMenuItem: Identifiable, Equatable {
+	enum Kind: Equatable {
+		case command(SlashCommand)
+		case argument(commandName: String, completion: SlashCommandArgumentCompletion)
+	}
+
+	let kind: Kind
+	let title: String
+	let subtitle: String
+
+	var id: String {
+		switch kind {
+		case .command(let command):
+			return "command:\(command.id)"
+		case .argument(let commandName, let completion):
+			return "argument:\(commandName):\(completion.id)"
+		}
+	}
+
+	init(_ command: SlashCommand) {
+		kind = .command(command)
+		title = command.displayName
+		subtitle = command.description
+	}
+
+	init(commandName: String, completion: SlashCommandArgumentCompletion) {
+		kind = .argument(commandName: commandName, completion: completion)
+		title = completion.label
+		subtitle = completion.description ?? ""
 	}
 }
 
@@ -318,23 +455,23 @@ private struct ComposerAttachmentTile: View {
 // MARK: - Slash Command Menu
 
 private struct SlashCommandMenuView: View {
-	let commands: [SlashCommand]
+	let items: [SlashCompletionMenuItem]
 	var selectedIndex: Int = 0
-	let onSelect: (SlashCommand) -> Void
+	let onSelect: (SlashCompletionMenuItem) -> Void
 
 	var body: some View {
 		ScrollViewReader { proxy in
 			ScrollView {
 				LazyVStack(alignment: .leading, spacing: 0) {
-					ForEach(Array(commands.enumerated()), id: \.element.id) { index, command in
+					ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
 						Button {
-							onSelect(command)
+							onSelect(item)
 						} label: {
 							HStack(spacing: 8) {
-								Text(command.displayName)
+								Text(item.title)
 									.fontWeight(.medium)
 									.foregroundStyle(.primary)
-								Text(command.description)
+								Text(item.subtitle)
 									.foregroundStyle(.secondary)
 									.lineLimit(1)
 								Spacer()
@@ -349,16 +486,16 @@ private struct SlashCommandMenuView: View {
 							.contentShape(Rectangle())
 						}
 						.buttonStyle(.plain)
-						.id(command.id)
+						.id(item.id)
 					}
 				}
 			}
 			.frame(maxHeight: 200)
 			.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
 			.onChange(of: selectedIndex) {
-				guard selectedIndex < commands.count else { return }
+				guard selectedIndex < items.count else { return }
 				withAnimation {
-					proxy.scrollTo(commands[selectedIndex].id, anchor: .center)
+					proxy.scrollTo(items[selectedIndex].id, anchor: .center)
 				}
 			}
 		}
@@ -370,9 +507,11 @@ private struct SlashCommandMenuView: View {
 private struct MessageComposerPreviewHost: View {
 	@State var text: String
 	var attachments: [ComposerImage] = []
+	var customCommands: [PimuxSessionCommand] = []
 	var isEnabled: Bool = true
 	var isSending: Bool = false
 	var errorMessage: String? = nil
+	var loadArgumentCompletions: @Sendable (String, String) async -> [SlashCommandArgumentCompletion] = { _, _ in [] }
 
 	var body: some View {
 		VStack(spacing: 0) {
@@ -381,9 +520,11 @@ private struct MessageComposerPreviewHost: View {
 			MessageComposerView(
 				text: $text,
 				attachments: attachments,
+				customCommands: customCommands,
 				isEnabled: isEnabled,
 				isSending: isSending,
 				errorMessage: errorMessage,
+				loadArgumentCompletions: loadArgumentCompletions,
 				onSend: {}
 			)
 		}
@@ -401,6 +542,22 @@ private struct MessageComposerPreviewHost: View {
 
 #Preview("Slash filter") {
 	MessageComposerPreviewHost(text: "/co")
+}
+
+#Preview("Slash argument completions") {
+	MessageComposerPreviewHost(
+		text: "/pirot ",
+		customCommands: [
+			PimuxSessionCommand(name: "pirot", description: "Pirot repo commands", source: "extension")
+		],
+		loadArgumentCompletions: { commandName, _ in
+			guard commandName == "pirot" else { return [] }
+			return [
+				SlashCommandArgumentCompletion(value: "sync", label: "sync", description: "Sync pirot resources"),
+				SlashCommandArgumentCompletion(value: "restart-server", label: "restart-server", description: "Restart the pirot server"),
+			]
+		}
+	)
 }
 
 #Preview("Sending") {

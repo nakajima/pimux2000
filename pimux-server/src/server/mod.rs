@@ -39,7 +39,7 @@ use crate::{
     report::VersionResponse,
     session::{
         ActiveSession, ListedSession, SessionBuiltinCommandRequest, SessionBuiltinCommandResponse,
-        SessionCommand,
+        SessionCommand, SessionCommandCompletion,
     },
     transcript::{
         ApiSessionMessagesResponse, SessionMessagesResponse, SessionStreamEvent,
@@ -105,6 +105,8 @@ struct AppState {
     inflight_attachment_fetches: Arc<Mutex<HashMap<String, InflightAttachmentFetch>>>,
     inflight_send_messages: Arc<Mutex<HashMap<String, InflightSendMessage>>>,
     inflight_get_commands: Arc<Mutex<HashMap<String, InflightGetCommands>>>,
+    inflight_get_command_argument_completions:
+        Arc<Mutex<HashMap<String, InflightGetCommandArgumentCompletions>>>,
     inflight_ui_dialog_actions: Arc<Mutex<HashMap<String, InflightUiDialogAction>>>,
     inflight_builtin_commands: Arc<Mutex<HashMap<String, InflightBuiltinCommand>>>,
     session_subscribers:
@@ -127,6 +129,7 @@ impl AppState {
             inflight_attachment_fetches: Arc::new(Mutex::new(HashMap::new())),
             inflight_send_messages: Arc::new(Mutex::new(HashMap::new())),
             inflight_get_commands: Arc::new(Mutex::new(HashMap::new())),
+            inflight_get_command_argument_completions: Arc::new(Mutex::new(HashMap::new())),
             inflight_ui_dialog_actions: Arc::new(Mutex::new(HashMap::new())),
             inflight_builtin_commands: Arc::new(Mutex::new(HashMap::new())),
             session_subscribers: Arc::new(Mutex::new(HashMap::new())),
@@ -206,10 +209,16 @@ struct InflightSendMessage {
 }
 
 type GetCommandsResult = Result<Vec<SessionCommand>, String>;
+type GetCommandArgumentCompletionsResult = Result<Vec<SessionCommandCompletion>, String>;
 
 struct InflightGetCommands {
     host_location: String,
     sender: oneshot::Sender<GetCommandsResult>,
+}
+
+struct InflightGetCommandArgumentCompletions {
+    host_location: String,
+    sender: oneshot::Sender<GetCommandArgumentCompletionsResult>,
 }
 
 struct InflightUiDialogAction {
@@ -318,6 +327,10 @@ fn app(state: AppState) -> Router {
         )
         .route("/sessions/{id}/stream", get(session_stream))
         .route("/sessions/{id}/commands", get(session_commands))
+        .route(
+            "/sessions/{id}/command-argument-completions",
+            post(session_command_argument_completions),
+        )
         .route(
             "/sessions/{id}/ui-dialog-action",
             post(session_ui_dialog_action),
@@ -514,6 +527,21 @@ struct SessionCommandsResponse {
     commands: Vec<SessionCommand>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionCommandArgumentCompletionsRequest {
+    command_name: String,
+    #[serde(default)]
+    argument_prefix: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionCommandArgumentCompletionsResponse {
+    session_id: String,
+    completions: Vec<SessionCommandCompletion>,
+}
+
 const GET_COMMANDS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 async fn session_commands(
@@ -563,6 +591,66 @@ async fn session_commands(
             state.inflight_get_commands.lock().await.remove(&request_id);
             Err(gateway_timeout(format!(
                 "timed out waiting for host {} to provide commands for session {}",
+                host_location, session_id
+            )))
+        }
+    }
+}
+
+async fn session_command_argument_completions(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SessionCommandArgumentCompletionsRequest>,
+) -> Result<Json<SessionCommandArgumentCompletionsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let Some(host_location) = host_for_session(&state, &session_id).await else {
+        return Err(not_found(format!(
+            "session {session_id} is not known to the server"
+        )));
+    };
+
+    let request_id = next_request_id(&state, "cmd-args");
+    let (sender, receiver) = oneshot::channel();
+    {
+        let mut inflight = state.inflight_get_command_argument_completions.lock().await;
+        inflight.insert(
+            request_id.clone(),
+            InflightGetCommandArgumentCompletions {
+                host_location: host_location.clone(),
+                sender,
+            },
+        );
+    }
+
+    send_to_agent(
+        &state,
+        &host_location,
+        ServerToAgentMessage::GetCommandArgumentCompletions {
+            request_id: request_id.clone(),
+            session_id: session_id.clone(),
+            command_name: request.command_name,
+            argument_prefix: request.argument_prefix,
+        },
+    )
+    .await?;
+
+    match tokio::time::timeout(GET_COMMANDS_TIMEOUT, receiver).await {
+        Ok(Ok(Ok(completions))) => Ok(Json(SessionCommandArgumentCompletionsResponse {
+            session_id,
+            completions,
+        })),
+        Ok(Ok(Err(error))) => Err(bad_gateway(error)),
+        Ok(Err(_)) => Err(bad_gateway(format!(
+            "host {} disconnected before providing command argument completions for session {}",
+            host_location, session_id
+        ))),
+        Err(_) => {
+            state
+                .inflight_get_command_argument_completions
+                .lock()
+                .await
+                .remove(&request_id);
+            Err(gateway_timeout(format!(
+                "timed out waiting for host {} to provide command argument completions for session {}",
                 host_location, session_id
             )))
         }
@@ -1227,6 +1315,24 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         )
                         .await;
                     }
+                    AgentToServerMessage::GetCommandArgumentCompletionsResult {
+                        request_id,
+                        completions,
+                        error,
+                    } => {
+                        let Some(host) = current_host.as_ref() else {
+                            eprintln!("received get command argument completions result before hello");
+                            continue;
+                        };
+                        fulfill_get_command_argument_completions_result(
+                            &state,
+                            &host.location,
+                            &request_id,
+                            completions,
+                            error,
+                        )
+                        .await;
+                    }
                     AgentToServerMessage::UiDialogActionResult { request_id, error } => {
                         let Some(host) = current_host.as_ref() else {
                             eprintln!("received ui dialog action result before hello");
@@ -1808,6 +1914,28 @@ async fn fulfill_get_commands_result(
     }
 }
 
+async fn fulfill_get_command_argument_completions_result(
+    state: &AppState,
+    _host_location: &str,
+    request_id: &str,
+    completions: Option<Vec<SessionCommandCompletion>>,
+    error: Option<String>,
+) {
+    let sender = {
+        let mut inflight = state.inflight_get_command_argument_completions.lock().await;
+        inflight.remove(request_id)
+    };
+
+    if let Some(inflight) = sender {
+        let result = match (completions, error) {
+            (Some(completions), _) => Ok(completions),
+            (None, Some(error)) => Err(error),
+            (None, None) => Ok(Vec::new()),
+        };
+        let _ = inflight.sender.send(result);
+    }
+}
+
 async fn fulfill_ui_dialog_action_result(
     state: &AppState,
     _host_location: &str,
@@ -1927,6 +2055,26 @@ async fn fail_inflight_for_host(state: &AppState, host_location: &str) {
     for inflight in cmd_senders {
         let _ = inflight.sender.send(Err(format!(
             "host {} disconnected before providing commands",
+            host_location
+        )));
+    }
+
+    let cmd_argument_completion_senders = {
+        let mut inflight = state.inflight_get_command_argument_completions.lock().await;
+        let request_ids = inflight
+            .iter()
+            .filter(|(_, inflight)| inflight.host_location == host_location)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        request_ids
+            .into_iter()
+            .filter_map(|request_id| inflight.remove(&request_id))
+            .collect::<Vec<_>>()
+    };
+
+    for inflight in cmd_argument_completion_senders {
+        let _ = inflight.sender.send(Err(format!(
+            "host {} disconnected before providing command argument completions",
             host_location
         )));
     }

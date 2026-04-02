@@ -1,5 +1,6 @@
 import { complete } from "@mariozechner/pi-ai";
 import {
+	AgentSession,
 	ExtensionEditorComponent,
 	ExtensionInputComponent,
 	ExtensionRunner,
@@ -13,7 +14,7 @@ import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const LIVE_PROTOCOL_VERSION = 7;
+const LIVE_PROTOCOL_VERSION = 8;
 const PARTIAL_UPDATE_THROTTLE_MS = 150;
 const SOCKET_RECONNECT_DELAY_MS = 500;
 const RESUMMARIZE_EDGE_ENTRY_COUNT = 5;
@@ -175,9 +176,13 @@ type BoundCommandContextActions = {
 	reload?: () => Promise<void>;
 };
 
+type BoundAgentSession = Pick<AgentSession, "prompt" | "sessionManager" | "extensionRunner">;
+
 type PimuxLiveGlobalState = typeof globalThis & {
 	__pimuxLiveBoundCommandContextActions?: BoundCommandContextActions;
 	__pimuxLiveCommandContextBindingsPatched?: boolean;
+	__pimuxLiveAgentSession?: BoundAgentSession;
+	__pimuxLiveAgentSessionBindingPatched?: boolean;
 };
 
 function pimuxLiveGlobalState(): PimuxLiveGlobalState {
@@ -197,6 +202,24 @@ function ensureCommandContextBindingsPatched() {
 	ExtensionRunner.prototype.bindCommandContext = function (actions: BoundCommandContextActions | undefined) {
 		globalState.__pimuxLiveBoundCommandContextActions = actions;
 		return originalBindCommandContext.call(this, actions);
+	};
+}
+
+function currentAgentSession() {
+	return pimuxLiveGlobalState().__pimuxLiveAgentSession;
+}
+
+function ensureAgentSessionBindingPatched() {
+	const globalState = pimuxLiveGlobalState();
+	if (globalState.__pimuxLiveAgentSessionBindingPatched) return;
+	globalState.__pimuxLiveAgentSessionBindingPatched = true;
+
+	const originalBindExtensions = AgentSession.prototype.bindExtensions;
+	AgentSession.prototype.bindExtensions = async function (
+		...args: Parameters<AgentSession["bindExtensions"]>
+	) {
+		globalState.__pimuxLiveAgentSession = this as BoundAgentSession;
+		return await originalBindExtensions.apply(this, args);
 	};
 }
 
@@ -232,6 +255,13 @@ type BridgeToAgentMessage =
 	| { type: "sessionDetached"; sessionId: string }
 	| { type: "sendUserMessageResult"; requestId: string; sessionId: string; error?: string }
 	| { type: "getCommandsResult"; requestId: string; sessionId: string; commands: PimuxSessionCommand[]; error?: string }
+	| {
+			type: "getCommandArgumentCompletionsResult";
+			requestId: string;
+			sessionId: string;
+			completions: PimuxCommandCompletion[];
+			error?: string;
+	  }
 	| { type: "uiDialogActionResult"; requestId: string; sessionId: string; error?: string }
 	| { type: "builtinCommandResult"; requestId: string; sessionId: string; error?: string };
 
@@ -239,6 +269,12 @@ interface PimuxInputImage {
 	type: "image";
 	data: string;
 	mimeType: string;
+}
+
+interface PimuxCommandCompletion {
+	value: string;
+	label: string;
+	description?: string;
 }
 
 type AgentToBridgeMessage =
@@ -253,6 +289,13 @@ type AgentToBridgeMessage =
 			type: "getCommands";
 			requestId: string;
 			sessionId: string;
+	  }
+	| {
+			type: "getCommandArgumentCompletions";
+			requestId: string;
+			sessionId: string;
+			commandName: string;
+			argumentPrefix: string;
 	  }
 	| {
 			type: "uiDialogAction";
@@ -457,6 +500,7 @@ class LiveBridgeClient {
 
 export default function (pi: ExtensionAPI) {
 	ensureCommandContextBindingsPatched();
+	ensureAgentSessionBindingPatched();
 
 	const state: {
 		currentSessionId?: string;
@@ -1358,27 +1402,46 @@ export default function (pi: ExtensionAPI) {
 		bridge.send({ type: "builtinCommandResult", requestId, sessionId, error });
 	}
 
-	function userMessageContent(
-		body: string,
-		images: PimuxInputImage[]
-	): string | Array<{ type: "text"; text: string } | PimuxInputImage> {
-		if (images.length === 0) return body;
-
-		const content: Array<{ type: "text"; text: string } | PimuxInputImage> = [];
-		if (body) {
-			content.push({ type: "text", text: body });
-		}
-		content.push(...images);
-		return content;
+	function respondToCommandArgumentCompletionsRequest(
+		requestId: string,
+		sessionId: string,
+		completions: PimuxCommandCompletion[],
+		error?: string
+	) {
+		bridge.send({
+			type: "getCommandArgumentCompletionsResult",
+			requestId,
+			sessionId,
+			completions,
+			error,
+		});
 	}
 
-	function dispatchUserMessage(body: string, images: PimuxInputImage[] = []) {
-		const content = userMessageContent(body, images);
-		if (state.isAgentBusy) {
-			pi.sendUserMessage(content, { deliverAs: "followUp" });
-		} else {
-			pi.sendUserMessage(content);
+	function dispatchUserMessage(sessionId: string, body: string, images: PimuxInputImage[] = []): string | undefined {
+		const agentSession = currentAgentSession();
+		if (!agentSession) {
+			return "no live pi agent session is available";
 		}
+
+		const activeAgentSessionId = agentSession.sessionManager.getSessionId();
+		if (!activeAgentSessionId || activeAgentSessionId !== sessionId) {
+			return `session ${sessionId} is not currently attached in this pi runtime`;
+		}
+
+		void agentSession
+			.prompt(body, {
+				images: images.length > 0 ? images : undefined,
+				streamingBehavior: state.isAgentBusy ? "followUp" : undefined,
+			})
+			.catch((error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				const ctx = state.currentSessionContext;
+				if (ctx && ctx.sessionManager.getSessionId() === sessionId) {
+					ctx.ui.notify(`Failed to submit input: ${message}`, "error");
+					return;
+				}
+				console.error(`pimux live send failed for session ${sessionId}: ${message}`);
+			});
 	}
 
 	function handleGetCommands(requestId: string, sessionId: string) {
@@ -1398,6 +1461,44 @@ export default function (pi: ExtensionAPI) {
 				commands: [],
 				error: error instanceof Error ? error.message : String(error),
 			});
+		}
+	}
+
+	function handleGetCommandArgumentCompletions(
+		requestId: string,
+		sessionId: string,
+		commandName: string,
+		argumentPrefix: string
+	) {
+		if (!state.currentSessionId || sessionId !== state.currentSessionId) {
+			respondToCommandArgumentCompletionsRequest(
+				requestId,
+				sessionId,
+				[],
+				`session ${sessionId} is not currently attached in this pi runtime`
+			);
+			return;
+		}
+
+		try {
+			const command = currentAgentSession()?.extensionRunner?.getCommand(commandName);
+			const completions = command?.getArgumentCompletions?.(argumentPrefix) ?? [];
+			respondToCommandArgumentCompletionsRequest(
+				requestId,
+				sessionId,
+				completions.map((item) => ({
+					value: item.value,
+					label: item.label,
+					description: item.description,
+				}))
+			);
+		} catch (error) {
+			respondToCommandArgumentCompletionsRequest(
+				requestId,
+				sessionId,
+				[],
+				error instanceof Error ? error.message : String(error)
+			);
 		}
 	}
 
@@ -1496,6 +1597,16 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		if (command.type === "getCommandArgumentCompletions") {
+			handleGetCommandArgumentCompletions(
+				command.requestId,
+				command.sessionId,
+				command.commandName,
+				command.argumentPrefix
+			);
+			return;
+		}
+
 		if (command.type === "uiDialogAction") {
 			handleUiDialogAction(command.requestId, command.sessionId, command.dialogId, command.action);
 			return;
@@ -1524,8 +1635,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		dispatchUserMessage(body, images);
-		respondToSendRequest(command.requestId, command.sessionId);
+		const error = dispatchUserMessage(command.sessionId, body, images);
+		respondToSendRequest(command.requestId, command.sessionId, error);
 	}
 
 	bridge = new LiveBridgeClient(resolveSocketPath(), handleBridgeCommand, bridgeStateSnapshot);

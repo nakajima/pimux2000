@@ -115,6 +115,12 @@ struct PiSessionView: View {
 					isSending: isSendingMessage,
 					isAgentActive: isAgentBusy,
 					errorMessage: sendError,
+					loadArgumentCompletions: { commandName, argumentPrefix in
+						await loadCommandArgumentCompletions(
+							commandName: commandName,
+							argumentPrefix: argumentPrefix
+						)
+					},
 					onSend: { Task { await sendMessage() } },
 					onStop: { Task { await interruptSession() } },
 					onRemoveAttachment: { id in draftImages.removeAll { $0.id == id } },
@@ -1071,6 +1077,34 @@ struct PiSessionView: View {
 		} catch {
 			// Non-critical; built-in commands still work
 			print("Failed to load custom commands for \(session.sessionID): \(error)")
+		}
+	}
+
+	private func loadCommandArgumentCompletions(
+		commandName: String,
+		argumentPrefix: String
+	) async -> [SlashCommandArgumentCompletion] {
+		guard let serverConfiguration else { return [] }
+
+		do {
+			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+			let completions = try await client.getCommandArgumentCompletions(
+				sessionID: session.sessionID,
+				commandName: commandName,
+				argumentPrefix: argumentPrefix
+			)
+			return completions.map {
+				SlashCommandArgumentCompletion(
+					value: $0.value,
+					label: $0.label,
+					description: $0.description
+				)
+			}
+		} catch {
+			print(
+				"Failed to load command argument completions for \(session.sessionID) /\(commandName): \(error)"
+			)
+			return []
 		}
 	}
 

@@ -1,5 +1,35 @@
 # Compact Handoff
 
+## Latest status
+The builtin shadow-command cleanup described below is now **done**.
+
+Implemented since this handoff was first written:
+
+- removed conflicting extension shadow registrations for:
+  - `/name`
+  - `/compact`
+  - `/reload`
+- replaced fake live slash-text injection with dedicated live builtin IPC
+- preserved builtin semantics in the app/server path
+- fixed the iOS execution path for extension slash commands so they no longer go through `pi.sendUserMessage(...)`
+- live command submission now uses Pi’s command-aware `AgentSession.prompt(...)` path
+- added live command argument-completions plumbing end-to-end:
+  - extension runtime → agent live store → server route → iOS composer
+- added iOS slash composer improvements:
+  - `[Tab]` accepts slash command completions
+  - `[Tab]` accepts argument completions when available
+  - slash completion menu now works for both command names and arguments
+  - builtin commands with known required/forbidden args now gate send in the composer
+
+Current live protocol version is now:
+
+- `8`
+
+Validation after the latest work:
+
+- `cargo test --manifest-path pimux-server/Cargo.toml --quiet` → passed (`72` tests)
+- `xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO` → succeeded
+
 ## What this handoff is for
 This handoff is for the **next step after compaction**.
 

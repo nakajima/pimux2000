@@ -174,9 +174,27 @@ struct PimuxSessionCommand: Decodable, Equatable, Identifiable, Sendable {
 	var id: String { name }
 }
 
+struct PimuxCommandCompletion: Codable, Equatable, Identifiable, Sendable {
+	let value: String
+	let label: String
+	let description: String?
+
+	var id: String { value + "|" + label + "|" + (description ?? "") }
+}
+
 struct PimuxSessionCommandsResponse: Decodable, Sendable {
 	let sessionId: String
 	let commands: [PimuxSessionCommand]
+}
+
+private struct PimuxCommandArgumentCompletionsRequest: Encodable, Sendable {
+	let commandName: String
+	let argumentPrefix: String
+}
+
+private struct PimuxCommandArgumentCompletionsResponse: Decodable, Sendable {
+	let sessionId: String
+	let completions: [PimuxCommandCompletion]
 }
 
 struct PimuxSessionForkMessage: Decodable, Equatable, Sendable, Identifiable {
@@ -574,6 +592,26 @@ struct PimuxServerClient {
 			path: "/sessions/\(sessionID)/commands"
 		)
 		return response.commands
+	}
+
+	func getCommandArgumentCompletions(
+		sessionID: String,
+		commandName: String,
+		argumentPrefix: String
+	) async throws -> [PimuxCommandCompletion] {
+		let request = PimuxCommandArgumentCompletionsRequest(
+			commandName: commandName,
+			argumentPrefix: argumentPrefix
+		)
+		let bodyData = try JSONEncoder().encode(request)
+		let response = try await requestJSON(
+			PimuxCommandArgumentCompletionsResponse.self,
+			path: "/sessions/\(sessionID)/command-argument-completions",
+			method: "POST",
+			bodyData: bodyData,
+			contentType: "application/json"
+		)
+		return response.completions
 	}
 
 	func interruptSession(sessionID: String) async throws {

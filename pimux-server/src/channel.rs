@@ -4,7 +4,8 @@ use crate::{
     host::HostIdentity,
     message::ImageContent,
     session::{
-        ActiveSession, SessionBuiltinCommandRequest, SessionBuiltinCommandResponse, SessionCommand,
+        ActiveSession, SessionBuiltinCommandRequest, SessionBuiltinCommandResponse,
+        SessionCommand, SessionCommandCompletion,
     },
     transcript::{
         SessionMessagesResponse, SessionTerminalOnlyUiState, SessionUiDialogAction,
@@ -57,6 +58,11 @@ pub enum AgentToServerMessage {
         commands: Option<Vec<SessionCommand>>,
         error: Option<String>,
     },
+    GetCommandArgumentCompletionsResult {
+        request_id: String,
+        completions: Option<Vec<SessionCommandCompletion>>,
+        error: Option<String>,
+    },
     UiDialogActionResult {
         request_id: String,
         error: Option<String>,
@@ -92,6 +98,12 @@ pub enum ServerToAgentMessage {
     GetCommands {
         request_id: String,
         session_id: String,
+    },
+    GetCommandArgumentCompletions {
+        request_id: String,
+        session_id: String,
+        command_name: String,
+        argument_prefix: String,
     },
     UiDialogAction {
         request_id: String,

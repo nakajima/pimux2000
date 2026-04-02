@@ -2,3 +2,4 @@ streaming should not disrupt scroll position if the user has scrolled up
 content doesn't stream in when we view full thinking context
 add a "Scroll to bottom" pill when we've scrolled up
 improve slash command ui. tab should complete the selected item. command arguments should be available (and required before submit as appropriate). we shouldn't be sending them as normal user messages, they're commands.
+can we get a "working" indicator in the ios app

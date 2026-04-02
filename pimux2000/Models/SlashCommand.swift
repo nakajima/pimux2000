@@ -1,12 +1,71 @@
 import Foundation
 
-struct SlashCommand: Identifiable, Equatable {
+struct SlashCommandArgumentCompletion: Identifiable, Equatable, Sendable {
+	let value: String
+	let label: String
+	let description: String?
+
+	var id: String { "\(value)|\(label)|\(description ?? "")" }
+}
+
+struct SlashCommandDraftContext: Equatable, Sendable {
+	enum Phase: Equatable, Sendable {
+		case commandName(prefix: String)
+		case arguments(commandName: String, argumentText: String)
+	}
+
+	let rawText: String
+	let phase: Phase
+}
+
+struct SlashCommand: Identifiable, Equatable, Sendable {
 	let name: String
 	let description: String
 	let source: String // "builtin", "extension", "prompt", "skill"
 
 	var id: String { name }
 	var displayName: String { "/\(name)" }
+
+	private enum BuiltinArgumentRule {
+		case none(usage: String)
+		case requiredText(usage: String)
+		case optionalText
+		case requiredExactValues(usage: String, completions: [SlashCommandArgumentCompletion])
+	}
+
+	private var builtinArgumentRule: BuiltinArgumentRule? {
+		guard source == "builtin" else { return nil }
+
+		switch name {
+		case "copy":
+			return .none(usage: "/copy")
+		case "new":
+			return .none(usage: "/new")
+		case "fork":
+			return .none(usage: "/fork")
+		case "session":
+			return .none(usage: "/session")
+		case "reload":
+			return .none(usage: "/reload")
+		case "name":
+			return .requiredText(usage: "/name <name>")
+		case "compact":
+			return .optionalText
+		case "pimux":
+			return .requiredExactValues(
+				usage: "/pimux resummarize",
+				completions: [
+					SlashCommandArgumentCompletion(
+						value: "resummarize",
+						label: "resummarize",
+						description: "Regenerate the session summary"
+					)
+				]
+			)
+		default:
+			return nil
+		}
+	}
 
 	static let builtinCommands: [SlashCommand] = [
 		SlashCommand(name: "compact", description: "Manually compact the session context", source: "builtin"),
@@ -35,5 +94,73 @@ struct SlashCommand: Identifiable, Equatable {
 		if filter.isEmpty { return commands }
 
 		return commands.filter { $0.name.lowercased().hasPrefix(filter) }
+	}
+
+	static func command(named name: String, from commands: [SlashCommand]) -> SlashCommand? {
+		commands.first { $0.name == name }
+	}
+
+	static func draftContext(for text: String) -> SlashCommandDraftContext? {
+		guard text.hasPrefix("/"), !text.contains("\n") else { return nil }
+
+		let withoutSlash = String(text.dropFirst())
+		guard !withoutSlash.isEmpty || text == "/" else { return nil }
+
+		guard let spaceIndex = withoutSlash.firstIndex(of: " ") else {
+			return SlashCommandDraftContext(rawText: text, phase: .commandName(prefix: withoutSlash))
+		}
+
+		let commandName = String(withoutSlash[..<spaceIndex])
+		let argumentStart = withoutSlash.index(after: spaceIndex)
+		let argumentText = String(withoutSlash[argumentStart...])
+		return SlashCommandDraftContext(rawText: text, phase: .arguments(commandName: commandName, argumentText: argumentText))
+	}
+
+	func localArgumentCompletions(argumentPrefix: String) -> [SlashCommandArgumentCompletion] {
+		guard let builtinArgumentRule else { return [] }
+
+		switch builtinArgumentRule {
+		case .requiredExactValues(_, let completions):
+			let trimmed = argumentPrefix.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+			if trimmed.isEmpty { return completions }
+			return completions.filter { completion in
+				completion.value.lowercased().hasPrefix(trimmed)
+			}
+		case .none, .requiredText, .optionalText:
+			return []
+		}
+	}
+
+	func validationMessage(argumentText: String?) -> String? {
+		guard let builtinArgumentRule else { return nil }
+
+		let trimmedArgument = argumentText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+		switch builtinArgumentRule {
+		case .none(let usage):
+			return trimmedArgument.isEmpty ? nil : "Usage: \(usage)"
+		case .requiredText(let usage):
+			return trimmedArgument.isEmpty ? "Usage: \(usage)" : nil
+		case .optionalText:
+			return nil
+		case .requiredExactValues(let usage, let completions):
+			guard !trimmedArgument.isEmpty else { return "Usage: \(usage)" }
+			return completions.contains(where: { $0.value == trimmedArgument }) ? nil : "Usage: \(usage)"
+		}
+	}
+
+	static func validationMessage(for text: String, commands: [SlashCommand]) -> String? {
+		guard let context = draftContext(for: text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+			return nil
+		}
+
+		switch context.phase {
+		case .commandName(let prefix):
+			guard let command = command(named: prefix, from: commands) else { return nil }
+			return command.validationMessage(argumentText: nil)
+		case .arguments(let commandName, let argumentText):
+			guard let command = command(named: commandName, from: commands) else { return nil }
+			return command.validationMessage(argumentText: argumentText)
+		}
 	}
 }

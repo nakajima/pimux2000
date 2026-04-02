@@ -19,7 +19,10 @@ use tokio::sync::{
 
 use crate::{
     message::{ImageContent, Message, Role, truncate_text},
-    session::{ActiveSession, SessionBuiltinCommandRequest, SessionCommand, SessionContextUsage},
+    session::{
+        ActiveSession, SessionBuiltinCommandRequest, SessionCommand, SessionCommandCompletion,
+        SessionContextUsage,
+    },
     transcript::{
         SessionActivity, SessionMessagesResponse, SessionTerminalOnlyUiState,
         SessionUiDialogAction, SessionUiDialogState, SessionUiState, TranscriptFreshness,
@@ -32,9 +35,10 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub const DEFAULT_DETACHED_CAPACITY: usize = 3;
 pub const DEFAULT_DETACHED_TTL: Duration = Duration::from_secs(180);
 const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
-const LIVE_PROTOCOL_VERSION: u32 = 7;
+const LIVE_PROTOCOL_VERSION: u32 = 8;
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const GET_COMMANDS_TIMEOUT: Duration = Duration::from_secs(5);
+const GET_COMMAND_ARGUMENT_COMPLETIONS_TIMEOUT: Duration = Duration::from_secs(5);
 const UI_DIALOG_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
 const BUILTIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -223,6 +227,54 @@ impl LiveSessionStoreHandle {
     ) {
         let mut store = self.inner.lock().await;
         store.fulfill_get_commands(connection_id, request_id, commands, error);
+    }
+
+    pub async fn get_command_argument_completions(
+        &self,
+        session_id: &str,
+        command_name: &str,
+        argument_prefix: &str,
+    ) -> Result<Vec<SessionCommandCompletion>, GetCommandArgumentCompletionsError> {
+        let (sender, request_id, receiver) = {
+            let mut store = self.inner.lock().await;
+            store.purge_expired();
+            store.prepare_get_command_argument_completions(session_id)?
+        };
+
+        if sender
+            .send(LiveAgentCommand::GetCommandArgumentCompletions {
+                request_id: request_id.clone(),
+                session_id: session_id.to_string(),
+                command_name: command_name.to_string(),
+                argument_prefix: argument_prefix.to_string(),
+            })
+            .is_err()
+        {
+            let mut store = self.inner.lock().await;
+            store.cancel_get_command_argument_completions(&request_id);
+            return Err(GetCommandArgumentCompletionsError::Unavailable);
+        }
+
+        match tokio::time::timeout(GET_COMMAND_ARGUMENT_COMPLETIONS_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(GetCommandArgumentCompletionsError::Disconnected),
+            Err(_) => {
+                let mut store = self.inner.lock().await;
+                store.cancel_get_command_argument_completions(&request_id);
+                Err(GetCommandArgumentCompletionsError::TimedOut)
+            }
+        }
+    }
+
+    pub async fn fulfill_get_command_argument_completions(
+        &self,
+        connection_id: u64,
+        request_id: &str,
+        completions: Vec<SessionCommandCompletion>,
+        error: Option<String>,
+    ) {
+        let mut store = self.inner.lock().await;
+        store.fulfill_get_command_argument_completions(connection_id, request_id, completions, error);
     }
 
     pub async fn send_ui_dialog_action(
@@ -541,6 +593,21 @@ async fn start_listener_impl(
                                         )
                                         .await;
                                 }
+                                LiveSessionIpcMessage::GetCommandArgumentCompletionsResult {
+                                    request_id,
+                                    session_id: _,
+                                    completions,
+                                    error,
+                                } => {
+                                    store
+                                        .fulfill_get_command_argument_completions(
+                                            connection_id,
+                                            &request_id,
+                                            completions,
+                                            error,
+                                        )
+                                        .await;
+                                }
                                 LiveSessionIpcMessage::UiDialogActionResult {
                                     request_id,
                                     session_id: _,
@@ -847,6 +914,31 @@ impl std::fmt::Display for GetCommandsError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetCommandArgumentCompletionsError {
+    Unavailable,
+    Disconnected,
+    TimedOut,
+    Failed(String),
+}
+
+impl std::fmt::Display for GetCommandArgumentCompletionsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => write!(
+                f,
+                "no live attached pimux extension is available for this session"
+            ),
+            Self::Disconnected => write!(f, "live session command connection disconnected"),
+            Self::TimedOut => write!(
+                f,
+                "timed out waiting for command argument completions response"
+            ),
+            Self::Failed(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiDialogActionError {
     Unavailable,
     Disconnected,
@@ -948,6 +1040,13 @@ enum LiveSessionIpcMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    GetCommandArgumentCompletionsResult {
+        request_id: String,
+        session_id: String,
+        completions: Vec<SessionCommandCompletion>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     UiDialogActionResult {
         request_id: String,
         session_id: String,
@@ -977,6 +1076,12 @@ enum LiveAgentCommand {
     GetCommands {
         request_id: String,
         session_id: String,
+    },
+    GetCommandArgumentCompletions {
+        request_id: String,
+        session_id: String,
+        command_name: String,
+        argument_prefix: String,
     },
     UiDialogAction {
         request_id: String,
@@ -1040,6 +1145,8 @@ struct LiveSessionStore {
     command_session_connections: HashMap<String, u64>,
     inflight_send_user_messages: HashMap<String, InflightSendUserMessage>,
     inflight_get_commands: HashMap<String, InflightGetCommands>,
+    inflight_get_command_argument_completions:
+        HashMap<String, InflightGetCommandArgumentCompletions>,
     inflight_ui_dialog_actions: HashMap<String, InflightUiDialogAction>,
     inflight_builtin_commands: HashMap<String, InflightBuiltinCommand>,
     next_send_request_id: u64,
@@ -1059,6 +1166,7 @@ impl LiveSessionStore {
             command_session_connections: HashMap::new(),
             inflight_send_user_messages: HashMap::new(),
             inflight_get_commands: HashMap::new(),
+            inflight_get_command_argument_completions: HashMap::new(),
             inflight_ui_dialog_actions: HashMap::new(),
             inflight_builtin_commands: HashMap::new(),
             next_send_request_id: 1,
@@ -1542,6 +1650,72 @@ impl LiveSessionStore {
         self.inflight_get_commands.remove(request_id);
     }
 
+    fn prepare_get_command_argument_completions(
+        &mut self,
+        session_id: &str,
+    ) -> Result<
+        (
+            UnboundedSender<LiveAgentCommand>,
+            String,
+            oneshot::Receiver<
+                Result<Vec<SessionCommandCompletion>, GetCommandArgumentCompletionsError>,
+            >,
+        ),
+        GetCommandArgumentCompletionsError,
+    > {
+        let Some(connection_id) = self.command_session_connections.get(session_id).copied() else {
+            return Err(GetCommandArgumentCompletionsError::Unavailable);
+        };
+        let Some(connection) = self.command_connections.get(&connection_id) else {
+            self.command_session_connections.remove(session_id);
+            return Err(GetCommandArgumentCompletionsError::Unavailable);
+        };
+
+        let request_id = format!("live-cmd-args-{}", self.next_send_request_id);
+        self.next_send_request_id += 1;
+
+        let (sender, receiver) = oneshot::channel();
+        self.inflight_get_command_argument_completions.insert(
+            request_id.clone(),
+            InflightGetCommandArgumentCompletions {
+                connection_id,
+                sender,
+            },
+        );
+
+        Ok((connection.sender.clone(), request_id, receiver))
+    }
+
+    fn fulfill_get_command_argument_completions(
+        &mut self,
+        connection_id: u64,
+        request_id: &str,
+        completions: Vec<SessionCommandCompletion>,
+        error: Option<String>,
+    ) {
+        let Some(inflight) = self
+            .inflight_get_command_argument_completions
+            .remove(request_id)
+        else {
+            return;
+        };
+
+        if inflight.connection_id != connection_id {
+            return;
+        }
+
+        let result = match error {
+            Some(error) => Err(GetCommandArgumentCompletionsError::Failed(error)),
+            None => Ok(completions),
+        };
+        let _ = inflight.sender.send(result);
+    }
+
+    fn cancel_get_command_argument_completions(&mut self, request_id: &str) {
+        self.inflight_get_command_argument_completions
+            .remove(request_id);
+    }
+
     fn prepare_ui_dialog_action(
         &mut self,
         session_id: &str,
@@ -1688,6 +1862,10 @@ impl LiveSessionStore {
             connection_id,
             GetCommandsError::Disconnected,
         );
+        self.fail_inflight_get_command_argument_completions_for_connection(
+            connection_id,
+            GetCommandArgumentCompletionsError::Disconnected,
+        );
         self.fail_inflight_ui_dialog_actions_for_connection(
             connection_id,
             UiDialogActionError::Disconnected,
@@ -1740,6 +1918,29 @@ impl LiveSessionStore {
 
         for request_id in request_ids {
             if let Some(inflight) = self.inflight_get_commands.remove(&request_id) {
+                let _ = inflight.sender.send(Err(error.clone()));
+            }
+        }
+    }
+
+    fn fail_inflight_get_command_argument_completions_for_connection(
+        &mut self,
+        connection_id: u64,
+        error: GetCommandArgumentCompletionsError,
+    ) {
+        let request_ids = self
+            .inflight_get_command_argument_completions
+            .iter()
+            .filter_map(|(request_id, inflight)| {
+                (inflight.connection_id == connection_id).then_some(request_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for request_id in request_ids {
+            if let Some(inflight) = self
+                .inflight_get_command_argument_completions
+                .remove(&request_id)
+            {
                 let _ = inflight.sender.send(Err(error.clone()));
             }
         }
@@ -2036,6 +2237,11 @@ struct InflightGetCommands {
     sender: oneshot::Sender<Result<Vec<SessionCommand>, GetCommandsError>>,
 }
 
+struct InflightGetCommandArgumentCompletions {
+    connection_id: u64,
+    sender: oneshot::Sender<Result<Vec<SessionCommandCompletion>, GetCommandArgumentCompletionsError>>,
+}
+
 struct InflightUiDialogAction {
     connection_id: u64,
     sender: oneshot::Sender<Result<(), UiDialogActionError>>,
@@ -2212,6 +2418,61 @@ mod tests {
         handle.fulfill_builtin_command(1, &request_id, None).await;
 
         assert_eq!(command_task.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn command_argument_completions_dispatch_to_attached_command_connection() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+
+        handle.register_command_connection(1, command_tx).await;
+        handle
+            .bind_command_connection_to_session(1, "session-1".to_string())
+            .await;
+
+        let sender_handle = handle.clone();
+        let completion_task = tokio::spawn(async move {
+            sender_handle
+                .get_command_argument_completions("session-1", "pirot", "re")
+                .await
+        });
+
+        let command = command_rx.recv().await.unwrap();
+        let LiveAgentCommand::GetCommandArgumentCompletions {
+            request_id,
+            session_id,
+            command_name,
+            argument_prefix,
+        } = command
+        else {
+            panic!("expected GetCommandArgumentCompletions command");
+        };
+        assert_eq!(request_id, "live-cmd-args-1");
+        assert_eq!(session_id, "session-1");
+        assert_eq!(command_name, "pirot");
+        assert_eq!(argument_prefix, "re");
+
+        handle
+            .fulfill_get_command_argument_completions(
+                1,
+                &request_id,
+                vec![SessionCommandCompletion {
+                    value: "restart-server".to_string(),
+                    label: "restart-server".to_string(),
+                    description: Some("Restart the pirot server".to_string()),
+                }],
+                None,
+            )
+            .await;
+
+        assert_eq!(
+            completion_task.await.unwrap(),
+            Ok(vec![SessionCommandCompletion {
+                value: "restart-server".to_string(),
+                label: "restart-server".to_string(),
+                description: Some("Restart the pirot server".to_string()),
+            }])
+        );
     }
 
     #[tokio::test]
