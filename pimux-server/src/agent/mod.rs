@@ -946,8 +946,8 @@ async fn handle_builtin_command(
                 return Err("session name must not be empty".to_string());
             }
 
-            let live_command = format!("/name {name}");
-            if try_run_live_builtin_command(session_id, &live_command, live_store).await? {
+            let live_action = SessionBuiltinCommandRequest::SetSessionName { name: name.clone() };
+            if try_run_live_builtin_command(session_id, &live_action, live_store).await? {
                 return Ok(SessionBuiltinCommandResponse::default());
             }
 
@@ -959,11 +959,10 @@ async fn handle_builtin_command(
             custom_instructions,
         } => {
             let custom_instructions = custom_instructions.and_then(trimmed_non_empty);
-            let live_command = match custom_instructions.as_deref() {
-                Some(custom_instructions) => format!("/compact {custom_instructions}"),
-                None => "/compact".to_string(),
+            let live_action = SessionBuiltinCommandRequest::Compact {
+                custom_instructions: custom_instructions.clone(),
             };
-            if try_run_live_builtin_command(session_id, &live_command, live_store).await? {
+            if try_run_live_builtin_command(session_id, &live_action, live_store).await? {
                 return Ok(SessionBuiltinCommandResponse::default());
             }
 
@@ -978,7 +977,13 @@ async fn handle_builtin_command(
             Ok(SessionBuiltinCommandResponse::default())
         }
         SessionBuiltinCommandRequest::Reload => {
-            if try_run_live_builtin_command(session_id, "/reload", live_store).await? {
+            if try_run_live_builtin_command(
+                session_id,
+                &SessionBuiltinCommandRequest::Reload,
+                live_store,
+            )
+            .await?
+            {
                 return Ok(SessionBuiltinCommandResponse::default());
             }
 
@@ -1060,15 +1065,15 @@ fn trimmed_non_empty(value: String) -> Option<String> {
 
 async fn try_run_live_builtin_command(
     session_id: &str,
-    body: &str,
+    action: &SessionBuiltinCommandRequest,
     live_store: &live::LiveSessionStoreHandle,
 ) -> Result<bool, String> {
     match live_store
-        .send_user_message(session_id, body, Vec::new())
+        .send_builtin_command(session_id, action.clone())
         .await
     {
         Ok(()) => Ok(true),
-        Err(live::SendUserMessageError::Unavailable) => Ok(false),
+        Err(live::BuiltinCommandError::Unavailable) => Ok(false),
         Err(error) => Err(error.to_string()),
     }
 }

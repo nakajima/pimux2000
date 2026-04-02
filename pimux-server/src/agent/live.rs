@@ -19,7 +19,7 @@ use tokio::sync::{
 
 use crate::{
     message::{ImageContent, Message, Role, truncate_text},
-    session::{ActiveSession, SessionCommand, SessionContextUsage},
+    session::{ActiveSession, SessionBuiltinCommandRequest, SessionCommand, SessionContextUsage},
     transcript::{
         SessionActivity, SessionMessagesResponse, SessionTerminalOnlyUiState,
         SessionUiDialogAction, SessionUiDialogState, SessionUiState, TranscriptFreshness,
@@ -32,10 +32,11 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub const DEFAULT_DETACHED_CAPACITY: usize = 3;
 pub const DEFAULT_DETACHED_TTL: Duration = Duration::from_secs(180);
 const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
-const LIVE_PROTOCOL_VERSION: u32 = 6;
+const LIVE_PROTOCOL_VERSION: u32 = 7;
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const GET_COMMANDS_TIMEOUT: Duration = Duration::from_secs(5);
 const UI_DIALOG_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
+const BUILTIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -271,6 +272,51 @@ impl LiveSessionStoreHandle {
         store.fulfill_ui_dialog_action(connection_id, request_id, error);
     }
 
+    pub async fn send_builtin_command(
+        &self,
+        session_id: &str,
+        action: SessionBuiltinCommandRequest,
+    ) -> Result<(), BuiltinCommandError> {
+        let (sender, request_id, receiver) = {
+            let mut store = self.inner.lock().await;
+            store.purge_expired();
+            store.prepare_builtin_command(session_id)?
+        };
+
+        if sender
+            .send(LiveAgentCommand::BuiltinCommand {
+                request_id: request_id.clone(),
+                session_id: session_id.to_string(),
+                action,
+            })
+            .is_err()
+        {
+            let mut store = self.inner.lock().await;
+            store.cancel_builtin_command(&request_id);
+            return Err(BuiltinCommandError::Unavailable);
+        }
+
+        match tokio::time::timeout(BUILTIN_COMMAND_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(BuiltinCommandError::Disconnected),
+            Err(_) => {
+                let mut store = self.inner.lock().await;
+                store.cancel_builtin_command(&request_id);
+                Err(BuiltinCommandError::TimedOut)
+            }
+        }
+    }
+
+    pub async fn fulfill_builtin_command(
+        &self,
+        connection_id: u64,
+        request_id: &str,
+        error: Option<String>,
+    ) {
+        let mut store = self.inner.lock().await;
+        store.fulfill_builtin_command(connection_id, request_id, error);
+    }
+
     pub async fn send_user_message(
         &self,
         session_id: &str,
@@ -502,6 +548,15 @@ async fn start_listener_impl(
                                 } => {
                                     store
                                         .fulfill_ui_dialog_action(connection_id, &request_id, error)
+                                        .await;
+                                }
+                                LiveSessionIpcMessage::BuiltinCommandResult {
+                                    request_id,
+                                    session_id: _,
+                                    error,
+                                } => {
+                                    store
+                                        .fulfill_builtin_command(connection_id, &request_id, error)
                                         .await;
                                 }
                                 LiveSessionIpcMessage::SessionAttached {
@@ -813,6 +868,28 @@ impl std::fmt::Display for UiDialogActionError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuiltinCommandError {
+    Unavailable,
+    Disconnected,
+    TimedOut,
+    Rejected(String),
+}
+
+impl std::fmt::Display for BuiltinCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => write!(
+                f,
+                "no live attached pimux extension is available for this session"
+            ),
+            Self::Disconnected => write!(f, "live session command connection disconnected"),
+            Self::TimedOut => write!(f, "timed out waiting for builtin command acknowledgement"),
+            Self::Rejected(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -876,6 +953,11 @@ enum LiveSessionIpcMessage {
         session_id: String,
         error: Option<String>,
     },
+    BuiltinCommandResult {
+        request_id: String,
+        session_id: String,
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -901,6 +983,11 @@ enum LiveAgentCommand {
         session_id: String,
         dialog_id: String,
         action: SessionUiDialogAction,
+    },
+    BuiltinCommand {
+        request_id: String,
+        session_id: String,
+        action: SessionBuiltinCommandRequest,
     },
 }
 
@@ -954,6 +1041,7 @@ struct LiveSessionStore {
     inflight_send_user_messages: HashMap<String, InflightSendUserMessage>,
     inflight_get_commands: HashMap<String, InflightGetCommands>,
     inflight_ui_dialog_actions: HashMap<String, InflightUiDialogAction>,
+    inflight_builtin_commands: HashMap<String, InflightBuiltinCommand>,
     next_send_request_id: u64,
     detached_capacity: usize,
     detached_ttl: Duration,
@@ -972,6 +1060,7 @@ impl LiveSessionStore {
             inflight_send_user_messages: HashMap::new(),
             inflight_get_commands: HashMap::new(),
             inflight_ui_dialog_actions: HashMap::new(),
+            inflight_builtin_commands: HashMap::new(),
             next_send_request_id: 1,
             detached_capacity,
             detached_ttl,
@@ -1526,6 +1615,65 @@ impl LiveSessionStore {
         self.inflight_ui_dialog_actions.remove(request_id);
     }
 
+    fn prepare_builtin_command(
+        &mut self,
+        session_id: &str,
+    ) -> Result<
+        (
+            UnboundedSender<LiveAgentCommand>,
+            String,
+            oneshot::Receiver<Result<(), BuiltinCommandError>>,
+        ),
+        BuiltinCommandError,
+    > {
+        let Some(connection_id) = self.command_session_connections.get(session_id).copied() else {
+            return Err(BuiltinCommandError::Unavailable);
+        };
+        let Some(connection) = self.command_connections.get(&connection_id) else {
+            self.command_session_connections.remove(session_id);
+            return Err(BuiltinCommandError::Unavailable);
+        };
+
+        let request_id = format!("live-builtin-{}", self.next_send_request_id);
+        self.next_send_request_id += 1;
+
+        let (sender, receiver) = oneshot::channel();
+        self.inflight_builtin_commands.insert(
+            request_id.clone(),
+            InflightBuiltinCommand {
+                connection_id,
+                sender,
+            },
+        );
+
+        Ok((connection.sender.clone(), request_id, receiver))
+    }
+
+    fn fulfill_builtin_command(
+        &mut self,
+        connection_id: u64,
+        request_id: &str,
+        error: Option<String>,
+    ) {
+        let Some(inflight) = self.inflight_builtin_commands.remove(request_id) else {
+            return;
+        };
+
+        if inflight.connection_id != connection_id {
+            return;
+        }
+
+        let result = match error {
+            Some(error) => Err(BuiltinCommandError::Rejected(error)),
+            None => Ok(()),
+        };
+        let _ = inflight.sender.send(result);
+    }
+
+    fn cancel_builtin_command(&mut self, request_id: &str) {
+        self.inflight_builtin_commands.remove(request_id);
+    }
+
     fn disconnect_command_connection(
         &mut self,
         connection_id: u64,
@@ -1543,6 +1691,10 @@ impl LiveSessionStore {
         self.fail_inflight_ui_dialog_actions_for_connection(
             connection_id,
             UiDialogActionError::Disconnected,
+        );
+        self.fail_inflight_builtin_commands_for_connection(
+            connection_id,
+            BuiltinCommandError::Disconnected,
         );
 
         let session_id = connection.current_session_id?;
@@ -1608,6 +1760,26 @@ impl LiveSessionStore {
 
         for request_id in request_ids {
             if let Some(inflight) = self.inflight_ui_dialog_actions.remove(&request_id) {
+                let _ = inflight.sender.send(Err(error.clone()));
+            }
+        }
+    }
+
+    fn fail_inflight_builtin_commands_for_connection(
+        &mut self,
+        connection_id: u64,
+        error: BuiltinCommandError,
+    ) {
+        let request_ids = self
+            .inflight_builtin_commands
+            .iter()
+            .filter_map(|(request_id, inflight)| {
+                (inflight.connection_id == connection_id).then_some(request_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for request_id in request_ids {
+            if let Some(inflight) = self.inflight_builtin_commands.remove(&request_id) {
                 let _ = inflight.sender.send(Err(error.clone()));
             }
         }
@@ -1869,6 +2041,11 @@ struct InflightUiDialogAction {
     sender: oneshot::Sender<Result<(), UiDialogActionError>>,
 }
 
+struct InflightBuiltinCommand {
+    connection_id: u64,
+    sender: oneshot::Sender<Result<(), BuiltinCommandError>>,
+}
+
 fn sanitize_message(mut message: Message) -> Message {
     message.body = truncate_text(&message.body, MAX_LIVE_MESSAGE_BODY_CHARS);
     for block in &mut message.blocks {
@@ -2000,6 +2177,41 @@ mod tests {
         handle.fulfill_ui_dialog_action(1, &request_id, None).await;
 
         assert_eq!(action_task.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn builtin_command_dispatches_to_attached_command_connection() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+
+        handle.register_command_connection(1, command_tx).await;
+        handle
+            .bind_command_connection_to_session(1, "session-1".to_string())
+            .await;
+
+        let sender_handle = handle.clone();
+        let command_task = tokio::spawn(async move {
+            sender_handle
+                .send_builtin_command("session-1", SessionBuiltinCommandRequest::Reload)
+                .await
+        });
+
+        let command = command_rx.recv().await.unwrap();
+        let LiveAgentCommand::BuiltinCommand {
+            request_id,
+            session_id,
+            action,
+        } = command
+        else {
+            panic!("expected BuiltinCommand command");
+        };
+        assert_eq!(request_id, "live-builtin-1");
+        assert_eq!(session_id, "session-1");
+        assert_eq!(action, SessionBuiltinCommandRequest::Reload);
+
+        handle.fulfill_builtin_command(1, &request_id, None).await;
+
+        assert_eq!(command_task.await.unwrap(), Ok(()));
     }
 
     #[tokio::test]

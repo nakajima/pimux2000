@@ -1,456 +1,402 @@
 # Compact Handoff
 
 ## What this handoff is for
-This handoff is for the **next step after compaction**: a cleanup/refactor pass on the mirrored Pi interactive UI work, with a new explicit requirement:
+This handoff is for the **next step after compaction**.
 
-- extract the iOS dialog UI pieces from `PiSessionView.swift`
-- put the extracted SwiftUI views in their own files under:
-  - `pimux2000/Views/TUI/`
+The immediate goal is to fix the current builtin-command integration smell:
 
-This pass should be a **cleanup and structure pass**, not a behavior redesign.
+- `pimux-live.ts` currently registers extension shadow commands for:
+  - `/name`
+  - `/compact`
+  - `/reload`
+- Pi warns at startup that these conflict with built-in interactive commands:
+  - `Extension command '/name' conflicts with built-in interactive command. Skipping in autocomplete.`
+  - same for `/compact` and `/reload`
+- user explicitly considers these warnings bad and sees them as evidence that we are integrating at the wrong layer
+
+### Desired outcome
+Keep builtin support working in pimux/iOS, but **stop registering fake extension commands that collide with Pi built-ins**.
 
 ---
 
-## Current working state
-The mirrored extension-driven dialog flows are now implemented end-to-end for:
+## Core diagnosis
+Current live builtin support for `name` / `compact` / `reload` works by sending fake slash text into the attached live Pi runtime:
+
+- server builtin endpoint
+- agent `handle_builtin_command(...)`
+- `try_run_live_builtin_command(...)`
+- `live_store.send_user_message(session_id, "/name ...")` / `"/compact"` / `"/reload"`
+- `pimux-live.ts` shadow extension commands intercept those strings
+
+That works functionally, but it is the wrong abstraction boundary because:
+
+- the commands become visible to Pi as extension commands
+- Pi emits builtin conflict warnings
+- autocomplete skips them
+- we are pretending builtins are extension commands instead of using an internal control path
+
+### Correct direction
+Do **not** register `/name`, `/compact`, or `/reload` as extension commands.
+
+Instead:
+
+- keep them as pimux-internal live control actions
+- send them over the live bridge / IPC directly
+- execute them inside the live extension runtime without exposing them to Pi’s slash-command registry
+
+---
+
+## Current working state to preserve
+These things are already working and should remain working after the cleanup:
+
+### Mirrored UI primitives
+End-to-end mirrored UI support exists for:
 
 - `confirm`
 - `select`
 - `input`
 - `editor`
 
-### Cleanup progress completed in this pass
-The cleanup/refactor pass has now started and these items are already done:
+### Terminal-only unsupported UI fallback
+Recently added and working in principle:
 
-- extracted the iOS mirrored dialog views into:
-  - `pimux2000/Views/TUI/SessionUIDialogOverlay.swift`
-  - `pimux2000/Views/TUI/SessionUISelectorDialogContent.swift`
-  - `pimux2000/Views/TUI/SessionUITextValueDialogContent.swift`
-- removed the inline dialog overlay view/previews from `pimux2000/Views/PiSessionView.swift`
-- kept session/network/dialog state orchestration in `PiSessionView.swift`
-- added small shared helpers on `PimuxSessionUIDialogState` in `pimux2000/Models/PimuxServerClient.swift`:
-  - `isSelectorDialog`
-  - `isTextValueDialog`
-  - `usesMultilineTextEditor`
-  - `resolvedTextValue`
-  - `settingSelectedIndex(...)`
-  - `settingTextValue(...)`
-- updated `PiSessionView.swift` to use the extracted overlay plus a safer `uiDialogTextBinding(...)` helper
-- added a follow-up dialog state application fix in `PiSessionView.swift`:
-  - incoming mirrored `uiDialogState` updates now preserve optimistic local text for the same active text dialog while a debounced sync or submit/cancel action is still in flight
-  - this should reduce text snap-back / last-keystroke races for mirrored `input` and `editor`
-- cleaned up `pimux-server/extensions/pimux-live.ts` with more shared dialog helpers for:
-  - mirrored dialog activation/cleanup
-  - TUI runtime configuration
-  - shared submit/cancel behavior
-  - shared dialog option typing
-- reran validation successfully:
-  - `cargo test --manifest-path pimux-server/Cargo.toml --quiet`
-  - `xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO`
+- protocol version is now `6`
+- `ctx.ui.custom(...)` is detected as terminal-only UI
+- server streams `terminalOnlyUiState`
+- iOS shows a terminal-only banner
+- debug command exists:
+  - `/pimux-debug test-custom-ui [title]`
 
-### Still worth doing next
-- manually re-test all four debug dialog flows after the cleanup pass:
-  - `/pimux-debug test-confirm`
-  - `/pimux-debug test-select`
-  - `/pimux-debug test-input`
-  - `/pimux-debug test-editor`
-- if needed, do one more small readability pass in `pimux-live.ts`
-- optionally update this handoff again after manual verification
+### Current supported iOS builtins
+These are currently exposed in the app:
 
-### Current debug commands
-In Pi, after `/reload`, these should exist:
+- `/copy`
+- `/name`
+- `/compact`
+- `/new`
+- `/fork`
+- `/session`
+- `/reload`
 
-- `/pimux-debug test-confirm [prompt]`
-- `/pimux-debug test-select [title]`
-- `/pimux-debug test-input [placeholder]`
-- `/pimux-debug test-editor [prefill]`
-
-### Important runtime note
-The live protocol version was bumped multiple times during this work and is now:
-
-- `5`
-
-So for real testing you usually need both:
-
-1. restart `pimux-server`
-2. run `/reload` in Pi
-
-If that does not happen, the extension and server can be out of sync.
+### Current builtin behavior that must be preserved
+- `/copy`: app-native only
+- `/session`: app-native only
+- `/name`: live when attached; headless RPC fallback when detached
+- `/compact`: live when attached; headless RPC fallback when detached
+- `/reload`: **live only**; detached should still return:
+  - `reload requires an attached live pi session`
+- `/new` and `/fork`: headless/server-backed path remains fine as-is
 
 ---
 
-## What is implemented right now
+## Important separate issue: missing third-party extension commands
+This is related context, but **separate** from the builtin warning fix.
 
-### Extension / Pi side
-In `pimux-server/extensions/pimux-live.ts`:
+Custom pirot commands like `/todo` or `/pirot` were not visible because the active runtime appeared to be using:
 
-- `ctx.ui.confirm(...)` is wrapped and mirrored using Pi’s built-in `ExtensionSelectorComponent`
-- `ctx.ui.select(...)` is wrapped and mirrored using Pi’s built-in `ExtensionSelectorComponent`
-- `ctx.ui.input(...)` is wrapped and mirrored using Pi’s built-in `ExtensionInputComponent`
-- `ctx.ui.editor(...)` is wrapped and mirrored using Pi’s built-in `ExtensionEditorComponent`
-- semantic dialog state is mirrored to iOS
-- remote iOS actions are sent back into the active Pi dialog
+- `~/.pi/agent/extensions`
 
-Important implementation detail preserved throughout:
+while the pirot-specific extensions live under:
 
-- when instantiating Pi TUI components from the extension, call:
-  - `setKeybindings(keybindings)`
-  - `setKittyProtocolActive(tui.terminal.kittyProtocolActive)`
+- `~/apps/pirot/.pi/agent/extensions`
 
-### Backend / protocol side
-The server and agent path already support durable dialog state transport, reconnect, caching, and action dispatch.
+That means:
 
-The dialog state model now supports:
+- builtin warning cleanup will remove the bad warnings
+- but it will **not by itself** make `/todo` / `/pirot` appear
+- that remains a runtime / agent-dir loading issue to diagnose separately if still present
 
-- kinds:
-  - `confirm`
-  - `select`
-  - `input`
-  - `editor`
-- actions:
-  - `move`
-  - `selectIndex`
-  - `setValue`
-  - `submit`
-  - `cancel`
-
-### iOS side
-In `pimux2000/Views/PiSessionView.swift`:
-
-- a mirrored dialog overlay is rendered for all current dialog kinds
-- selector-style dialogs render tappable options
-- input dialogs render a `TextField`
-- editor dialogs render a `TextEditor`
-- input/editor text changes are locally reflected and debounced back to the server via `setValue`
-- submit sends final `setValue` then `submit`
-- cancel sends `cancel`
-
-In `pimux2000/Models/PimuxServerClient.swift`:
-
-- dialog decoding supports:
-  - `placeholder`
-  - `value`
-- action encoding supports:
-  - `.setValue(value:)`
+Do not conflate these two problems.
 
 ---
 
-## Validation status
-These were run successfully after the current implementation:
+## Recommended implementation plan
 
-- `cargo test --manifest-path pimux-server/Cargo.toml --quiet`
-- `xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO`
+## Phase 1: remove builtin shadow commands from `pimux-live.ts`
+Delete these registrations from the extension:
 
-If doing only cleanup/refactor, these should be rerun again before finishing.
+- `pi.registerCommand("name", ...)`
+- `pi.registerCommand("compact", ...)`
+- `pi.registerCommand("reload", ...)`
+
+Keep these normal extension commands:
+
+- `/pimux-debug`
+- `/pimux`
+
+and any other true extension commands.
+
+### Expected result
+Pi should stop printing builtin conflict warnings at startup.
 
 ---
 
-## Files that matter most now
+## Phase 2: add internal live builtin command IPC
+Replace fake slash-text execution with dedicated internal live actions.
 
-### TypeScript / extension
+### Best shape
+Extend the live extension ↔ agent Unix-socket protocol with a new command/result pair for builtin actions.
+
+Suggested command shape:
+
+- `builtinCommand`
+  - `requestId`
+  - `sessionId`
+  - `action`
+
+The action can either:
+
+### Option A: reuse the existing builtin request enum shape
+Reuse the existing semantic actions already present on the server side for the subset that needs live execution:
+
+- `setSessionName { name }`
+- `compact { customInstructions? }`
+- `reload`
+
+This is probably the simplest route.
+
+### Option B: introduce a smaller live-only enum
+A dedicated live-only enum would also be fine, but is probably unnecessary.
+
+### Recommendation
+Prefer **reusing the existing builtin action semantics** where possible, but only for the live-supported subset.
+
+---
+
+## Phase 3: teach `pimux-live.ts` to execute builtin actions internally
+Inside `pimux-live.ts`, handle the new inbound builtin action messages directly.
+
+### Needed capabilities
+The extension will need access to the active live session context when executing:
+
+- `ctx.reload()`
+- `ctx.compact({ customInstructions })`
+- session naming operation
+
+### Likely approach
+Cache the current attached `ExtensionContext` / command-capable session context when sessions attach or switch, similar to how current session state is already tracked.
+
+The runtime already tracks:
+
+- `currentSessionId`
+- latest snapshot/messages/ui state
+- current mirrored dialog state
+
+Extend that with something like:
+
+- current live context for the attached session
+
+Then execute inbound builtin commands directly against that context.
+
+### Notes per builtin
+#### `/reload`
+Should call the real reload API internally, not send the string `/reload`.
+
+#### `/compact`
+Should call the real compact API internally, preserving optional custom instructions.
+
+#### `/name`
+Should set the session name directly through the proper runtime API rather than via a fake slash command.
+
+---
+
+## Phase 4: update the agent live store to support builtin action dispatch
+In Rust, add live IPC support analogous to the existing dialog-action flow.
+
+Likely files:
+
+- `pimux-server/src/agent/live.rs`
+- maybe `pimux-server/src/agent/mod.rs`
+
+### Needed pieces
+Add:
+
+- outbound live agent command for builtin action
+- inbound builtin action result
+- inflight request tracking with timeout
+- error mapping similar to:
+  - send user message
+  - get commands
+  - ui dialog action
+
+### Important
+This is **extension ↔ agent** plumbing only.
+
+The outer server ↔ agent builtin endpoint already exists and can remain.
+
+---
+
+## Phase 5: change server-side builtin execution to use live builtin IPC
+Update the live-attached branch of builtin execution in:
+
+- `pimux-server/src/agent/mod.rs`
+
+### Current code path to replace
+Today, attached live builtins go through:
+
+- `try_run_live_builtin_command(...)`
+- which calls `live_store.send_user_message(...)`
+- which injects fake slash text
+
+That should be replaced for:
+
+- `SetSessionName`
+- `Compact`
+- `Reload`
+
+with something like:
+
+- `live_store.send_builtin_command(...)`
+
+### What stays the same
+Detached/headless behavior stays the same:
+
+- `/name` fallback to headless RPC
+- `/compact` fallback to headless RPC
+- `/reload` no detached fallback
+
+So the agent-side builtin behavior should remain semantically identical from the app’s point of view.
+
+---
+
+## Phase 6: remove the now-obsolete fake live builtin helper
+After the new live builtin IPC is working, remove or narrow:
+
+- `try_run_live_builtin_command(...)`
+
+If it is no longer used, delete it.
+
+If some future action still needs slash-text injection, keep it only for those truly textual cases.
+
+But `name` / `compact` / `reload` should no longer use it.
+
+---
+
+## Files most likely to change
+
+### Definitely
 - `pimux-server/extensions/pimux-live.ts`
-
-### Rust / backend protocol
-- `pimux-server/src/transcript.rs`
 - `pimux-server/src/agent/live.rs`
 - `pimux-server/src/agent/mod.rs`
+
+### Possibly
+- `pimux-server/src/session.rs`
+  - only if it helps to reuse/reshape builtin action types
+- `compact-handoff.md`
+  - update after implementation
+
+### Probably not needed
 - `pimux-server/src/channel.rs`
-- `pimux-server/src/server/mod.rs`
-
-### Swift / iOS
-- `pimux2000/Models/PimuxServerClient.swift`
-- `pimux2000/Views/PiSessionView.swift`
+  - server↔agent builtin command transport already exists
+- iOS files
+  - the app should not need changes if semantics stay the same
 
 ---
 
-## Main cleanup goal
-Do a cleanup pass that improves structure and maintainability without changing the overall behavior.
+## Protocol/version note
+Current live protocol version is:
 
-There are two main cleanup buckets:
+- `6`
 
-1. clean up `pimux-live.ts`
-2. extract iOS dialog views into `pimux2000/Views/TUI/`
+If the extension ↔ agent IPC message schema changes for internal builtin actions, bump it again, likely to:
 
----
+- `7`
 
-## Cleanup goal 1: refactor `pimux-live.ts`
+Make sure both sides are bumped together:
 
-### Why
-`pimux-live.ts` now contains all four mirrored dialog flavors and a lot of shared logic. It works, but the code is starting to accumulate duplication and branching.
-
-### What to improve
-Refactor toward two conceptual dialog families:
-
-#### A. Selector dialogs
-- `confirm`
-- `select`
-
-Shared behavior:
-- options array
-- selected index
-- `move`
-- `selectIndex`
-- `submit`
-- `cancel`
-- `ExtensionSelectorComponent`
-
-#### B. Text-value dialogs
-- `input`
-- `editor`
-
-Shared behavior:
-- text value
-- `setValue`
-- `submit`
-- `cancel`
-- sync from TUI to iOS
-- sync from iOS to TUI
-
-### Suggested refactor shape
-You do **not** need to invent a framework here. Just make the code easier to read.
-
-Good possible structure:
-
-- dialog kind/type guards near the top
-- common helpers for:
-  - send state
-  - clear state
-  - finish dialog
-  - cancel dialog
-- selector-only helpers:
-  - selected-index mutation
-  - selector attachment
-  - selector submit resolution
-- text-value-only helpers:
-  - text mutation
-  - input/editor attachment
-  - text submit resolution
-- separate wrapper installation blocks for:
-  - `ui.select`
-  - `ui.confirm`
-  - `ui.input`
-  - `ui.editor`
-
-### Keep these behaviors unchanged
-- one active mirrored dialog per session/runtime for now
-- if a mirrored dialog is already active, fall back to the original Pi behavior
-- reuse Pi’s real built-in components, not custom replacements
-- continue to resync active dialog state on reconnect
-- continue to clear state on session detach/switch/shutdown
-
-### Important editor-specific note
-For mirrored editor state reads from Pi’s editor component, the current code intentionally uses:
-
-- `editor.getExpandedText?.() ?? editor.getText?.()`
-
-That should be preserved unless there is a very good reason to change it.
+- `pimux-server/extensions/pimux-live.ts`
+- `pimux-server/src/agent/live.rs`
 
 ---
 
-## Cleanup goal 2: extract iOS dialog views into `pimux2000/Views/TUI/`
+## Validation checklist
+After implementation, verify all of these.
 
-### New requirement from user
-All extracted iOS views for this mirrored TUI/dialog work should go into their own files in:
+### 1. Warnings are gone
+Start or reload Pi and confirm these warnings no longer appear:
 
-- `pimux2000/Views/TUI/`
+- `Extension command '/name' conflicts with built-in interactive command. Skipping in autocomplete.`
+- `Extension command '/compact' conflicts with built-in interactive command. Skipping in autocomplete.`
+- `Extension command '/reload' conflicts with built-in interactive command. Skipping in autocomplete.`
 
-That directory does **not** currently exist, so create it.
+### 2. Attached live builtins still work
+In a live attached session:
 
-### What should stay in `PiSessionView.swift`
-Keep session state and transport logic in `PiSessionView.swift`, including:
-
-- `currentUIDialog`
-- `isUIDialogActionInFlight`
-- `uiDialogActionError`
-- debounced text syncing task
-- stream handling
-- functions that send actions to the server
-
-### What should move out of `PiSessionView.swift`
-Move view-only pieces into `pimux2000/Views/TUI/`.
-
-Minimum extraction target:
-
-1. `SessionUIDialogOverlay`
-
-Recommended further split:
-
-2. selector dialog content view
-3. text-value dialog content view
-
-### Suggested file layout
-A reasonable target layout would be something like:
-
-- `pimux2000/Views/TUI/SessionUIDialogOverlay.swift`
-- `pimux2000/Views/TUI/SessionUISelectorDialogContent.swift`
-- `pimux2000/Views/TUI/SessionUITextValueDialogContent.swift`
-
-This is only a suggestion; naming can be adjusted if the local style suggests something cleaner.
-
-### Recommended responsibilities
-
-#### `SessionUIDialogOverlay.swift`
-Own:
-- outer card/container
-- common title/message/error/loading UI
-- branching between selector-style and text-value-style content
-
-#### `SessionUISelectorDialogContent.swift`
-Own:
-- option list rendering
-- selected styling
-- cancel button row for selector dialogs
-
-#### `SessionUITextValueDialogContent.swift`
-Own:
-- `TextField` for `input`
-- `TextEditor` for `editor`
-- submit/cancel buttons for text-value dialogs
-
-### What not to move yet
-Do **not** move network logic or session orchestration into separate view models.
-
-The current Swift code can keep using local state in `PiSessionView`. This cleanup is about extracting UI structure, not adding abstraction layers.
-
----
-
-## SwiftUI conventions to preserve
-Per the Swift app conventions skill:
-
-- do not introduce a new view model just to support these extracted views
-- keep previews for all created/substantially modified SwiftUI views
-
-So if you split views into `pimux2000/Views/TUI/`, add previews in those files.
-
-Good previews to keep/add:
-
-- confirm preview
-- select preview
-- input preview
-- editor preview
-
----
-
-## Specific iOS naming cleanup to consider
-The current helper names in `PiSessionView.swift` are now slightly broader than their names suggest.
-
-Current names:
-- `updateUIDialogTextValue(_:)`
-- `submitUIDialogTextValue()`
-
-Those are already better than the older input-only names, so they may be fine as-is.
-
-If you rename anything, prefer names that reflect shared text dialog behavior, not input-only behavior.
-
----
-
-## Testing checklist after cleanup
-After refactoring, verify all four flows manually.
-
-### Confirm
+- `/name foo`
+- `/compact`
+- `/compact some instructions`
 - `/reload`
+
+through the iOS builtin path
+
+### 3. Detached semantics remain unchanged
+Without attached live runtime:
+
+- `/name <name>` still works via headless fallback
+- `/compact [instructions]` still works via headless fallback
+- `/reload` still errors with exactly:
+  - `reload requires an attached live pi session`
+
+### 4. Normal extension command discovery still works
+Confirm true extension commands continue to be reported through:
+
+- `GET /sessions/{id}/commands`
+- `pi.getCommands()` bridge path
+
+And confirm that removing the builtin shadows does **not** regress normal custom command listing.
+
+### 5. Existing mirrored UI work still passes smoke tests
 - `/pimux-debug test-confirm`
-- verify TUI and iOS both show confirm
-- act from either side
-- ensure both resolve cleanly
-
-### Select
 - `/pimux-debug test-select`
-- verify mirrored selector behavior
-- pick option from iOS
-- confirm Pi resolves with selected option
-
-### Input
 - `/pimux-debug test-input`
-- verify typing in TUI updates iOS
-- verify typing in iOS updates TUI
-- submit from iOS and from TUI in separate runs
-
-### Editor
 - `/pimux-debug test-editor`
-- verify multiline editing on both sides
-- verify typing in TUI updates iOS
-- verify typing in iOS updates TUI
-- submit from iOS and from TUI in separate runs
+- `/pimux-debug test-custom-ui`
 
-### Reconnect sanity
-At least once, verify dialog state still survives reconnect as expected:
-- open a dialog
-- reconnect/reload the stream path if practical
-- confirm the active dialog snapshot is still delivered
-
-### Build/test commands
-Re-run:
+### 6. Build/test
+Run:
 
 - `cargo test --manifest-path pimux-server/Cargo.toml --quiet`
 - `xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 -destination 'generic/platform=iOS Simulator' build CODE_SIGNING_ALLOWED=NO`
 
 ---
 
-## Important pitfalls / gotchas
+## Non-goals for this next step
+Do **not** mix these into the same pass unless the warning cleanup is already complete and stable:
 
-### 1. Server restart + Pi reload
-Because live protocol version is now `5`, stale runtime state is easy to confuse with code bugs.
+- fixing pirot-specific extension loading / per-project agent-dir handling
+- adding extension capability badges in the picker
+- persisting command capability learning
+- redesigning slash-command UX broadly
+- changing mirrored UI behavior
 
-If something appears to “do nothing”, first verify:
-- server restarted
-- Pi `/reload` run
+Keep this pass focused on:
 
-### 2. Only one active mirrored dialog at a time
-This is still the current design.
-
-If a mirrored dialog is already active, wrappers intentionally fall back to original Pi behavior.
-
-Do not accidentally remove that safeguard during cleanup.
-
-### 3. Built-in Pi slash-command flows are still out of scope
-This work is for extension-driven UI via `ctx.ui.*` wrappers.
-
-Still not covered automatically:
-- `/model`
-- `/settings`
-- `/resume`
-- `/tree`
-- other built-in core dialogs not exposed via extension wrapping
-
-### 4. Do not reimplement Pi widgets
-Keep reusing:
-- `ExtensionSelectorComponent`
-- `ExtensionInputComponent`
-- `ExtensionEditorComponent`
-
-The point of the architecture is to use Pi’s actual built-in TUI behavior and only mirror semantic state/actions to iOS.
-
-### 5. Keep `slash-command.md` alone unless explicitly asked
-That file is the standalone implementation plan from earlier work and should not be reused for temporary handoff notes.
-
-This handoff is intentionally separate.
+> removing the bad builtin shadow-command integration and replacing it with internal live builtin control.
 
 ---
 
-## Good next execution order after compaction
-1. Read this file completely.
-2. Inspect current `pimux-live.ts` and `PiSessionView.swift`.
-3. Create `pimux2000/Views/TUI/`.
-4. Extract SwiftUI dialog views into that directory first.
-5. Ensure previews still exist and compile.
-6. Then clean up `pimux-live.ts` structure.
-7. Re-run Rust and Xcode validation.
-8. Manually test all four debug commands.
+## Current repo caveats
+Do not stomp unrelated modified files already present in the tree, including:
+
+- `pimux2000/Models/AppDatabase.swift`
+- `pimux2000/Models/Message.swift`
+- `pimux2000/Models/MessageInfo.swift`
+- `pimux2000/Models/PiSessionSync.swift`
+- `pimux2000/Views/SessionTranscriptView.swift`
+- `todo.txt`
+- `slash-command.md`
+
+Also note there is already unrelated work in status across some server/app files. Be surgical.
 
 ---
 
-## Desired outcome of the cleanup pass
-By the end of the next pass:
+## Short summary for the next agent
+If resuming cold after compaction, the next concrete task is:
 
-- behavior should remain the same
-- `pimux-live.ts` should be easier to follow and safer to extend
-- `PiSessionView.swift` should be thinner
-- extracted SwiftUI dialog views should live under:
-  - `pimux2000/Views/TUI/`
-- previews should exist for the extracted SwiftUI views
-- all four mirrored dialog flows should still work:
-  - confirm
-  - select
-  - input
-  - editor
+1. remove builtin shadow commands from `pimux-live.ts`
+2. add internal live builtin IPC for `name` / `compact` / `reload`
+3. switch agent builtin execution from fake slash-text injection to that IPC
+4. verify the Pi builtin conflict warnings disappear
+5. keep all current builtin semantics unchanged from the app’s perspective
+
+That is the highest-value next cleanup.

@@ -2,6 +2,7 @@ import { complete } from "@mariozechner/pi-ai";
 import {
 	ExtensionEditorComponent,
 	ExtensionInputComponent,
+	ExtensionRunner,
 	ExtensionSelectorComponent,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
@@ -12,7 +13,7 @@ import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const LIVE_PROTOCOL_VERSION = 6;
+const LIVE_PROTOCOL_VERSION = 7;
 const PARTIAL_UPDATE_THROTTLE_MS = 150;
 const SOCKET_RECONNECT_DELAY_MS = 500;
 const RESUMMARIZE_EDGE_ENTRY_COUNT = 5;
@@ -109,6 +110,11 @@ type PimuxUiDialogAction =
 	| { type: "submit" }
 	| { type: "cancel" };
 
+type PimuxBuiltinCommandAction =
+	| { type: "setSessionName"; name: string }
+	| { type: "compact"; customInstructions?: string }
+	| { type: "reload" };
+
 interface PimuxTerminalOnlyUiState {
 	kind: PimuxTerminalOnlyUiKind;
 	reason: string;
@@ -165,6 +171,35 @@ interface RuntimeTerminalOnlyUiState {
 	state: PimuxTerminalOnlyUiState;
 }
 
+type BoundCommandContextActions = {
+	reload?: () => Promise<void>;
+};
+
+type PimuxLiveGlobalState = typeof globalThis & {
+	__pimuxLiveBoundCommandContextActions?: BoundCommandContextActions;
+	__pimuxLiveCommandContextBindingsPatched?: boolean;
+};
+
+function pimuxLiveGlobalState(): PimuxLiveGlobalState {
+	return globalThis as PimuxLiveGlobalState;
+}
+
+function currentBoundCommandContextActions() {
+	return pimuxLiveGlobalState().__pimuxLiveBoundCommandContextActions;
+}
+
+function ensureCommandContextBindingsPatched() {
+	const globalState = pimuxLiveGlobalState();
+	if (globalState.__pimuxLiveCommandContextBindingsPatched) return;
+	globalState.__pimuxLiveCommandContextBindingsPatched = true;
+
+	const originalBindCommandContext = ExtensionRunner.prototype.bindCommandContext;
+	ExtensionRunner.prototype.bindCommandContext = function (actions: BoundCommandContextActions | undefined) {
+		globalState.__pimuxLiveBoundCommandContextActions = actions;
+		return originalBindCommandContext.call(this, actions);
+	};
+}
+
 function isConfirmDialog(dialog: RuntimeUiDialog): dialog is RuntimeConfirmDialog {
 	return dialog.state.kind === "confirm";
 }
@@ -197,7 +232,8 @@ type BridgeToAgentMessage =
 	| { type: "sessionDetached"; sessionId: string }
 	| { type: "sendUserMessageResult"; requestId: string; sessionId: string; error?: string }
 	| { type: "getCommandsResult"; requestId: string; sessionId: string; commands: PimuxSessionCommand[]; error?: string }
-	| { type: "uiDialogActionResult"; requestId: string; sessionId: string; error?: string };
+	| { type: "uiDialogActionResult"; requestId: string; sessionId: string; error?: string }
+	| { type: "builtinCommandResult"; requestId: string; sessionId: string; error?: string };
 
 interface PimuxInputImage {
 	type: "image";
@@ -224,6 +260,12 @@ type AgentToBridgeMessage =
 			sessionId: string;
 			dialogId: string;
 			action: PimuxUiDialogAction;
+	  }
+	| {
+			type: "builtinCommand";
+			requestId: string;
+			sessionId: string;
+			action: PimuxBuiltinCommandAction;
 	  };
 
 interface PimuxSessionCommand {
@@ -414,8 +456,11 @@ class LiveBridgeClient {
 }
 
 export default function (pi: ExtensionAPI) {
+	ensureCommandContextBindingsPatched();
+
 	const state: {
 		currentSessionId?: string;
+		currentSessionContext?: ExtensionContext;
 		latestSnapshotMessages: PimuxMessage[];
 		latestMetadata?: PimuxSessionMetadata;
 		currentAssistantPartial?: PimuxMessage;
@@ -426,6 +471,7 @@ export default function (pi: ExtensionAPI) {
 		isAgentBusy: boolean;
 	} = {
 		currentSessionId: undefined,
+		currentSessionContext: undefined,
 		latestSnapshotMessages: [],
 		latestMetadata: undefined,
 		currentAssistantPartial: undefined,
@@ -525,58 +571,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerCommand("name", {
-		description: "Set session display name",
-		handler: async (args, ctx) => {
-			ensureUiPatched(ctx);
-			await attachCurrentSession(ctx);
-
-			const name = args.trim();
-			if (!name) {
-				const currentName = pi.getSessionName();
-				ctx.ui.notify(currentName ? `Session name: ${currentName}` : "Usage: /name <name>", "info");
-				return;
-			}
-
-			pi.setSessionName(name);
-			publishSnapshot(ctx);
-			ctx.ui.notify(`Session name set: ${name}`, "info");
-		},
-	});
-
-	pi.registerCommand("compact", {
-		description: "Manually compact the session context",
-		handler: async (args, ctx) => {
-			ensureUiPatched(ctx);
-			await attachCurrentSession(ctx);
-
-			const messageCount = ctx.sessionManager
-				.getEntries()
-				.filter((entry) => entry.type === "message").length;
-			if (messageCount < 2) {
-				ctx.ui.notify("Nothing to compact (no messages yet)", "warning");
-				return;
-			}
-
-			const customInstructions = args.trim() || undefined;
-			ctx.compact({ customInstructions });
-		},
-	});
-
-	pi.registerCommand("reload", {
-		description: "Reload keybindings, extensions, skills, prompts, and themes",
-		handler: async (args, ctx) => {
-			ensureUiPatched(ctx);
-			await attachCurrentSession(ctx);
-
-			if (args.trim()) {
-				ctx.ui.notify("Usage: /reload", "warning");
-				return;
-			}
-
-			await ctx.reload();
-		},
-	});
 
 	pi.registerCommand("pimux", {
 		description: "Pimux helpers (usage: /pimux resummarize)",
@@ -591,7 +585,7 @@ export default function (pi: ExtensionAPI) {
 
 			switch (subcommand) {
 				case "resummarize":
-					await handlePimuxResummarizeCommand(pi, ctx);
+					await handlePimuxResummarizeCommand(pi, ctx, publishSnapshot);
 					return;
 				default:
 					ctx.ui.notify("Usage: /pimux resummarize", "info");
@@ -1360,6 +1354,10 @@ export default function (pi: ExtensionAPI) {
 		bridge.send({ type: "sendUserMessageResult", requestId, sessionId, error });
 	}
 
+	function respondToBuiltinCommandRequest(requestId: string, sessionId: string, error?: string) {
+		bridge.send({ type: "builtinCommandResult", requestId, sessionId, error });
+	}
+
 	function userMessageContent(
 		body: string,
 		images: PimuxInputImage[]
@@ -1372,6 +1370,15 @@ export default function (pi: ExtensionAPI) {
 		}
 		content.push(...images);
 		return content;
+	}
+
+	function dispatchUserMessage(body: string, images: PimuxInputImage[] = []) {
+		const content = userMessageContent(body, images);
+		if (state.isAgentBusy) {
+			pi.sendUserMessage(content, { deliverAs: "followUp" });
+		} else {
+			pi.sendUserMessage(content);
+		}
 	}
 
 	function handleGetCommands(requestId: string, sessionId: string) {
@@ -1394,6 +1401,95 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	async function handleBuiltinCommand(
+		requestId: string,
+		sessionId: string,
+		action: PimuxBuiltinCommandAction
+	) {
+		if (!state.currentSessionId || sessionId !== state.currentSessionId) {
+			respondToBuiltinCommandRequest(
+				requestId,
+				sessionId,
+				`session ${sessionId} is not currently attached in this pi runtime`
+			);
+			return;
+		}
+
+		const ctx = state.currentSessionContext;
+
+		try {
+			switch (action.type) {
+				case "setSessionName": {
+					if (!ctx) {
+						respondToBuiltinCommandRequest(
+							requestId,
+							sessionId,
+							`session ${sessionId} is not currently attached in this pi runtime`
+						);
+						return;
+					}
+
+					const name = action.name.trim();
+					if (!name) {
+						respondToBuiltinCommandRequest(requestId, sessionId, "session name must not be empty");
+						return;
+					}
+
+					pi.setSessionName(name);
+					publishSnapshot(ctx);
+					ctx.ui.notify(`Session name set: ${name}`, "info");
+					respondToBuiltinCommandRequest(requestId, sessionId);
+					return;
+				}
+				case "compact": {
+					if (!ctx) {
+						respondToBuiltinCommandRequest(
+							requestId,
+							sessionId,
+							`session ${sessionId} is not currently attached in this pi runtime`
+						);
+						return;
+					}
+
+					const messageCount = ctx.sessionManager
+						.getEntries()
+						.filter((entry) => entry.type === "message").length;
+					if (messageCount < 2) {
+						ctx.ui.notify("Nothing to compact (no messages yet)", "warning");
+						respondToBuiltinCommandRequest(requestId, sessionId);
+						return;
+					}
+
+					const customInstructions = action.customInstructions?.trim() || undefined;
+					ctx.compact({ customInstructions });
+					respondToBuiltinCommandRequest(requestId, sessionId);
+					return;
+				}
+				case "reload": {
+					const reload = currentBoundCommandContextActions()?.reload;
+					if (!reload) {
+						respondToBuiltinCommandRequest(
+							requestId,
+							sessionId,
+							"reload is unavailable because the live pi command context is not initialized"
+						);
+						return;
+					}
+
+					await reload();
+					respondToBuiltinCommandRequest(requestId, sessionId);
+					return;
+				}
+			}
+		} catch (error) {
+			respondToBuiltinCommandRequest(
+				requestId,
+				sessionId,
+				error instanceof Error ? error.message : String(error)
+			);
+		}
+	}
+
 	function handleBridgeCommand(command: AgentToBridgeMessage) {
 		if (command.type === "getCommands") {
 			handleGetCommands(command.requestId, command.sessionId);
@@ -1402,6 +1498,11 @@ export default function (pi: ExtensionAPI) {
 
 		if (command.type === "uiDialogAction") {
 			handleUiDialogAction(command.requestId, command.sessionId, command.dialogId, command.action);
+			return;
+		}
+
+		if (command.type === "builtinCommand") {
+			void handleBuiltinCommand(command.requestId, command.sessionId, command.action);
 			return;
 		}
 
@@ -1423,13 +1524,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const content = userMessageContent(body, images);
-		if (state.isAgentBusy) {
-			pi.sendUserMessage(content, { deliverAs: "followUp" });
-		} else {
-			pi.sendUserMessage(content);
-		}
-
+		dispatchUserMessage(body, images);
 		respondToSendRequest(command.requestId, command.sessionId);
 	}
 
@@ -1516,6 +1611,7 @@ export default function (pi: ExtensionAPI) {
 			clearCurrentTerminalOnlyUiState(state.currentSessionId);
 			bridge.send({ type: "sessionDetached", sessionId: state.currentSessionId });
 			state.currentSessionId = undefined;
+			state.currentSessionContext = undefined;
 			state.latestSnapshotMessages = [];
 			state.latestMetadata = undefined;
 			state.currentAssistantPartial = undefined;
@@ -1565,6 +1661,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		state.currentSessionId = nextSessionId;
+		state.currentSessionContext = ctx;
 		state.currentUiState = createEmptyRuntimeUiState();
 		state.latestSnapshotMessages = buildSnapshotMessages(ctx);
 		state.latestMetadata = buildSessionMetadata(ctx, state.latestSnapshotMessages);
@@ -1590,6 +1687,7 @@ export default function (pi: ExtensionAPI) {
 		if (!sessionId) return;
 
 		state.currentSessionId = sessionId;
+		state.currentSessionContext = ctx;
 		state.latestSnapshotMessages = buildSnapshotMessages(ctx);
 		state.latestMetadata = buildSessionMetadata(ctx, state.latestSnapshotMessages);
 		state.currentAssistantPartial = undefined;
@@ -1636,7 +1734,11 @@ function summarizeMessages(messages: PimuxMessage[]): string | undefined {
 	return truncateChars(collapsed, 120);
 }
 
-async function handlePimuxResummarizeCommand(pi: ExtensionAPI, ctx: ExtensionCommandContext) {
+async function handlePimuxResummarizeCommand(
+	pi: ExtensionAPI,
+	ctx: ExtensionCommandContext,
+	publishSnapshot: (ctx: ExtensionContext) => void
+) {
 	await ctx.waitForIdle();
 
 	const messages = buildSnapshotMessages(ctx);
