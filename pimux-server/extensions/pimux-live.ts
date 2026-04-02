@@ -601,6 +601,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	function bridgeStateSnapshot(): BridgeStateSnapshot {
+		const terminalOnlyUi = state.currentTerminalOnlyUi;
 		return {
 			currentSessionId: state.currentSessionId,
 			latestSnapshotMessages: state.latestSnapshotMessages,
@@ -609,8 +610,8 @@ export default function (pi: ExtensionAPI) {
 			currentUiState: serializeUiState(state.currentUiState),
 			currentUiDialogState: state.currentUiDialog?.state,
 			currentTerminalOnlyUiState:
-				state.currentTerminalOnlyUi?.sessionId === state.currentSessionId
-					? state.currentTerminalOnlyUi.state
+				terminalOnlyUi && terminalOnlyUi.sessionId === state.currentSessionId
+					? terminalOnlyUi.state
 					: undefined,
 		};
 	}
