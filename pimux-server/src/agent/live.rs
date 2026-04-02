@@ -36,6 +36,8 @@ pub const DEFAULT_DETACHED_CAPACITY: usize = 3;
 pub const DEFAULT_DETACHED_TTL: Duration = Duration::from_secs(180);
 const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
 const LIVE_PROTOCOL_VERSION: u32 = 8;
+const MIN_COMMAND_PROTOCOL_VERSION: u32 = 7;
+const COMMAND_ARGUMENT_COMPLETIONS_PROTOCOL_VERSION: u32 = 8;
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const GET_COMMANDS_TIMEOUT: Duration = Duration::from_secs(5);
 const GET_COMMAND_ARGUMENT_COMPLETIONS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -147,8 +149,22 @@ impl LiveSessionStoreHandle {
         connection_id: u64,
         sender: UnboundedSender<LiveAgentCommand>,
     ) {
+        self.register_command_connection_with_protocol(
+            connection_id,
+            sender,
+            LIVE_PROTOCOL_VERSION,
+        )
+        .await;
+    }
+
+    async fn register_command_connection_with_protocol(
+        &self,
+        connection_id: u64,
+        sender: UnboundedSender<LiveAgentCommand>,
+        protocol_version: u32,
+    ) {
         let mut store = self.inner.lock().await;
-        store.register_command_connection(connection_id, sender);
+        store.register_command_connection(connection_id, sender, protocol_version);
     }
 
     async fn bind_command_connection_to_session(
@@ -550,18 +566,22 @@ async fn start_listener_impl(
 
                             match message {
                                 LiveSessionIpcMessage::Hello { protocol_version } => {
-                                    if protocol_version != LIVE_PROTOCOL_VERSION {
+                                    if !(MIN_COMMAND_PROTOCOL_VERSION
+                                        ..=LIVE_PROTOCOL_VERSION)
+                                        .contains(&protocol_version)
+                                    {
                                         eprintln!(
-                                            "live ipc protocol mismatch for connection {connection_id}: extension reported version {protocol_version}, agent expects {LIVE_PROTOCOL_VERSION}"
+                                            "live ipc protocol mismatch for connection {connection_id}: extension reported version {protocol_version}, agent supports {MIN_COMMAND_PROTOCOL_VERSION}...{LIVE_PROTOCOL_VERSION}"
                                         );
                                         continue;
                                     }
 
                                     supports_commands = true;
                                     store
-                                        .register_command_connection(
+                                        .register_command_connection_with_protocol(
                                             connection_id,
                                             command_tx.clone(),
+                                            protocol_version,
                                         )
                                         .await;
                                 }
@@ -1474,12 +1494,14 @@ impl LiveSessionStore {
         &mut self,
         connection_id: u64,
         sender: UnboundedSender<LiveAgentCommand>,
+        protocol_version: u32,
     ) {
         self.command_connections.insert(
             connection_id,
             LiveCommandConnection {
                 sender,
                 current_session_id: None,
+                protocol_version,
             },
         );
     }
@@ -1670,6 +1692,9 @@ impl LiveSessionStore {
             self.command_session_connections.remove(session_id);
             return Err(GetCommandArgumentCompletionsError::Unavailable);
         };
+        if connection.protocol_version < COMMAND_ARGUMENT_COMPLETIONS_PROTOCOL_VERSION {
+            return Err(GetCommandArgumentCompletionsError::Unavailable);
+        }
 
         let request_id = format!("live-cmd-args-{}", self.next_send_request_id);
         self.next_send_request_id += 1;
@@ -2225,6 +2250,7 @@ impl DetachedSessionState {
 struct LiveCommandConnection {
     sender: UnboundedSender<LiveAgentCommand>,
     current_session_id: Option<String>,
+    protocol_version: u32,
 }
 
 struct InflightSendUserMessage {

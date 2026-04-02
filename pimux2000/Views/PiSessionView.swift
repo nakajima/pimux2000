@@ -61,6 +61,7 @@ struct PiSessionView: View {
 	@State private var liveStreamState: LiveStreamState = .idle
 	@State private var lastStreamSequence: UInt64 = 0
 	@State private var customCommands: [PimuxSessionCommand] = []
+	@State private var isLoadingCustomCommands = false
 	@State private var requestedMessageContext: MessageContextRoute?
 	@State private var transcriptForcePinToken = 0
 	@State private var isAgentBusy = false
@@ -148,6 +149,12 @@ struct PiSessionView: View {
 					onSelectOption: { index in
 						Task { await chooseUIDialogOption(index) }
 					},
+					onMoveSelection: { delta in
+						Task { await moveUIDialogSelection(by: delta) }
+					},
+					onSubmitSelector: {
+						Task { await submitUIDialogSelection() }
+					},
 					onSubmitTextValue: {
 						Task { await submitUIDialogTextValue() }
 					},
@@ -216,6 +223,10 @@ struct PiSessionView: View {
 		.task(id: "commands|\(liveTaskKey)|\(deferredStartupGeneration)") {
 			guard deferredStartupGeneration > 0 else { return }
 			await loadCustomCommands()
+		}
+		.onChange(of: transcriptActivity?.attached) { _, attached in
+			guard attached == true else { return }
+			Task { await loadCustomCommands(force: true) }
 		}
 	}
 
@@ -1069,13 +1080,19 @@ struct PiSessionView: View {
 		}
 	}
 
-	private func loadCustomCommands() async {
+	private func loadCustomCommands(force: Bool = false) async {
 		guard let serverConfiguration else { return }
+		guard !isLoadingCustomCommands else { return }
+		if !force, !customCommands.isEmpty { return }
+
+		isLoadingCustomCommands = true
+		defer { isLoadingCustomCommands = false }
+
 		do {
 			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
 			customCommands = try await client.getCommands(sessionID: session.sessionID)
 		} catch {
-			// Non-critical; built-in commands still work
+			// Non-critical; built-in commands still work. Retry once the live session reports attached.
 			print("Failed to load custom commands for \(session.sessionID): \(error)")
 		}
 	}
@@ -1106,6 +1123,39 @@ struct PiSessionView: View {
 			)
 			return []
 		}
+	}
+
+	private func moveUIDialogSelection(by delta: Int) async {
+		guard delta != 0 else { return }
+		guard !isUIDialogActionInFlight else { return }
+		guard let dialog = currentUIDialog, dialog.isSelectorDialog, !dialog.options.isEmpty else { return }
+		guard let serverConfiguration else {
+			uiDialogActionError = "No pimux server configured."
+			return
+		}
+
+		let newIndex = max(0, min(dialog.selectedIndex + delta, dialog.options.count - 1))
+		guard newIndex != dialog.selectedIndex else { return }
+
+		currentUIDialog = dialog.settingSelectedIndex(newIndex)
+		uiDialogActionError = nil
+
+		do {
+			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
+			try await client.sendUIDialogAction(
+				sessionID: session.sessionID,
+				dialogID: dialog.id,
+				action: .move(direction: delta < 0 ? "up" : "down")
+			)
+		} catch {
+			currentUIDialog = dialog
+			uiDialogActionError = error.localizedDescription
+		}
+	}
+
+	private func submitUIDialogSelection() async {
+		guard let dialog = currentUIDialog, dialog.isSelectorDialog else { return }
+		await chooseUIDialogOption(dialog.selectedIndex)
 	}
 
 	private func chooseUIDialogOption(_ index: Int) async {

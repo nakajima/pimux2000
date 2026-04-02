@@ -7,7 +7,7 @@ struct PendingLocalMessageView: View {
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 6) {
-			HStack(spacing: 6) {
+			HStack(alignment: .top, spacing: 6) {
 				Image(systemName: "clock.fill")
 				Text("You")
 					.font(.caption)

@@ -80,6 +80,17 @@ struct SessionTranscriptView: UIViewRepresentable {
 		private var messagesByID: [String: TranscriptMessage] = [:]
 		private var dataSource: UITableViewDiffableDataSource<Int, String>!
 
+		/// In the flipped table, contentOffset.y ≈ 0 means the user is viewing the
+		/// newest messages (visual bottom). A positive offset means scrolled toward
+		/// older messages. We treat anything within ~2 lines as "near bottom".
+		private var isNearBottom: Bool = true
+		private static let nearBottomThreshold: CGFloat = 44
+
+		/// Set when an apply is deferred because the user is mid-scroll gesture.
+		/// Cleared after the deferred apply runs.
+		private var needsDeferredApply: Bool = false
+		private weak var deferredTableView: UITableView?
+
 		init(parent: SessionTranscriptView) {
 			self.parent = parent
 			super.init()
@@ -111,12 +122,55 @@ struct SessionTranscriptView: UIViewRepresentable {
 			self.parent = parent
 			let newMessages = parent.messages.reversed() as [TranscriptMessage]
 
-			// Capture old fingerprints before updating the lookup
+			// Always keep the lookup fresh so the cell provider has current data
+			// when cells scroll into view or are recycled.
 			let oldFingerprints = messagesByID.mapValues(\.fingerprint)
 			messagesByID = Dictionary(uniqueKeysWithValues: newMessages.map { ($0.id, $0) })
 
 			let newItemIDs = newMessages.map(\.id)
 			let structureChanged = dataSource.snapshot().itemIdentifiers != newItemIDs
+
+			// Defer snapshot apply while the user is actively scrolling away from
+			// the bottom. The cell provider reads from messagesByID, so cells pick
+			// up fresh data naturally when they become visible.
+			let isUserScrolling = tableView.isDragging || tableView.isDecelerating
+			if isUserScrolling, !isNearBottom, !shouldForcePin {
+				if structureChanged || hasContentChanges(newMessages, oldFingerprints: oldFingerprints) {
+					needsDeferredApply = true
+					deferredTableView = tableView
+				}
+				return
+			}
+
+			applySnapshot(
+				newMessages: newMessages,
+				newItemIDs: newItemIDs,
+				oldFingerprints: oldFingerprints,
+				structureChanged: structureChanged,
+				shouldForcePin: shouldForcePin,
+				tableView: tableView
+			)
+		}
+
+		private func hasContentChanges(
+			_ newMessages: [TranscriptMessage],
+			oldFingerprints: [String: UInt64]
+		) -> Bool {
+			newMessages.contains { message in
+				guard let oldFP = oldFingerprints[message.id] else { return false }
+				return oldFP != message.fingerprint
+			}
+		}
+
+		private func applySnapshot(
+			newMessages: [TranscriptMessage],
+			newItemIDs: [String],
+			oldFingerprints: [String: UInt64],
+			structureChanged: Bool,
+			shouldForcePin: Bool,
+			tableView: UITableView
+		) {
+			needsDeferredApply = false
 
 			if structureChanged {
 				// Structure changed (messages added/removed).
@@ -143,7 +197,19 @@ struct SessionTranscriptView: UIViewRepresentable {
 				if !changedIDs.isEmpty {
 					var snapshot = dataSource.snapshot()
 					snapshot.reconfigureItems(changedIDs)
-					dataSource.apply(snapshot, animatingDifferences: false)
+
+					if isNearBottom {
+						// User is at the bottom — apply normally. Row 0 grows and
+						// the view stays pinned via offset ≈ 0.
+						dataSource.apply(snapshot, animatingDifferences: false)
+					} else {
+						// User is scrolled away — preserve their position. The growing
+						// row 0 shifts all subsequent rows in table coords; restoring
+						// the offset cancels that shift.
+						let savedOffset = tableView.contentOffset
+						dataSource.apply(snapshot, animatingDifferences: false)
+						tableView.contentOffset = savedOffset
+					}
 				}
 
 				if shouldForcePin, !newMessages.isEmpty {
@@ -158,6 +224,23 @@ struct SessionTranscriptView: UIViewRepresentable {
 			updateEmptyState(on: tableView)
 		}
 
+		private func applyDeferredUpdateIfNeeded() {
+			guard needsDeferredApply, let tableView = deferredTableView else { return }
+			let messages = parent.messages.reversed() as [TranscriptMessage]
+			let oldFingerprints = messagesByID.mapValues(\.fingerprint)
+			let newItemIDs = messages.map(\.id)
+			let structureChanged = dataSource.snapshot().itemIdentifiers != newItemIDs
+
+			applySnapshot(
+				newMessages: messages,
+				newItemIDs: newItemIDs,
+				oldFingerprints: oldFingerprints,
+				structureChanged: structureChanged,
+				shouldForcePin: false,
+				tableView: tableView
+			)
+		}
+
 		// MARK: UITableViewDelegate
 
 		func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
@@ -170,7 +253,18 @@ struct SessionTranscriptView: UIViewRepresentable {
 
 		func scrollViewDidScroll(_ scrollView: UIScrollView) {
 			let normalized = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+			isNearBottom = normalized < Self.nearBottomThreshold
 			parent.onScrollOffsetChanged?(normalized)
+		}
+
+		func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+			if !decelerate {
+				applyDeferredUpdateIfNeeded()
+			}
+		}
+
+		func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+			applyDeferredUpdateIfNeeded()
 		}
 
 		// MARK: Empty state
