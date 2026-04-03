@@ -1,8 +1,8 @@
 import Foundation
 
 struct TranscriptFingerprint {
-	private static let offsetBasis: UInt64 = 0xcbf29ce484222325
-	private static let prime: UInt64 = 0x100000001b3
+	private static let offsetBasis: UInt64 = 0xCBF2_9CE4_8422_2325
+	private static let prime: UInt64 = 0x100_0000_01B3
 
 	private var state: UInt64 = Self.offsetBasis
 
@@ -17,7 +17,7 @@ struct TranscriptFingerprint {
 
 	mutating func combine(_ value: UInt64) {
 		var remaining = value
-		for _ in 0..<8 {
+		for _ in 0 ..< 8 {
 			combine(UInt8(truncatingIfNeeded: remaining))
 			remaining >>= 8
 		}

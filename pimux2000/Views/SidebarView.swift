@@ -21,24 +21,26 @@ struct SidebarView: View {
 						HStack(alignment: .top, spacing: 12) {
 							VStack(alignment: .leading, spacing: 4) {
 								Text(verbatim: sessionInfo.session.summary)
-								HStack(spacing: 6) {
-									SessionActivityBadge(isActive: sessionInfo.session.isCliActive)
-									VStack(alignment: .leading, spacing: 4) {
+								VStack(alignment: .leading, spacing: 4) {
+									if let cwd = sessionInfo.session.cwd {
+										Text(verbatim: cwd.replacing(/\/Users\/\w+\/|\/home\/\w+\//, with: "~/"))
+											.bold()
+									}
+									HStack {
+										Text(verbatim: "\(sessionInfo.host.location)")
+										Spacer()
+
 										if let lastMessageAt = sessionInfo.session.lastMessageAt {
 											Text(verbatim: lastMessageAt.formatted(.dateTime))
 										}
-										Text(verbatim: "\(sessionInfo.description)")
-											.bold()
+
+										if sessionInfo.session.isUnread && selectedSessionID != sessionInfo.session.sessionID {
+											UnreadSessionBadge()
+										}
 									}
 								}
 								.font(.caption)
 								.foregroundStyle(.secondary)
-							}
-
-							Spacer(minLength: 0)
-
-							if sessionInfo.session.isUnread && selectedSessionID != sessionInfo.session.sessionID {
-								UnreadSessionBadge()
 							}
 						}
 						.tag(sessionInfo.session.sessionID)
@@ -54,7 +56,6 @@ struct SidebarView: View {
 					}
 				}
 			}
-
 		}
 		.refreshable {
 			let syncer = PiSessionSync(dbContext: dbContext)
@@ -69,17 +70,17 @@ struct SidebarView: View {
 				}
 			}
 			#if os(iOS)
-			ToolbarItem(placement: .bottomBar) {
-				Button { isShowingSettings = true } label: {
-					Label("Settings", systemImage: "gearshape")
+				ToolbarItem(placement: .bottomBar) {
+					Button { isShowingSettings = true } label: {
+						Label("Settings", systemImage: "gearshape")
+					}
 				}
-			}
 			#else
-			ToolbarItem {
-				Button { isShowingSettings = true } label: {
-					Label("Settings", systemImage: "gearshape")
+				ToolbarItem {
+					Button { isShowingSettings = true } label: {
+						Label("Settings", systemImage: "gearshape")
+					}
 				}
-			}
 			#endif
 		}
 		.sheet(isPresented: $isShowingServerSheet) {
@@ -95,18 +96,6 @@ struct SidebarView: View {
 					}
 			}
 		}
-	}
-
-}
-
-private struct SessionActivityBadge: View {
-	let isActive: Bool
-
-	var body: some View {
-		Circle()
-			.fill(isActive ? .green : .gray.opacity(0.4))
-			.frame(width: 8, height: 8)
-			.accessibilityLabel(isActive ? "Active CLI session" : "Inactive CLI session")
 	}
 }
 
@@ -136,6 +125,7 @@ private struct UnreadSessionBadge: View {
 				sessionID: "sidebar-preview-session-read",
 				sessionFile: nil,
 				model: "anthropic/claude-sonnet",
+				cwd: "/Users/nakajima/apps/ThatApp",
 				lastMessage: nil,
 				lastUserMessageAt: now.addingTimeInterval(-240),
 				lastMessageAt: now.addingTimeInterval(-120),
@@ -154,6 +144,7 @@ private struct UnreadSessionBadge: View {
 				sessionID: "sidebar-preview-session-unread",
 				sessionFile: nil,
 				model: "anthropic/claude-sonnet",
+				cwd: "/home/nakajima/apps/ThisApp",
 				lastMessage: nil,
 				lastUserMessageAt: now.addingTimeInterval(-30),
 				lastMessageAt: now,

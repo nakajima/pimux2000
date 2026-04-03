@@ -1,9 +1,9 @@
-import SwiftUI
 import CoreText
+import SwiftUI
 #if canImport(UIKit)
-import UIKit
+	import UIKit
 #elseif canImport(AppKit)
-import AppKit
+	import AppKit
 #endif
 
 struct FontPickerView: View {
@@ -15,7 +15,7 @@ struct FontPickerView: View {
 		if searchText.isEmpty { return fontOptions }
 		return fontOptions.filter {
 			$0.familyName.localizedCaseInsensitiveContains(searchText)
-			|| $0.previewFontName.localizedCaseInsensitiveContains(searchText)
+				|| $0.previewFontName.localizedCaseInsensitiveContains(searchText)
 		}
 	}
 
@@ -106,11 +106,11 @@ private enum ChatFontCatalog {
 
 		let options: [MonospacedFontOption]
 		#if canImport(UIKit)
-		options = iOSMonospacedFontOptions()
+			options = iOSMonospacedFontOptions()
 		#elseif canImport(AppKit)
-		options = macOSMonospacedFontOptions()
+			options = macOSMonospacedFontOptions()
 		#else
-		options = []
+			options = []
 		#endif
 
 		cachedOptions = options
@@ -143,60 +143,61 @@ private enum ChatFontCatalog {
 	}
 
 	#if canImport(UIKit)
-	private static func iOSMonospacedFontOptions() -> [MonospacedFontOption] {
-		var facesByFamily: [String: [FontFace]] = [:]
-		var seenFontNames = Set<String>()
+		private static func iOSMonospacedFontOptions() -> [MonospacedFontOption] {
+			var facesByFamily: [String: [FontFace]] = [:]
+			var seenFontNames = Set<String>()
 
-		for familyName in UIFont.familyNames {
-			for fontName in UIFont.fontNames(forFamilyName: familyName) {
+			for familyName in UIFont.familyNames {
+				for fontName in UIFont.fontNames(forFamilyName: familyName) {
+					addUIKitFont(named: fontName, into: &facesByFamily, seenFontNames: &seenFontNames)
+				}
+			}
+
+			for fontName in (CTFontManagerCopyAvailablePostScriptNames() as? [String]) ?? [] {
 				addUIKitFont(named: fontName, into: &facesByFamily, seenFontNames: &seenFontNames)
 			}
+
+			let descriptors = (CTFontCollectionCreateMatchingFontDescriptors(CTFontCollectionCreateFromAvailableFonts(nil)) as? [CTFontDescriptor]) ?? []
+			for descriptor in descriptors {
+				let font = CTFontCreateWithFontDescriptor(descriptor, 12, nil)
+				let fontName = CTFontCopyPostScriptName(font) as String
+				addUIKitFont(named: fontName, into: &facesByFamily, seenFontNames: &seenFontNames)
+			}
+
+			return buildOptions(from: facesByFamily)
 		}
 
-		for fontName in (CTFontManagerCopyAvailablePostScriptNames() as? [String]) ?? [] {
-			addUIKitFont(named: fontName, into: &facesByFamily, seenFontNames: &seenFontNames)
+		private static func addUIKitFont(
+			named fontName: String,
+			into facesByFamily: inout [String: [FontFace]],
+			seenFontNames: inout Set<String>
+		) {
+			guard seenFontNames.insert(fontName).inserted else { return }
+			guard let font = UIFont(name: fontName, size: 12) else { return }
+			guard isMonospaced(fontName: font.fontName) else { return }
+
+			let familyName = font.familyName
+			let styleName = (font.fontDescriptor.object(forKey: .face) as? String) ?? font.fontName
+			facesByFamily[familyName, default: []].append(FontFace(fontName: font.fontName, styleName: styleName))
 		}
 
-		let descriptors = (CTFontCollectionCreateMatchingFontDescriptors(CTFontCollectionCreateFromAvailableFonts(nil)) as? [CTFontDescriptor]) ?? []
-		for descriptor in descriptors {
-			let font = CTFontCreateWithFontDescriptor(descriptor, 12, nil)
-			let fontName = CTFontCopyPostScriptName(font) as String
-			addUIKitFont(named: fontName, into: &facesByFamily, seenFontNames: &seenFontNames)
-		}
-
-		return buildOptions(from: facesByFamily)
-	}
-
-	private static func addUIKitFont(
-		named fontName: String,
-		into facesByFamily: inout [String: [FontFace]],
-		seenFontNames: inout Set<String>
-	) {
-		guard seenFontNames.insert(fontName).inserted else { return }
-		guard let font = UIFont(name: fontName, size: 12) else { return }
-		guard isMonospaced(fontName: font.fontName) else { return }
-
-		let familyName = font.familyName
-		let styleName = (font.fontDescriptor.object(forKey: .face) as? String) ?? font.fontName
-		facesByFamily[familyName, default: []].append(FontFace(fontName: font.fontName, styleName: styleName))
-	}
 	#elseif canImport(AppKit)
-	private static func macOSMonospacedFontOptions() -> [MonospacedFontOption] {
-		let descriptors = (CTFontCollectionCreateMatchingFontDescriptors(CTFontCollectionCreateFromAvailableFonts(nil)) as? [CTFontDescriptor]) ?? []
-		var facesByFamily: [String: [FontFace]] = [:]
+		private static func macOSMonospacedFontOptions() -> [MonospacedFontOption] {
+			let descriptors = (CTFontCollectionCreateMatchingFontDescriptors(CTFontCollectionCreateFromAvailableFonts(nil)) as? [CTFontDescriptor]) ?? []
+			var facesByFamily: [String: [FontFace]] = [:]
 
-		for descriptor in descriptors {
-			let font = CTFontCreateWithFontDescriptor(descriptor, 12, nil)
-			guard isMonospaced(font) else { continue }
+			for descriptor in descriptors {
+				let font = CTFontCreateWithFontDescriptor(descriptor, 12, nil)
+				guard isMonospaced(font) else { continue }
 
-			let familyName = CTFontCopyFamilyName(font) as String
-			let fontName = CTFontCopyPostScriptName(font) as String
-			let styleName = (CTFontCopyName(font, kCTFontStyleNameKey) as String?) ?? "Regular"
-			facesByFamily[familyName, default: []].append(FontFace(fontName: fontName, styleName: styleName))
+				let familyName = CTFontCopyFamilyName(font) as String
+				let fontName = CTFontCopyPostScriptName(font) as String
+				let styleName = (CTFontCopyName(font, kCTFontStyleNameKey) as String?) ?? "Regular"
+				facesByFamily[familyName, default: []].append(FontFace(fontName: fontName, styleName: styleName))
+			}
+
+			return buildOptions(from: facesByFamily)
 		}
-
-		return buildOptions(from: facesByFamily)
-	}
 	#endif
 
 	private static func isMonospaced(fontName: String) -> Bool {
@@ -207,11 +208,11 @@ private enum ChatFontCatalog {
 		if CTFontGetSymbolicTraits(font).contains(.traitMonoSpace) {
 			return true
 		}
-		
+
 		if String(CTFontCopyFullName(font)).lowercased().contains("mono") {
 			return true
 		}
-		
+
 		return hasFixedGlyphAdvances(font)
 	}
 
@@ -234,8 +235,9 @@ private enum ChatFontCatalog {
 		}
 
 		guard widths.count >= 4,
-				let minWidth = widths.min(),
-				let maxWidth = widths.max() else {
+		      let minWidth = widths.min(),
+		      let maxWidth = widths.max()
+		else {
 			return false
 		}
 
@@ -285,78 +287,79 @@ func chatFont(style: Font.TextStyle = .body) -> Font {
 }
 
 #if canImport(UIKit)
-func chatUIFont(style: Font.TextStyle = .body) -> UIFont {
-	let storedValue = UserDefaults.standard.string(forKey: "chatFontFamily") ?? ""
-	let resolvedFontName = ChatFontCatalog.resolvedFontName(forStoredValue: storedValue)
-	let fontSize = preferredFontSize(for: style)
-	if !resolvedFontName.isEmpty, let font = UIFont(name: resolvedFontName, size: fontSize) {
-		return font
+	func chatUIFont(style: Font.TextStyle = .body) -> UIFont {
+		let storedValue = UserDefaults.standard.string(forKey: "chatFontFamily") ?? ""
+		let resolvedFontName = ChatFontCatalog.resolvedFontName(forStoredValue: storedValue)
+		let fontSize = preferredFontSize(for: style)
+		if !resolvedFontName.isEmpty, let font = UIFont(name: resolvedFontName, size: fontSize) {
+			return font
+		}
+		return UIFont.preferredFont(forTextStyle: style.uiKit)
 	}
-	return UIFont.preferredFont(forTextStyle: style.uiKit)
-}
 #endif
 
 func chatLineHeight(style: Font.TextStyle = .body) -> CGFloat {
 	#if canImport(UIKit)
-	return chatUIFont(style: style).lineHeight
+		return chatUIFont(style: style).lineHeight
 	#else
-	let storedValue = UserDefaults.standard.string(forKey: "chatFontFamily") ?? ""
-	let resolvedFontName = ChatFontCatalog.resolvedFontName(forStoredValue: storedValue)
-	let fontSize = preferredFontSize(for: style)
-	if !resolvedFontName.isEmpty, let font = NSFont(name: resolvedFontName, size: fontSize) {
+		let storedValue = UserDefaults.standard.string(forKey: "chatFontFamily") ?? ""
+		let resolvedFontName = ChatFontCatalog.resolvedFontName(forStoredValue: storedValue)
+		let fontSize = preferredFontSize(for: style)
+		if !resolvedFontName.isEmpty, let font = NSFont(name: resolvedFontName, size: fontSize) {
+			return font.ascender - font.descender + font.leading
+		}
+		let font = NSFont.preferredFont(forTextStyle: style.appKit)
 		return font.ascender - font.descender + font.leading
-	}
-	let font = NSFont.preferredFont(forTextStyle: style.appKit)
-	return font.ascender - font.descender + font.leading
 	#endif
 }
 
 private func preferredFontSize(for style: Font.TextStyle) -> CGFloat {
 	#if canImport(UIKit)
-	UIFont.preferredFont(forTextStyle: style.uiKit).pointSize
+		UIFont.preferredFont(forTextStyle: style.uiKit).pointSize
 	#else
-	NSFont.preferredFont(forTextStyle: style.appKit).pointSize
+		NSFont.preferredFont(forTextStyle: style.appKit).pointSize
 	#endif
 }
 
 #if canImport(UIKit)
-private extension Font.TextStyle {
-	var uiKit: UIFont.TextStyle {
-		switch self {
-		case .largeTitle: .largeTitle
-		case .title: .title1
-		case .title2: .title2
-		case .title3: .title3
-		case .headline: .headline
-		case .subheadline: .subheadline
-		case .body: .body
-		case .callout: .callout
-		case .footnote: .footnote
-		case .caption: .caption1
-		case .caption2: .caption2
-		@unknown default: .body
+	private extension Font.TextStyle {
+		var uiKit: UIFont.TextStyle {
+			switch self {
+			case .largeTitle: .largeTitle
+			case .title: .title1
+			case .title2: .title2
+			case .title3: .title3
+			case .headline: .headline
+			case .subheadline: .subheadline
+			case .body: .body
+			case .callout: .callout
+			case .footnote: .footnote
+			case .caption: .caption1
+			case .caption2: .caption2
+			@unknown default: .body
+			}
 		}
 	}
-}
+
 #elseif canImport(AppKit)
-private extension Font.TextStyle {
-	var appKit: NSFont.TextStyle {
-		switch self {
-		case .largeTitle: .largeTitle
-		case .title: .title1
-		case .title2: .title2
-		case .title3: .title3
-		case .headline: .headline
-		case .subheadline: .subheadline
-		case .body: .body
-		case .callout: .callout
-		case .footnote: .footnote
-		case .caption: .caption1
-		case .caption2: .caption2
-		@unknown default: .body
+	private extension Font.TextStyle {
+		var appKit: NSFont.TextStyle {
+			switch self {
+			case .largeTitle: .largeTitle
+			case .title: .title1
+			case .title2: .title2
+			case .title3: .title3
+			case .headline: .headline
+			case .subheadline: .subheadline
+			case .body: .body
+			case .callout: .callout
+			case .footnote: .footnote
+			case .caption: .caption1
+			case .caption2: .caption2
+			@unknown default: .body
+			}
 		}
 	}
-}
 #endif
 
 #Preview {

@@ -37,7 +37,7 @@ struct OptimisticMessageTests {
 				userMessage("older-1"),
 				userMessage("older-2"),
 				userMessage("first"),
-				userMessage("second")
+				userMessage("second"),
 			]
 		)
 		#expect(afterBoth.isEmpty)

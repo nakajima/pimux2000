@@ -30,19 +30,19 @@ struct MarkdownBlocksView: View {
 	@ViewBuilder
 	private func blockView(for block: MarkdownBlock) -> some View {
 		switch block {
-		case .paragraph(let text):
+		case let .paragraph(text):
 			inlineTextView(for: text)
 
-		case .heading(let level, let text):
+		case let .heading(level, text):
 			headingView(level: level, text: text)
 
-		case .codeBlock(let language, let code):
+		case let .codeBlock(language, code):
 			CodeBlockView(language: language, code: code)
 
-		case .blockQuote(let content):
+		case let .blockQuote(content):
 			BlockQuoteView(content: content, isSelectable: isSelectable)
 
-		case .unorderedList(let items):
+		case let .unorderedList(items):
 			VStack(alignment: .leading, spacing: 4) {
 				ForEach(Array(items.enumerated()), id: \.offset) { _, item in
 					HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -53,7 +53,7 @@ struct MarkdownBlocksView: View {
 				}
 			}
 
-		case .orderedList(let items):
+		case let .orderedList(items):
 			VStack(alignment: .leading, spacing: 4) {
 				ForEach(Array(items.enumerated()), id: \.offset) { _, item in
 					HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -64,7 +64,6 @@ struct MarkdownBlocksView: View {
 					}
 				}
 			}
-
 
 		case .thematicBreak:
 			Divider()

@@ -25,7 +25,7 @@ struct CompactionSummaryMessageView: View {
 		messageInfo: MessageInfo(
 			message: Message(piSessionID: 1, role: .compactionSummary, toolName: nil, position: 0, createdAt: Date()),
 			contentBlocks: [
-				MessageContentBlock(messageID: 1, type: "text", text: "Earlier setup discussion was compacted into a shorter summary.", toolCallName: nil, position: 0)
+				MessageContentBlock(messageID: 1, type: "text", text: "Earlier setup discussion was compacted into a shorter summary.", toolCallName: nil, position: 0),
 			]
 		)
 	)

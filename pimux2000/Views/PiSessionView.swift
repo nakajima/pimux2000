@@ -3,7 +3,7 @@ import GRDBQuery
 import PhotosUI
 import SwiftUI
 #if canImport(UIKit) && !os(macOS)
-import UIKit
+	import UIKit
 #endif
 
 private enum LiveStreamState {
@@ -32,9 +32,9 @@ private enum DisplayedSessionMessage: Identifiable {
 
 	var id: String {
 		switch self {
-		case .confirmed(let messageInfo):
+		case let .confirmed(messageInfo):
 			messageInfo.id
-		case .pending(let pendingMessage):
+		case let .pending(pendingMessage):
 			"pending-\(pendingMessage.id.uuidString)"
 		}
 	}
@@ -167,67 +167,67 @@ struct PiSessionView: View {
 		}
 		.navigationTitle(session.summary)
 		#if canImport(UIKit) && !os(macOS)
-		.navigationBarTitleDisplayMode(.inline)
-		.toolbar {
-			ToolbarItem(placement: .topBarLeading) {
-				if horizontalSizeClass != .compact {
-					Button {
-						withAnimation {
-							columnVisibility = columnVisibility == .detailOnly ? .automatic : .detailOnly
+			.navigationBarTitleDisplayMode(.inline)
+			.toolbar {
+				ToolbarItem(placement: .topBarLeading) {
+					if horizontalSizeClass != .compact {
+						Button {
+							withAnimation {
+								columnVisibility = columnVisibility == .detailOnly ? .automatic : .detailOnly
+							}
+						} label: {
+							Label("Toggle Sidebar", systemImage: "sidebar.left")
 						}
-					} label: {
-						Label("Toggle Sidebar", systemImage: "sidebar.left")
+						.keyboardShortcut("l", modifiers: [.command, .shift])
 					}
-					.keyboardShortcut("l", modifiers: [.command, .shift])
 				}
 			}
-		}
 		#endif
-		.onAppear {
-			SessionSelectionPerformanceTrace.emitEvent(
-				sessionID: session.sessionID,
-				name: "PiSessionViewAppear",
-				message: "stored=\(storedMessages.count) streamed=\(streamedMessages?.count ?? -1) pending=\(pendingMessages.count)"
-			)
-			scheduleDeferredStartup()
-		}
-		.onChange(of: liveTaskKey) {
-			scheduleDeferredStartup()
-		}
-		.navigationDestination(item: $requestedMessageContext) { route in
-			MessageContextView(route: route)
-		}
-		.navigationDestination(item: $requestedBuiltinSession) { builtinSession in
-			PiSessionView(session: builtinSession, columnVisibility: $columnVisibility)
-				.id(builtinSession.sessionID)
-		}
-		.sheet(isPresented: $isShowingForkMessagePicker) {
-			SessionForkMessagePickerView(
-				messages: availableForkMessages,
-				isSubmitting: isCreatingFork,
-				errorMessage: forkCommandError,
-				onSelect: { message in
-					Task { await createFork(from: message) }
-				},
-				onCancel: {
-					isShowingForkMessagePicker = false
-					availableForkMessages = []
-					forkCommandError = nil
-				}
-			)
-		}
-		.task(id: "live|\(liveTaskKey)|\(deferredStartupGeneration)") {
-			guard deferredStartupGeneration > 0 else { return }
-			await liveMessagesLoop()
-		}
-		.task(id: "commands|\(liveTaskKey)|\(deferredStartupGeneration)") {
-			guard deferredStartupGeneration > 0 else { return }
-			await loadCustomCommands()
-		}
-		.onChange(of: transcriptActivity?.attached) { _, attached in
-			guard attached == true else { return }
-			Task { await loadCustomCommands(force: true) }
-		}
+			.onAppear {
+				SessionSelectionPerformanceTrace.emitEvent(
+					sessionID: session.sessionID,
+					name: "PiSessionViewAppear",
+					message: "stored=\(storedMessages.count) streamed=\(streamedMessages?.count ?? -1) pending=\(pendingMessages.count)"
+				)
+				scheduleDeferredStartup()
+			}
+			.onChange(of: liveTaskKey) {
+				scheduleDeferredStartup()
+			}
+			.navigationDestination(item: $requestedMessageContext) { route in
+				MessageContextView(route: route)
+			}
+			.navigationDestination(item: $requestedBuiltinSession) { builtinSession in
+				PiSessionView(session: builtinSession, columnVisibility: $columnVisibility)
+					.id(builtinSession.sessionID)
+			}
+			.sheet(isPresented: $isShowingForkMessagePicker) {
+				SessionForkMessagePickerView(
+					messages: availableForkMessages,
+					isSubmitting: isCreatingFork,
+					errorMessage: forkCommandError,
+					onSelect: { message in
+						Task { await createFork(from: message) }
+					},
+					onCancel: {
+						isShowingForkMessagePicker = false
+						availableForkMessages = []
+						forkCommandError = nil
+					}
+				)
+			}
+			.task(id: "live|\(liveTaskKey)|\(deferredStartupGeneration)") {
+				guard deferredStartupGeneration > 0 else { return }
+				await liveMessagesLoop()
+			}
+			.task(id: "commands|\(liveTaskKey)|\(deferredStartupGeneration)") {
+				guard deferredStartupGeneration > 0 else { return }
+				await loadCustomCommands()
+			}
+			.onChange(of: transcriptActivity?.attached) { _, attached in
+				guard attached == true else { return }
+				Task { await loadCustomCommands(force: true) }
+			}
 	}
 
 	private var liveTaskKey: String {
@@ -286,60 +286,59 @@ struct PiSessionView: View {
 		}
 	}
 
-
 	@ViewBuilder
 	private var transcriptView: some View {
 		#if canImport(UIKit) && !os(macOS)
-		SessionTranscriptView(
-			messages: transcriptMessages,
-			sessionID: session.sessionID,
-			serverURL: serverConfiguration?.serverURL,
-			emptyState: transcriptEmptyState,
-			forcePinToken: transcriptForcePinToken,
-			onRetry: { Task { await loadMessages() } },
-			onOpenMessageContext: { requestedMessageContext = $0 }
-		)
+			SessionTranscriptView(
+				messages: transcriptMessages,
+				sessionID: session.sessionID,
+				serverURL: serverConfiguration?.serverURL,
+				emptyState: transcriptEmptyState,
+				forcePinToken: transcriptForcePinToken,
+				onRetry: { Task { await loadMessages() } },
+				onOpenMessageContext: { requestedMessageContext = $0 }
+			)
 		#else
-		ScrollViewReader { proxy in
-			ScrollView {
-				LazyVStack(alignment: .leading, spacing: 16) {
-					if let transcriptStatusText {
-						TranscriptStatusView(text: transcriptStatusText)
-					}
+			ScrollViewReader { proxy in
+				ScrollView {
+					LazyVStack(alignment: .leading, spacing: 16) {
+						if let transcriptStatusText {
+							TranscriptStatusView(text: transcriptStatusText)
+						}
 
-					ForEach(transcriptWarnings, id: \.self) { warning in
-						TranscriptWarningView(text: warning)
-					}
+						ForEach(transcriptWarnings, id: \.self) { warning in
+							TranscriptWarningView(text: warning)
+						}
 
-					if displayedMessages.isEmpty {
-						emptyStateView
-					} else {
-						ForEach(displayedMessages) { displayedMessage in
-							switch displayedMessage {
-							case .confirmed(let messageInfo):
-								TranscriptMessageView(
-									messageInfo: messageInfo,
-									sessionID: session.sessionID,
-									serverURL: serverConfiguration?.serverURL
-								)
+						if displayedMessages.isEmpty {
+							emptyStateView
+						} else {
+							ForEach(displayedMessages) { displayedMessage in
+								switch displayedMessage {
+								case let .confirmed(messageInfo):
+									TranscriptMessageView(
+										messageInfo: messageInfo,
+										sessionID: session.sessionID,
+										serverURL: serverConfiguration?.serverURL
+									)
 									.id(displayedMessage.id)
-							case .pending(let pendingMessage):
-								PendingLocalMessageView(message: pendingMessage)
-									.id(displayedMessage.id)
+								case let .pending(pendingMessage):
+									PendingLocalMessageView(message: pendingMessage)
+										.id(displayedMessage.id)
+								}
 							}
 						}
 					}
+					.padding()
 				}
-				.padding()
+				.refreshable {
+					await loadMessages()
+				}
+				.defaultScrollAnchor(.bottom)
+				.onChange(of: displayedMessagesScrollSignature) {
+					scrollToBottom(proxy: proxy)
+				}
 			}
-			.refreshable {
-				await loadMessages()
-			}
-			.defaultScrollAnchor(.bottom)
-			.onChange(of: displayedMessagesScrollSignature) {
-				scrollToBottom(proxy: proxy)
-			}
-		}
 		#endif
 	}
 
@@ -355,9 +354,9 @@ struct PiSessionView: View {
 		guard let lastMessage = displayedMessages.last else { return "empty" }
 
 		switch lastMessage {
-		case .confirmed(let messageInfo):
+		case let .confirmed(messageInfo):
 			return confirmedScrollSignature(for: messageInfo)
-		case .pending(let pendingMessage):
+		case let .pending(pendingMessage):
 			return pendingScrollSignature(for: pendingMessage)
 		}
 	}
@@ -474,7 +473,7 @@ struct PiSessionView: View {
 
 	private func handleStreamEvent(_ event: PimuxSessionStreamEvent) async {
 		switch event {
-		case .snapshot(let sequence, let sessionResponse):
+		case let .snapshot(sequence, sessionResponse):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
 			let newMessages = streamMessageInfos(
@@ -494,25 +493,25 @@ struct PiSessionView: View {
 			persistActivity(sessionResponse.activity)
 			liveStreamState = .live
 			loadError = nil
-		case .sessionState(let sequence, let connected, _, _):
+		case let .sessionState(sequence, connected, _, _):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
 			liveStreamState = connected ? .live : .reconnecting
 			if !connected {
 				persistActivity(PimuxSessionActivity(active: false, attached: false))
 			}
-		case .uiState(let sequence, _):
+		case let .uiState(sequence, _):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
-		case .uiDialogState(let sequence, let state):
+		case let .uiDialogState(sequence, state):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
 			applyIncomingUIDialogState(state)
-		case .terminalOnlyUiState(let sequence, let state):
+		case let .terminalOnlyUiState(sequence, state):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
 			currentTerminalOnlyUIState = state
-		case .keepalive(let sequence, _):
+		case let .keepalive(sequence, _):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
 			if liveStreamState == .connecting {
@@ -606,9 +605,9 @@ struct PiSessionView: View {
 		guard let context = SlashCommand.draftContext(for: body) else { return false }
 
 		let commandName: String = switch context.phase {
-		case .commandName(let prefix):
+		case let .commandName(prefix):
 			prefix
-		case .arguments(let commandName, _):
+		case let .arguments(commandName, _):
 			commandName
 		}
 
@@ -667,7 +666,7 @@ struct PiSessionView: View {
 		switch command {
 		case .copy:
 			executeCopyBuiltinCommand()
-		case .name(let name):
+		case let .name(name):
 			let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
 			guard !trimmedName.isEmpty else {
 				sendError = "Usage: /name <name>"
@@ -678,7 +677,7 @@ struct PiSessionView: View {
 				try await client.setSessionName(sessionID: session.sessionID, name: trimmedName)
 				draftMessage = ""
 			}
-		case .compact(let customInstructions):
+		case let .compact(customInstructions):
 			await runBuiltinCommand(restoreDraftOnFailure: true) {
 				let client = try PimuxServerClient(baseURL: serverURL)
 				try await client.compactSession(
@@ -688,7 +687,7 @@ struct PiSessionView: View {
 				draftMessage = ""
 				markAgentBusy()
 			}
-		case .session(let argument):
+		case let .session(argument):
 			guard argument.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
 				sendError = "Usage: /session"
 				return
@@ -696,7 +695,7 @@ struct PiSessionView: View {
 			sendError = nil
 			draftMessage = ""
 			requestedMessageContext = sessionInfoRoute()
-		case .reload(let argument):
+		case let .reload(argument):
 			guard argument.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
 				sendError = "Usage: /reload"
 				return
@@ -754,11 +753,11 @@ struct PiSessionView: View {
 		}
 
 		#if canImport(UIKit) && !os(macOS)
-		UIPasteboard.general.string = text
-		sendError = nil
-		draftMessage = ""
+			UIPasteboard.general.string = text
+			sendError = nil
+			draftMessage = ""
 		#else
-		sendError = "Copy is currently only implemented for iOS."
+			sendError = "Copy is currently only implemented for iOS."
 		#endif
 	}
 
@@ -1287,9 +1286,9 @@ struct PiSessionView: View {
 		let previousDialog = currentUIDialog
 		let shouldPreserveOptimisticTextValue =
 			previousDialog?.id == state?.id
-			&& previousDialog?.isTextValueDialog == true
-			&& state?.isTextValueDialog == true
-			&& (uiDialogValueSyncTask != nil || isUIDialogActionInFlight)
+				&& previousDialog?.isTextValueDialog == true
+				&& state?.isTextValueDialog == true
+				&& (uiDialogValueSyncTask != nil || isUIDialogActionInFlight)
 
 		if shouldPreserveOptimisticTextValue, let state, let previousDialog {
 			currentUIDialog = state.settingTextValue(previousDialog.resolvedTextValue)
@@ -1469,7 +1468,7 @@ private struct TranscriptWarningView: View {
 		let db = AppDatabase.preview()
 		let previewSessionID = "test-session-1"
 		let previewAttachmentID = "img-preview"
-		let _ = PreviewAttachmentFixture.installImageAttachment(sessionID: previewSessionID, attachmentID: previewAttachmentID)
+		_ = PreviewAttachmentFixture.installImageAttachment(sessionID: previewSessionID, attachmentID: previewAttachmentID)
 		try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
 
 		try! db.dbQueue.write { dbConn in
@@ -1532,7 +1531,7 @@ private struct TranscriptWarningView: View {
 				position: 0,
 				createdAt: now,
 				blocks: [
-					(type: "text", text: "Can you help me expand this preview so it covers more transcript cases?", toolCallName: nil, mimeType: nil, attachmentID: nil)
+					(type: "text", text: "Can you help me expand this preview so it covers more transcript cases?", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1543,7 +1542,7 @@ private struct TranscriptWarningView: View {
 				createdAt: now.addingTimeInterval(30),
 				blocks: [
 					(type: "thinking", text: "Inspecting the supported roles and block kinds before updating the fixtures.\nLet me look at the Message.Role enum to see what cases exist.\nI see: user, assistant, toolResult, bashExecution, custom, branchSummary, compactionSummary, other.\nNow checking block types: text, thinking, toolCall, image, other.\nThe preview currently only has a user message and an assistant message.\nI need to add tool results, bash execution, branch summaries, compaction summaries.\nAlso need to show images and unknown/other role types.\nLet me also make sure the thinking block is long enough to test scrolling.\nI should verify each role gets the right icon and color.\nPlanning the full set of fixture messages now.\nI'll add about 12 messages covering all the cases.\nStarting with the edit now.", toolCallName: nil, mimeType: nil, attachmentID: nil),
-					(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift (offset=785, limit=140)", toolCallName: "read", mimeType: nil, attachmentID: nil)
+					(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift (offset=785, limit=140)", toolCallName: "read", mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1554,7 +1553,7 @@ private struct TranscriptWarningView: View {
 				position: 2,
 				createdAt: now.addingTimeInterval(60),
 				blocks: [
-					(type: "text", text: "Found the preview block at the bottom of `PiSessionView.swift`:\n\n```swift\nprivate var displayedMessagesScrollSignature: String {\n    ...\n}\n```\n\nIt currently renders text, thinking, tool calls, images, and fallback blocks.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+					(type: "text", text: "Found the preview block at the bottom of `PiSessionView.swift`:\n\n```swift\nprivate var displayedMessagesScrollSignature: String {\n    ...\n}\n```\n\nIt currently renders text, thinking, tool calls, images, and fallback blocks.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1564,7 +1563,7 @@ private struct TranscriptWarningView: View {
 				position: 3,
 				createdAt: now.addingTimeInterval(90),
 				blocks: [
-					(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil)
+					(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1574,7 +1573,7 @@ private struct TranscriptWarningView: View {
 				position: 4,
 				createdAt: now.addingTimeInterval(120),
 				blocks: [
-					(type: "text", text: "$ xcodebuild -scheme pimux2000 ENABLE_PREVIEWS=YES\nSwiftCompile PiSessionView.swift\n** BUILD SUCCEEDED **", toolCallName: nil, mimeType: nil, attachmentID: nil)
+					(type: "text", text: "$ xcodebuild -scheme pimux2000 ENABLE_PREVIEWS=YES\nSwiftCompile PiSessionView.swift\n** BUILD SUCCEEDED **", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1584,7 +1583,7 @@ private struct TranscriptWarningView: View {
 				position: 5,
 				createdAt: now.addingTimeInterval(150),
 				blocks: [
-					(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil)
+					(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1595,7 +1594,7 @@ private struct TranscriptWarningView: View {
 				position: 6,
 				createdAt: now.addingTimeInterval(180),
 				blocks: [
-					(type: "text", text: "Applied 1 edit to `pimux2000/Views/PiSessionView.swift`:\n\n- split the scroll signature into smaller helper functions\n- expanded preview fixtures to cover tool calls and summary roles\n- kept the image attachment placeholder in place", toolCallName: nil, mimeType: nil, attachmentID: nil)
+					(type: "text", text: "Applied 1 edit to `pimux2000/Views/PiSessionView.swift`:\n\n- split the scroll signature into smaller helper functions\n- expanded preview fixtures to cover tool calls and summary roles\n- kept the image attachment placeholder in place", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1609,7 +1608,7 @@ private struct TranscriptWarningView: View {
 					(type: "toolCall", text: "$ xcodebuild -project pimux2000.xcodeproj -scheme pimux2000 ENABLE_PREVIEWS=YES\n\ntimeout: 120s", toolCallName: "bash", mimeType: nil, attachmentID: nil),
 					(type: "toolCall", text: "pimux2000/Views/PiSessionView.swift\n\nsingle replacement", toolCallName: "edit", mimeType: nil, attachmentID: nil),
 					(type: "text", text: "Done — this preview now shows tool calls alongside realistic outputs, plus summaries, shell output, image attachments, and fallback cases.", toolCallName: nil, mimeType: nil, attachmentID: nil),
-					(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: previewAttachmentID)
+					(type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: previewAttachmentID),
 				]
 			)
 
@@ -1619,7 +1618,7 @@ private struct TranscriptWarningView: View {
 				position: 8,
 				createdAt: now.addingTimeInterval(240),
 				blocks: [
-					(type: "other", text: "Custom extension note: the live stream briefly detached, so the app fell back to a persisted snapshot.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+					(type: "other", text: "Custom extension note: the live stream briefly detached, so the app fell back to a persisted snapshot.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1629,7 +1628,7 @@ private struct TranscriptWarningView: View {
 				position: 9,
 				createdAt: now.addingTimeInterval(270),
 				blocks: [
-					(type: "text", text: "Created branch `preview-message-fixtures` from `main` and staged the updated transcript preview data.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+					(type: "text", text: "Created branch `preview-message-fixtures` from `main` and staged the updated transcript preview data.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1639,7 +1638,7 @@ private struct TranscriptWarningView: View {
 				position: 10,
 				createdAt: now.addingTimeInterval(300),
 				blocks: [
-					(type: "text", text: "Earlier setup discussion was compacted into a shorter summary so the preview still shows long-running session behavior.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+					(type: "text", text: "Earlier setup discussion was compacted into a shorter summary so the preview still shows long-running session behavior.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				]
 			)
 
@@ -1649,7 +1648,7 @@ private struct TranscriptWarningView: View {
 				position: 11,
 				createdAt: now.addingTimeInterval(330),
 				blocks: [
-					(type: "text", text: "Unknown roles render with fallback styling so future transcript events remain visible.", toolCallName: nil, mimeType: nil, attachmentID: nil)
+					(type: "text", text: "Unknown roles render with fallback styling so future transcript events remain visible.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 				]
 			)
 		}

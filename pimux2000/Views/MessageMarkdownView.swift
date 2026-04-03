@@ -105,9 +105,9 @@ struct MessageContextView: View {
 		}
 		.navigationTitle(route.title)
 		#if os(iOS)
-		.navigationBarTitleDisplayMode(.inline)
+			.navigationBarTitleDisplayMode(.inline)
 		#endif
-		.background(.background)
+			.background(.background)
 	}
 }
 
@@ -184,7 +184,8 @@ enum MessageMarkdownRenderer {
 				|| trimmed == "---"
 				|| trimmed == "***"
 				|| trimmed == "___"
-				|| trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil {
+				|| trimmed.range(of: #"^\d+\.\s"#, options: .regularExpression) != nil
+			{
 				return true
 			}
 		}
@@ -228,7 +229,8 @@ enum MessageMarkdownRenderer {
 			|| lowered.contains("\necho ")
 			|| lowered.contains("\nexport ")
 			|| lowered.contains("\nfi")
-			|| lowered.contains("\ndone") {
+			|| lowered.contains("\ndone")
+		{
 			return "bash"
 		}
 
@@ -238,20 +240,23 @@ enum MessageMarkdownRenderer {
 			|| lowered.contains("\nenum ")
 			|| lowered.contains("\nprotocol ")
 			|| lowered.contains("\nfunc ")
-			|| lowered.contains("@main") {
+			|| lowered.contains("@main")
+		{
 			return "swift"
 		}
 
 		if lowered.contains("\nconst ")
 			|| lowered.contains("\nfunction ")
 			|| lowered.contains("console.log")
-			|| lowered.contains("=>") {
+			|| lowered.contains("=>")
+		{
 			return "javascript"
 		}
 
 		if lowered.contains("\ndef ")
 			|| lowered.contains("if __name__")
-			|| lowered.contains("print(") {
+			|| lowered.contains("print(")
+		{
 			return "python"
 		}
 
@@ -259,7 +264,8 @@ enum MessageMarkdownRenderer {
 			|| lowered.contains("insert into ")
 			|| lowered.contains("create table ")
 			|| lowered.contains("update ")
-			|| lowered.contains("delete from ") {
+			|| lowered.contains("delete from ")
+		{
 			return "sql"
 		}
 
@@ -271,13 +277,13 @@ enum MessageMarkdownRenderer {
 	ScrollView {
 		VStack(alignment: .leading, spacing: 24) {
 			MessageMarkdownView(
-				text: (1...16).map { "assistant line \($0)" }.joined(separator: "\n"),
+				text: (1 ... 16).map { "assistant line \($0)" }.joined(separator: "\n"),
 				role: .assistant,
 				title: "Assistant"
 			)
 
 			MessageMarkdownView(
-				text: (1...16).map { "tool output line \($0)" }.joined(separator: "\n"),
+				text: (1 ... 16).map { "tool output line \($0)" }.joined(separator: "\n"),
 				role: .toolResult,
 				title: "Tool Result"
 			)

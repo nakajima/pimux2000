@@ -24,9 +24,9 @@ struct ServerConnectionSheet: View {
 			Form {
 				Section {
 					TextField("http://localhost:3000", text: $serverURL)
-						#if os(iOS)
+					#if os(iOS)
 						.textInputAutocapitalization(.never)
-						#endif
+					#endif
 						.autocorrectionDisabled()
 						.textContentType(.URL)
 				} footer: {
@@ -260,18 +260,18 @@ final class PimuxBonjourDiscovery: NSObject, ObservableObject {
 		servers = discoveredServersByID.values.sorted(by: Self.shouldSortBefore)
 	}
 
-	nonisolated private static func shouldSortBefore(_ lhs: DiscoveredPimuxServer, _ rhs: DiscoveredPimuxServer) -> Bool {
+	private nonisolated static func shouldSortBefore(_ lhs: DiscoveredPimuxServer, _ rhs: DiscoveredPimuxServer) -> Bool {
 		if lhs.name != rhs.name {
 			return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
 		}
 		return lhs.baseURLString.localizedCaseInsensitiveCompare(rhs.baseURLString) == .orderedAscending
 	}
 
-	nonisolated private static func serviceID(for service: NetService) -> String {
+	private nonisolated static func serviceID(for service: NetService) -> String {
 		"\(service.name)|\(service.type)|\(service.domain)"
 	}
 
-	nonisolated private static func describeError(_ errorDict: [String: NSNumber], prefix: String) -> String {
+	private nonisolated static func describeError(_ errorDict: [String: NSNumber], prefix: String) -> String {
 		let code = errorDict[NetService.errorCode]?.intValue ?? 0
 		if code == 0 {
 			return "\(prefix). If local network access is disabled, re-enable it in Settings and try again."
@@ -281,20 +281,20 @@ final class PimuxBonjourDiscovery: NSObject, ObservableObject {
 }
 
 extension PimuxBonjourDiscovery: NetServiceBrowserDelegate {
-	func netServiceBrowserWillSearch(_ browser: NetServiceBrowser) {
+	func netServiceBrowserWillSearch(_: NetServiceBrowser) {
 		isSearching = true
 	}
 
-	func netServiceBrowserDidStopSearch(_ browser: NetServiceBrowser) {
+	func netServiceBrowserDidStopSearch(_: NetServiceBrowser) {
 		isSearching = false
 	}
 
-	func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
+	func netServiceBrowser(_: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
 		isSearching = false
 		errorMessage = Self.describeError(errorDict, prefix: "Local network discovery failed")
 	}
 
-	func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+	func netServiceBrowser(_: NetServiceBrowser, didFind service: NetService, moreComing _: Bool) {
 		let serviceID = Self.serviceID(for: service)
 		resolvingServices[serviceID]?.stop()
 		service.delegate = self
@@ -302,7 +302,7 @@ extension PimuxBonjourDiscovery: NetServiceBrowserDelegate {
 		service.resolve(withTimeout: 5)
 	}
 
-	func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
+	func netServiceBrowser(_: NetServiceBrowser, didRemove service: NetService, moreComing _: Bool) {
 		let serviceID = Self.serviceID(for: service)
 		resolvingServices[serviceID]?.stop()
 		resolvingServices.removeValue(forKey: serviceID)
@@ -342,7 +342,7 @@ extension PimuxBonjourDiscovery: NetServiceDelegate {
 				name: "pimux on macbook-air:3000",
 				baseURLString: "http://macbook-air.local:3000",
 				version: "0.2.1"
-			)
+			),
 		])
 	)
 	.environment(\.appDatabase, AppDatabase.preview())

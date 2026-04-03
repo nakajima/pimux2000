@@ -7,7 +7,7 @@ struct PiSessionReadStatusTests {
 	@Test
 	func storeInitializesNewSessionsAsRead() throws {
 		let database = AppDatabase.preview()
-		let createdAt = Date(timeIntervalSince1970: 1_000)
+		let createdAt = Date(timeIntervalSince1970: 1000)
 		let lastUserMessageAt = createdAt.addingTimeInterval(60)
 		let lastAssistantMessageAt = createdAt.addingTimeInterval(120)
 		let updatedAt = createdAt.addingTimeInterval(180)
@@ -43,7 +43,7 @@ struct PiSessionReadStatusTests {
 	@Test
 	func storePreservesReadMarkerWhenNewMessagesArrive() throws {
 		let database = AppDatabase.preview()
-		let createdAt = Date(timeIntervalSince1970: 2_000)
+		let createdAt = Date(timeIntervalSince1970: 2000)
 		let firstAssistantMessageAt = createdAt.addingTimeInterval(60)
 		let secondAssistantMessageAt = createdAt.addingTimeInterval(180)
 
@@ -93,7 +93,7 @@ struct PiSessionReadStatusTests {
 	@Test
 	func storesSessionContextUsageFromServerPayload() throws {
 		let database = AppDatabase.preview()
-		let createdAt = Date(timeIntervalSince1970: 2_500)
+		let createdAt = Date(timeIntervalSince1970: 2500)
 		let remoteSession = PimuxListedSession(
 			hostLocation: "nakajima@macstudio",
 			hostConnected: true,
@@ -105,7 +105,7 @@ struct PiSessionReadStatusTests {
 			lastAssistantMessageAt: createdAt.addingTimeInterval(120),
 			cwd: "/Users/nakajima/apps/pimux2000",
 			model: "anthropic/claude-sonnet",
-			contextUsage: PimuxSessionContextUsage(usedTokens: 48_676, maxTokens: 1_000_000)
+			contextUsage: PimuxSessionContextUsage(usedTokens: 48676, maxTokens: 1_000_000)
 		)
 
 		try database.dbQueue.write { db in
@@ -116,14 +116,14 @@ struct PiSessionReadStatusTests {
 			try PiSession.fetchOne(db)
 		}
 
-		#expect(session?.contextTokensUsed == 48_676)
+		#expect(session?.contextTokensUsed == 48676)
 		#expect(session?.contextTokensMax == 1_000_000)
 	}
 
 	@Test
 	func markSessionReadAdvancesButDoesNotMoveBackward() throws {
 		let database = AppDatabase.preview()
-		let createdAt = Date(timeIntervalSince1970: 3_000)
+		let createdAt = Date(timeIntervalSince1970: 3000)
 		let firstMessageAt = createdAt.addingTimeInterval(60)
 		let latestMessageAt = createdAt.addingTimeInterval(180)
 
@@ -136,9 +136,9 @@ struct PiSessionReadStatusTests {
 			)
 			try host.insert(db)
 
-			var session = PiSession(
+			var session = try PiSession(
 				id: nil,
-				hostID: try #require(host.id),
+				hostID: #require(host.id),
 				summary: "Read status",
 				sessionID: "session-1",
 				sessionFile: nil,

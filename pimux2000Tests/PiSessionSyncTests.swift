@@ -35,7 +35,7 @@ struct PiSessionSyncTests {
 	@Test
 	func storeDeduplicatesSessionsByStableSessionID() throws {
 		let database = AppDatabase.preview()
-		let createdAt = Date(timeIntervalSince1970: 10_000)
+		let createdAt = Date(timeIntervalSince1970: 10000)
 		let staleSession = PimuxListedSession(
 			hostLocation: "tester@host",
 			hostConnected: false,
@@ -68,7 +68,7 @@ struct PiSessionSyncTests {
 		}
 
 		let (sessions, hosts) = try database.dbQueue.read { db in
-			(try PiSession.fetchAll(db), try Host.fetchAll(db))
+			try (PiSession.fetchAll(db), Host.fetchAll(db))
 		}
 
 		#expect(sessions.count == 1)

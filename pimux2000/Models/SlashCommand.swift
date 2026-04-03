@@ -59,7 +59,7 @@ struct SlashCommand: Identifiable, Equatable, Sendable {
 						value: "resummarize",
 						label: "resummarize",
 						description: "Regenerate the session summary"
-					)
+					),
 				]
 			)
 		default:
@@ -120,7 +120,7 @@ struct SlashCommand: Identifiable, Equatable, Sendable {
 		guard let builtinArgumentRule else { return [] }
 
 		switch builtinArgumentRule {
-		case .requiredExactValues(_, let completions):
+		case let .requiredExactValues(_, completions):
 			let trimmed = argumentPrefix.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 			if trimmed.isEmpty { return completions }
 			return completions.filter { completion in
@@ -137,13 +137,13 @@ struct SlashCommand: Identifiable, Equatable, Sendable {
 		let trimmedArgument = argumentText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
 		switch builtinArgumentRule {
-		case .none(let usage):
+		case let .none(usage):
 			return trimmedArgument.isEmpty ? nil : "Usage: \(usage)"
-		case .requiredText(let usage):
+		case let .requiredText(usage):
 			return trimmedArgument.isEmpty ? "Usage: \(usage)" : nil
 		case .optionalText:
 			return nil
-		case .requiredExactValues(let usage, let completions):
+		case let .requiredExactValues(usage, completions):
 			guard !trimmedArgument.isEmpty else { return "Usage: \(usage)" }
 			return completions.contains(where: { $0.value == trimmedArgument }) ? nil : "Usage: \(usage)"
 		}
@@ -155,10 +155,10 @@ struct SlashCommand: Identifiable, Equatable, Sendable {
 		}
 
 		switch context.phase {
-		case .commandName(let prefix):
+		case let .commandName(prefix):
 			guard let command = command(named: prefix, from: commands) else { return nil }
 			return command.validationMessage(argumentText: nil)
-		case .arguments(let commandName, let argumentText):
+		case let .arguments(commandName, argumentText):
 			guard let command = command(named: commandName, from: commands) else { return nil }
 			return command.validationMessage(argumentText: argumentText)
 		}

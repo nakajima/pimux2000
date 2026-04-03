@@ -25,7 +25,7 @@ struct BranchSummaryMessageView: View {
 		messageInfo: MessageInfo(
 			message: Message(piSessionID: 1, role: .branchSummary, toolName: nil, position: 0, createdAt: Date()),
 			contentBlocks: [
-				MessageContentBlock(messageID: 1, type: "text", text: "Created branch `preview-message-fixtures` from `main` and staged the updated transcript preview data.", toolCallName: nil, position: 0)
+				MessageContentBlock(messageID: 1, type: "text", text: "Created branch `preview-message-fixtures` from `main` and staged the updated transcript preview data.", toolCallName: nil, position: 0),
 			]
 		)
 	)

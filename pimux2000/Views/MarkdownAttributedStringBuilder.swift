@@ -35,7 +35,6 @@ private final class AttributedStringCacheKey: NSObject {
 }
 
 enum MarkdownAttributedStringBuilder {
-
 	private static let cache: NSCache<AttributedStringCacheKey, NSAttributedString> = {
 		let c = NSCache<AttributedStringCacheKey, NSAttributedString>()
 		c.countLimit = 256
@@ -149,7 +148,7 @@ enum MarkdownAttributedStringBuilder {
 
 			var font: UIFont?
 			if traits != currentFont.fontDescriptor.symbolicTraits,
-				let descriptor = currentFont.fontDescriptor.withSymbolicTraits(traits)
+			   let descriptor = currentFont.fontDescriptor.withSymbolicTraits(traits)
 			{
 				font = UIFont(descriptor: descriptor, size: currentFont.pointSize)
 			}

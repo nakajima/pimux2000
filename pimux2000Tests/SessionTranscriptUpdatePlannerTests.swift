@@ -1,5 +1,5 @@
-@testable import pimux2000
 import Foundation
+@testable import pimux2000
 import Testing
 
 struct TranscriptMessageTests {

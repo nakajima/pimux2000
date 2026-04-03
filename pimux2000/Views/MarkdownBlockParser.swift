@@ -16,7 +16,6 @@ enum MarkdownBlock: Equatable {
 }
 
 enum MarkdownBlockParser {
-
 	static func parse(_ markdown: String) -> [MarkdownBlock] {
 		let lines = markdown.components(separatedBy: .newlines)
 		var blocks: [MarkdownBlock] = []
@@ -220,7 +219,7 @@ enum MarkdownBlockParser {
 
 	private static func parseOrderedListItem(_ line: String) -> (ordinal: Int, text: String)? {
 		guard let dotIndex = line.firstIndex(of: ".") else { return nil }
-		let prefix = line[line.startIndex..<dotIndex]
+		let prefix = line[line.startIndex ..< dotIndex]
 		guard let ordinal = Int(prefix) else { return nil }
 		let afterDot = line.index(after: dotIndex)
 		guard afterDot < line.endIndex, line[afterDot] == " " else { return nil }

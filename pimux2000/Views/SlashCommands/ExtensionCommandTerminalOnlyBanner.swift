@@ -35,7 +35,7 @@ struct ExtensionCommandTerminalOnlyBanner: View {
 				Button(action: onInterrupt) {
 					Label("Interrupt", systemImage: "stop.circle")
 				}
-					.buttonStyle(.borderedProminent)
+				.buttonStyle(.borderedProminent)
 			}
 		}
 		.padding(12)

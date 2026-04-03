@@ -59,7 +59,7 @@ enum OutgoingImageProcessor {
 
 	private static func detectFormat(_ data: Data) -> SourceFormat {
 		guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-			let utType = CGImageSourceGetType(source) as? String
+		      let utType = CGImageSourceGetType(source) as? String
 		else {
 			return .other
 		}
@@ -148,8 +148,8 @@ enum OutgoingImageProcessor {
 		let halfWidth = image.width / 2
 		let halfHeight = image.height / 2
 		guard halfWidth > 0, halfHeight > 0,
-			let smaller = resizedCGImage(image, width: halfWidth, height: halfHeight),
-			let jpegData = UIImage(cgImage: smaller).jpegData(compressionQuality: minimumJPEGQuality)
+		      let smaller = resizedCGImage(image, width: halfWidth, height: halfHeight),
+		      let jpegData = UIImage(cgImage: smaller).jpegData(compressionQuality: minimumJPEGQuality)
 		else {
 			throw ProcessingError.tooLarge
 		}

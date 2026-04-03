@@ -6,7 +6,7 @@ struct SessionInfo: Decodable, FetchableRecord, Identifiable, Equatable, Hashabl
 	var session: PiSession
 	var host: Host
 	var id: Int64? { session.id }
-	
+
 	var description: String {
 		if let cwd = session.cwd {
 			let host = host.location.split(separator: "@").last ?? ""
@@ -71,7 +71,8 @@ struct ContentView: View {
 			}
 
 			if let selectedSessionID,
-				sessions.contains(where: { $0.session.sessionID == selectedSessionID }) {
+			   sessions.contains(where: { $0.session.sessionID == selectedSessionID })
+			{
 				return
 			}
 
@@ -115,10 +116,10 @@ struct ContentView: View {
 	@ViewBuilder
 	private func destination(for route: Route) -> some View {
 		switch route {
-		case .piSession(let session):
+		case let .piSession(session):
 			PiSessionView(session: session, columnVisibility: $columnVisibility)
 				.id(session.sessionID)
-		case .messageContext(let context):
+		case let .messageContext(context):
 			MessageContextView(route: context)
 		}
 	}

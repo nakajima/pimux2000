@@ -16,7 +16,7 @@ struct AppDatabase {
 		var migrator = DatabaseMigrator()
 
 		#if DEBUG
-		migrator.eraseDatabaseOnSchemaChange = true
+			migrator.eraseDatabaseOnSchemaChange = true
 		#endif
 
 		migrator.registerMigration("createHosts") { db in
@@ -223,9 +223,9 @@ struct AppDatabase {
 		try? AttachmentStore.removeAll()
 	}
 
-	nonisolated private static func columnNames(in table: String, db: Database) throws -> Set<String> {
-		Set(
-			try Row.fetchAll(db, sql: "PRAGMA table_info(\(table))")
+	private nonisolated static func columnNames(in table: String, db: Database) throws -> Set<String> {
+		try Set(
+			Row.fetchAll(db, sql: "PRAGMA table_info(\(table))")
 				.compactMap { row in row["name"] as String? }
 		)
 	}

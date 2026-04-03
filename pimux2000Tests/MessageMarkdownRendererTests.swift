@@ -48,14 +48,14 @@ struct MessageMarkdownRendererTests {
 
 	@Test
 	func collapsesPreviewForLongToolResults() {
-		let text = (1...11).map { "line \($0)" }.joined(separator: "\n")
+		let text = (1 ... 11).map { "line \($0)" }.joined(separator: "\n")
 
 		#expect(MessageMarkdownRenderer.shouldCollapsePreview(for: text, role: .toolResult))
 	}
 
 	@Test
 	func keepsUserMessagesExpandedEvenWhenLong() {
-		let text = (1...30).map { "line \($0)" }.joined(separator: "\n")
+		let text = (1 ... 30).map { "line \($0)" }.joined(separator: "\n")
 
 		#expect(!MessageMarkdownRenderer.shouldCollapsePreview(for: text, role: .user))
 		#expect(!MessageMarkdownRenderer.shouldCollapsePreview(for: text, role: .assistant))
@@ -68,7 +68,7 @@ struct MessageMarkdownRendererTests {
 
 	@Test
 	func previewTextTrimsLongMessagesBeforeRenderingListPreview() {
-		let text = (1...20).map { "line \($0)" }.joined(separator: "\n")
+		let text = (1 ... 20).map { "line \($0)" }.joined(separator: "\n")
 
 		#expect(MessageMarkdownRenderer.previewText(for: text).count <= 900)
 	}

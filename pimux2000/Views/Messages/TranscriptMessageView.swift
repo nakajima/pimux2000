@@ -21,7 +21,7 @@ struct TranscriptMessageView: View {
 			BranchSummaryMessageView(messageInfo: messageInfo)
 		case .compactionSummary:
 			CompactionSummaryMessageView(messageInfo: messageInfo)
-		case .other(let value):
+		case let .other(value):
 			OtherMessageView(messageInfo: messageInfo, roleValue: value)
 		}
 	}
@@ -34,7 +34,7 @@ struct TranscriptMessageView: View {
 				messageInfo: MessageInfo(
 					message: Message(piSessionID: 1, role: .user, toolName: nil, position: 0, createdAt: Date()),
 					contentBlocks: [
-						MessageContentBlock(messageID: 1, type: "text", text: "Hello, can you help me?", toolCallName: nil, position: 0)
+						MessageContentBlock(messageID: 1, type: "text", text: "Hello, can you help me?", toolCallName: nil, position: 0),
 					]
 				),
 				sessionID: "preview",
@@ -44,7 +44,7 @@ struct TranscriptMessageView: View {
 				messageInfo: MessageInfo(
 					message: Message(piSessionID: 1, role: .assistant, toolName: nil, position: 1, createdAt: Date()),
 					contentBlocks: [
-						MessageContentBlock(messageID: 2, type: "text", text: "Of course! What do you need help with?", toolCallName: nil, position: 0)
+						MessageContentBlock(messageID: 2, type: "text", text: "Of course! What do you need help with?", toolCallName: nil, position: 0),
 					]
 				),
 				sessionID: "preview",
@@ -54,7 +54,7 @@ struct TranscriptMessageView: View {
 				messageInfo: MessageInfo(
 					message: Message(piSessionID: 1, role: .toolResult, toolName: "read", position: 2, createdAt: Date()),
 					contentBlocks: [
-						MessageContentBlock(messageID: 3, type: "text", text: "File contents returned successfully.", toolCallName: nil, position: 0)
+						MessageContentBlock(messageID: 3, type: "text", text: "File contents returned successfully.", toolCallName: nil, position: 0),
 					]
 				),
 				sessionID: "preview",
@@ -64,7 +64,7 @@ struct TranscriptMessageView: View {
 				messageInfo: MessageInfo(
 					message: Message(piSessionID: 1, role: .bashExecution, toolName: nil, position: 3, createdAt: Date()),
 					contentBlocks: [
-						MessageContentBlock(messageID: 4, type: "text", text: "$ echo hello\nhello", toolCallName: nil, position: 0)
+						MessageContentBlock(messageID: 4, type: "text", text: "$ echo hello\nhello", toolCallName: nil, position: 0),
 					]
 				),
 				sessionID: "preview",

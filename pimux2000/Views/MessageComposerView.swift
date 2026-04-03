@@ -75,8 +75,8 @@ struct MessageComposerView: View {
 					} icon: {
 						Image(systemName: "exclamationmark.triangle.fill")
 					}
-						.font(.caption)
-						.foregroundStyle(.red)
+					.font(.caption)
+					.foregroundStyle(.red)
 				}
 
 				if let slashValidationMessage, !slashValidationMessage.isEmpty {
@@ -85,8 +85,8 @@ struct MessageComposerView: View {
 					} icon: {
 						Image(systemName: "exclamationmark.circle.fill")
 					}
-						.font(.caption)
-						.foregroundStyle(.orange)
+					.font(.caption)
+					.foregroundStyle(.orange)
 				}
 
 				if !attachments.isEmpty {
@@ -120,9 +120,9 @@ struct MessageComposerView: View {
 					TextField(placeholder, text: $text, axis: .vertical)
 						.lineLimit(1 ... 6)
 						.autocorrectionDisabled()
-						#if os(iOS)
+					#if os(iOS)
 						.textInputAutocapitalization(.never)
-						#endif
+					#endif
 						.padding(.horizontal, 12)
 						.padding(.vertical, 10)
 						.background(.background, in: RoundedRectangle(cornerRadius: 12))
@@ -272,10 +272,10 @@ struct MessageComposerView: View {
 		}
 
 		switch context.phase {
-		case .commandName(let prefix):
+		case let .commandName(prefix):
 			let query = "/\(prefix)"
 			slashMenuItems = SlashCommand.matching(query: query, from: allCommands).map(SlashCompletionMenuItem.init)
-		case .arguments(let commandName, let argumentText):
+		case let .arguments(commandName, argumentText):
 			guard let command = SlashCommand.command(named: commandName, from: allCommands) else {
 				slashMenuItems = []
 				return
@@ -314,9 +314,9 @@ struct MessageComposerView: View {
 
 	private func applySlashCompletion(_ item: SlashCompletionMenuItem) {
 		switch item.kind {
-		case .command(let command):
+		case let .command(command):
 			text = command.displayName + " "
-		case .argument(let commandName, let completion):
+		case let .argument(commandName, completion):
 			text = "/\(commandName) \(completion.value) "
 		}
 	}
@@ -355,23 +355,23 @@ private struct SlashCompletionMenuItem: Identifiable, Equatable {
 
 	var id: String {
 		switch kind {
-		case .command(let command):
+		case let .command(command):
 			return "command:\(command.id)"
-		case .argument(let commandName, let completion):
+		case let .argument(commandName, completion):
 			return "argument:\(commandName):\(completion.id)"
 		}
 	}
 
 	init(_ command: SlashCommand) {
-		kind = .command(command)
-		title = command.displayName
-		subtitle = command.description
+		self.kind = .command(command)
+		self.title = command.displayName
+		self.subtitle = command.description
 	}
 
 	init(commandName: String, completion: SlashCommandArgumentCompletion) {
-		kind = .argument(commandName: commandName, completion: completion)
-		title = completion.label
-		subtitle = completion.description ?? ""
+		self.kind = .argument(commandName: commandName, completion: completion)
+		self.title = completion.label
+		self.subtitle = completion.description ?? ""
 	}
 }
 
@@ -548,7 +548,7 @@ private struct MessageComposerPreviewHost: View {
 	MessageComposerPreviewHost(
 		text: "/pirot ",
 		customCommands: [
-			PimuxSessionCommand(name: "pirot", description: "Pirot repo commands", source: "extension")
+			PimuxSessionCommand(name: "pirot", description: "Pirot repo commands", source: "extension"),
 		],
 		loadArgumentCompletions: { commandName, _ in
 			guard commandName == "pirot" else { return [] }

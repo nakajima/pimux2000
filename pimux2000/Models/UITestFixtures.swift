@@ -38,8 +38,8 @@ enum UITestFixtures {
 				createdAt: now.addingTimeInterval(-60)
 			)
 			try shellUserMessage.insert(db)
-			var shellUserBlock = MessageContentBlock(
-				messageID: try db.require(shellUserMessage.id),
+			var shellUserBlock = try MessageContentBlock(
+				messageID: db.require(shellUserMessage.id),
 				type: "text",
 				text: "Run the health check against the fixture shell.",
 				toolCallName: nil,
@@ -55,8 +55,8 @@ enum UITestFixtures {
 				createdAt: now.addingTimeInterval(-30)
 			)
 			try shellAssistantMessage.insert(db)
-			var shellAssistantBlock = MessageContentBlock(
-				messageID: try db.require(shellAssistantMessage.id),
+			var shellAssistantBlock = try MessageContentBlock(
+				messageID: db.require(shellAssistantMessage.id),
 				type: "text",
 				text: "Everything looks healthy from the fixture transcript.",
 				toolCallName: nil,

@@ -25,7 +25,7 @@ struct BashExecutionMessageView: View {
 		messageInfo: MessageInfo(
 			message: Message(piSessionID: 1, role: .bashExecution, toolName: nil, position: 0, createdAt: Date()),
 			contentBlocks: [
-				MessageContentBlock(messageID: 1, type: "text", text: "$ echo hello\nhello", toolCallName: nil, position: 0)
+				MessageContentBlock(messageID: 1, type: "text", text: "$ echo hello\nhello", toolCallName: nil, position: 0),
 			]
 		)
 	)

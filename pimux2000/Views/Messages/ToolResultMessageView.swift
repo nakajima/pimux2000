@@ -21,7 +21,6 @@ struct ToolResultMessageView: View {
 						}
 					}
 				}
-				
 			}
 		}
 	}
@@ -39,7 +38,7 @@ struct ToolResultMessageView: View {
 		messageInfo: MessageInfo(
 			message: Message(piSessionID: 1, role: .toolResult, toolName: "read", position: 0, createdAt: Date()),
 			contentBlocks: [
-				MessageContentBlock(messageID: 1, type: "text", text: "File contents returned successfully.", toolCallName: nil, position: 0)
+				MessageContentBlock(messageID: 1, type: "text", text: "File contents returned successfully.", toolCallName: nil, position: 0),
 			]
 		)
 	)

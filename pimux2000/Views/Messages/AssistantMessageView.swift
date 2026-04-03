@@ -81,8 +81,8 @@ struct AssistantMessageView: View {
 
 	private func attachmentURL(for block: MessageContentBlock) -> URL? {
 		guard block.type == "image",
-			let attachmentID = block.attachmentID,
-			!attachmentID.isEmpty
+		      let attachmentID = block.attachmentID,
+		      !attachmentID.isEmpty
 		else {
 			return nil
 		}
@@ -227,7 +227,7 @@ struct ToolCallDetailsView: View {
 #Preview {
 	let sessionID = "preview"
 	let attachmentID = "preview-img"
-	let _ = PreviewAttachmentFixture.installImageAttachment(sessionID: sessionID, attachmentID: attachmentID)
+	_ = PreviewAttachmentFixture.installImageAttachment(sessionID: sessionID, attachmentID: attachmentID)
 
 	NavigationStack {
 		AssistantMessageView(

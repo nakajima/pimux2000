@@ -232,10 +232,10 @@ enum PimuxSessionBuiltinCommandRequest: Encodable, Equatable, Sendable {
 	func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		switch self {
-		case .setSessionName(let name):
+		case let .setSessionName(name):
 			try container.encode("setSessionName", forKey: .type)
 			try container.encode(name, forKey: .name)
-		case .compact(let customInstructions):
+		case let .compact(customInstructions):
 			try container.encode("compact", forKey: .type)
 			try container.encodeIfPresent(customInstructions, forKey: .customInstructions)
 		case .reload:
@@ -244,7 +244,7 @@ enum PimuxSessionBuiltinCommandRequest: Encodable, Equatable, Sendable {
 			try container.encode("newSession", forKey: .type)
 		case .getForkMessages:
 			try container.encode("getForkMessages", forKey: .type)
-		case .fork(let entryID):
+		case let .fork(entryID):
 			try container.encode("fork", forKey: .type)
 			try container.encode(entryID, forKey: .entryID)
 		}
@@ -380,13 +380,13 @@ enum PimuxSessionUIDialogAction: Encodable, Equatable, Sendable {
 	func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		switch self {
-		case .move(let direction):
+		case let .move(direction):
 			try container.encode("move", forKey: .type)
 			try container.encode(direction, forKey: .direction)
-		case .selectIndex(let index):
+		case let .selectIndex(index):
 			try container.encode("selectIndex", forKey: .type)
 			try container.encode(index, forKey: .index)
-		case .setValue(let value):
+		case let .setValue(value):
 			try container.encode("setValue", forKey: .type)
 			try container.encode(value, forKey: .value)
 		case .submit:
@@ -439,36 +439,36 @@ enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 
 		switch type {
 		case "snapshot":
-			self = .snapshot(
+			self = try .snapshot(
 				sequence: sequence,
-				session: try container.decode(PimuxSessionMessagesResponse.self, forKey: .session)
+				session: container.decode(PimuxSessionMessagesResponse.self, forKey: .session)
 			)
 		case "sessionState":
-			self = .sessionState(
+			self = try .sessionState(
 				sequence: sequence,
-				connected: try container.decode(Bool.self, forKey: .connected),
-				missing: try container.decode(Bool.self, forKey: .missing),
-				lastSeenAt: try container.decodeIfPresent(Date.self, forKey: .lastSeenAt)
+				connected: container.decode(Bool.self, forKey: .connected),
+				missing: container.decode(Bool.self, forKey: .missing),
+				lastSeenAt: container.decodeIfPresent(Date.self, forKey: .lastSeenAt)
 			)
 		case "uiState":
-			self = .uiState(
+			self = try .uiState(
 				sequence: sequence,
-				state: try container.decode(PimuxSessionUIState.self, forKey: .state)
+				state: container.decode(PimuxSessionUIState.self, forKey: .state)
 			)
 		case "uiDialogState":
-			self = .uiDialogState(
+			self = try .uiDialogState(
 				sequence: sequence,
-				state: try container.decodeIfPresent(PimuxSessionUIDialogState.self, forKey: .state)
+				state: container.decodeIfPresent(PimuxSessionUIDialogState.self, forKey: .state)
 			)
 		case "terminalOnlyUiState":
-			self = .terminalOnlyUiState(
+			self = try .terminalOnlyUiState(
 				sequence: sequence,
-				state: try container.decodeIfPresent(PimuxSessionTerminalOnlyUIState.self, forKey: .state)
+				state: container.decodeIfPresent(PimuxSessionTerminalOnlyUIState.self, forKey: .state)
 			)
 		case "keepalive":
-			self = .keepalive(
+			self = try .keepalive(
 				sequence: sequence,
-				timestamp: try container.decode(Date.self, forKey: .timestamp)
+				timestamp: container.decode(Date.self, forKey: .timestamp)
 			)
 		default:
 			throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "Unknown stream event type: \(type)")
@@ -493,7 +493,6 @@ private struct PimuxSendMessageRequest: Encodable {
 	let images: [PimuxInputImage]
 }
 
-
 struct PimuxServerClient {
 	private let baseURL: URL
 	private let session: URLSession
@@ -513,7 +512,6 @@ struct PimuxServerClient {
 	func listHosts() async throws -> [PimuxHostSessions] {
 		try await requestJSON([PimuxHostSessions].self, path: "/hosts")
 	}
-
 
 	func listSessions(count: Int? = nil, beforeID: String? = nil) async throws -> [PimuxListedSession] {
 		var queryItems: [URLQueryItem] = []
@@ -564,7 +562,7 @@ struct PimuxServerClient {
 			throw PimuxServerError.invalidResponse("Invalid HTTP response from the server.")
 		}
 
-		guard (200..<300).contains(httpResponse.statusCode) else {
+		guard (200 ..< 300).contains(httpResponse.statusCode) else {
 			let data = try await collectData(from: bytes)
 			throw PimuxServerError.serverError(
 				Self.errorMessage(from: data, statusCode: httpResponse.statusCode),
@@ -766,7 +764,7 @@ struct PimuxServerClient {
 	}
 
 	private nonisolated func requestJSON<Response: Decodable>(
-		_ type: Response.Type,
+		_: Response.Type,
 		path: String,
 		queryItems: [URLQueryItem] = [],
 		method: String = "GET",
@@ -816,7 +814,7 @@ struct PimuxServerClient {
 			throw PimuxServerError.invalidResponse("Invalid HTTP response from the server.")
 		}
 
-		guard (200..<300).contains(httpResponse.statusCode) else {
+		guard (200 ..< 300).contains(httpResponse.statusCode) else {
 			throw PimuxServerError.serverError(
 				Self.errorMessage(from: data, statusCode: httpResponse.statusCode),
 				statusCode: httpResponse.statusCode
@@ -863,13 +861,13 @@ struct PimuxServerClient {
 	}
 
 	private nonisolated static func decodeJSON<Response: Decodable>(
-		_ type: Response.Type,
+		_: Response.Type,
 		from data: Data
 	) async throws -> Response {
 		try await withCheckedThrowingContinuation { continuation in
 			DispatchQueue.global(qos: .userInitiated).async {
 				do {
-					continuation.resume(returning: try Self.decoder.decode(Response.self, from: data))
+					try continuation.resume(returning: Self.decoder.decode(Response.self, from: data))
 				} catch {
 					continuation.resume(throwing: error)
 				}
@@ -906,7 +904,8 @@ struct PimuxServerClient {
 		}
 
 		if let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-			!text.isEmpty {
+		   !text.isEmpty
+		{
 			return text
 		}
 
@@ -933,13 +932,13 @@ enum PimuxServerError: LocalizedError {
 
 	var errorDescription: String? {
 		switch self {
-		case .invalidServerURL(let message), .invalidResponse(let message), .serverError(let message, _):
+		case let .invalidServerURL(message), let .invalidResponse(message), let .serverError(message, _):
 			message
 		}
 	}
 
 	var isNotFound: Bool {
-		if case .serverError(_, let statusCode) = self {
+		if case let .serverError(_, statusCode) = self {
 			return statusCode == 404
 		}
 		return false

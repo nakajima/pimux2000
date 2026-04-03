@@ -27,7 +27,7 @@ struct UserMessageView: View {
 		messageInfo: MessageInfo(
 			message: Message(piSessionID: 1, role: .user, toolName: nil, position: 0, createdAt: Date()),
 			contentBlocks: [
-				MessageContentBlock(messageID: 1, type: "text", text: "Hello, can you help me with this code?", toolCallName: nil, position: 0)
+				MessageContentBlock(messageID: 1, type: "text", text: "Hello, can you help me with this code?", toolCallName: nil, position: 0),
 			]
 		)
 	)

@@ -28,7 +28,7 @@ struct OtherMessageView: View {
 		messageInfo: MessageInfo(
 			message: Message(piSessionID: 1, role: .other("systemNote"), toolName: nil, position: 0, createdAt: Date()),
 			contentBlocks: [
-				MessageContentBlock(messageID: 1, type: "text", text: "Unknown roles render with fallback styling.", toolCallName: nil, position: 0)
+				MessageContentBlock(messageID: 1, type: "text", text: "Unknown roles render with fallback styling.", toolCallName: nil, position: 0),
 			]
 		),
 		roleValue: "systemNote"

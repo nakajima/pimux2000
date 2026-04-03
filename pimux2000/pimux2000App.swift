@@ -12,7 +12,7 @@ struct pimux2000App: App {
 		let processInfo = ProcessInfo.processInfo
 
 		if Self.isRunningForPreviews {
-			appDatabase = AppDatabase.preview()
+			self.appDatabase = AppDatabase.preview()
 			return
 		}
 
@@ -28,7 +28,7 @@ struct pimux2000App: App {
 			withIntermediateDirectories: true
 		)
 
-		appDatabase = try! AppDatabase(
+		self.appDatabase = try! AppDatabase(
 			dbQueue: DatabaseQueue(path: databaseURL.path())
 		)
 

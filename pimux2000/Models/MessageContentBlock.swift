@@ -2,7 +2,7 @@ import Foundation
 import GRDB
 
 struct MessageContentBlock: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable, Sendable {
-	static nonisolated let databaseTableName = "messageContentBlocks"
+	nonisolated static let databaseTableName = "messageContentBlocks"
 
 	var id: Int64?
 	var messageID: Int64

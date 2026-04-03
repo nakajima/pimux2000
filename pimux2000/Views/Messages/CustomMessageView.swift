@@ -25,7 +25,7 @@ struct CustomMessageView: View {
 		messageInfo: MessageInfo(
 			message: Message(piSessionID: 1, role: .custom, toolName: nil, position: 0, createdAt: Date()),
 			contentBlocks: [
-				MessageContentBlock(messageID: 1, type: "other", text: "Custom extension note: the live stream briefly detached.", toolCallName: nil, position: 0)
+				MessageContentBlock(messageID: 1, type: "other", text: "Custom extension note: the live stream briefly detached.", toolCallName: nil, position: 0),
 			]
 		)
 	)

@@ -50,9 +50,9 @@ struct AppDatabaseTests {
 			var host = Host(id: nil, location: "nakajima@arch", createdAt: Date(), updatedAt: Date())
 			try host.insert(db)
 
-			var session = PiSession(
+			var session = try PiSession(
 				id: nil,
-				hostID: try #require(host.id),
+				hostID: #require(host.id),
 				summary: "Old session",
 				sessionID: "session-1",
 				sessionFile: nil,
@@ -65,22 +65,22 @@ struct AppDatabaseTests {
 			)
 			try session.insert(db)
 
-			var message = Message(piSessionID: try #require(session.id), role: .assistant, toolName: nil, position: 0, createdAt: Date())
+			var message = try Message(piSessionID: #require(session.id), role: .assistant, toolName: nil, position: 0, createdAt: Date())
 			try message.insert(db)
 
-			var block = MessageContentBlock(messageID: try #require(message.id), type: "text", text: "hello", toolCallName: nil, position: 0)
+			var block = try MessageContentBlock(messageID: #require(message.id), type: "text", text: "hello", toolCallName: nil, position: 0)
 			try block.insert(db)
 		}
 
 		try database.saveServerConfiguration(serverURL: "http://localhost:4000")
 
 		let counts = try await database.dbQueue.read { db in
-			(
-				try Host.fetchCount(db),
-				try PiSession.fetchCount(db),
-				try Message.fetchCount(db),
-				try MessageContentBlock.fetchCount(db),
-				try ServerConfiguration.fetchOne(db)
+			try (
+				Host.fetchCount(db),
+				PiSession.fetchCount(db),
+				Message.fetchCount(db),
+				MessageContentBlock.fetchCount(db),
+				ServerConfiguration.fetchOne(db)
 			)
 		}
 

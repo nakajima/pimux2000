@@ -2,8 +2,8 @@ import Foundation
 import GRDB
 
 struct Message: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable, Sendable {
-	static nonisolated let databaseTableName = "messages"
-	static nonisolated let contentBlocks = hasMany(MessageContentBlock.self)
+	nonisolated static let databaseTableName = "messages"
+	nonisolated static let contentBlocks = hasMany(MessageContentBlock.self)
 
 	var id: Int64?
 	var piSessionID: Int64
@@ -63,7 +63,7 @@ extension Message {
 			case .custom: "custom"
 			case .branchSummary: "branchSummary"
 			case .compactionSummary: "compactionSummary"
-			case .other(let value): value
+			case let .other(value): value
 			}
 		}
 	}
@@ -84,7 +84,7 @@ extension Message.Role: nonisolated Hashable {
 extension Message.Role: Codable {
 	init(from decoder: Decoder) throws {
 		let container = try decoder.singleValueContainer()
-		self.init(try container.decode(String.self))
+		try self.init(container.decode(String.self))
 	}
 
 	func encode(to encoder: Encoder) throws {

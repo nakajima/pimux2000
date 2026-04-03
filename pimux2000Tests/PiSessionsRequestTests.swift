@@ -7,7 +7,7 @@ struct PiSessionsRequestTests {
 	@Test
 	func fetchOrdersByLastUserMessageWhileKeepingActiveSessionsFirst() throws {
 		let database = AppDatabase.preview()
-		let base = Date(timeIntervalSince1970: 10_000)
+		let base = Date(timeIntervalSince1970: 10000)
 
 		try database.dbQueue.write { db in
 			var host = Host(
@@ -18,9 +18,9 @@ struct PiSessionsRequestTests {
 			)
 			try host.insert(db)
 
-			var inactiveNewestUser = PiSession(
+			var inactiveNewestUser = try PiSession(
 				id: nil,
-				hostID: try #require(host.id),
+				hostID: #require(host.id),
 				summary: "Inactive newest user",
 				sessionID: "inactive-newest-user",
 				sessionFile: nil,
@@ -30,14 +30,14 @@ struct PiSessionsRequestTests {
 				lastMessageAt: base.addingTimeInterval(400),
 				lastMessageRole: "assistant",
 				isCliActive: false,
-				startedAt: base.addingTimeInterval(-3_600),
+				startedAt: base.addingTimeInterval(-3600),
 				lastSeenAt: base.addingTimeInterval(400)
 			)
 			try inactiveNewestUser.insert(db)
 
-			var activeOlderUserWithNewerAgentReply = PiSession(
+			var activeOlderUserWithNewerAgentReply = try PiSession(
 				id: nil,
-				hostID: try #require(host.id),
+				hostID: #require(host.id),
 				summary: "Active older user, newer agent reply",
 				sessionID: "active-older-user",
 				sessionFile: nil,
@@ -47,14 +47,14 @@ struct PiSessionsRequestTests {
 				lastMessageAt: base.addingTimeInterval(500),
 				lastMessageRole: "assistant",
 				isCliActive: true,
-				startedAt: base.addingTimeInterval(-1_800),
+				startedAt: base.addingTimeInterval(-1800),
 				lastSeenAt: base.addingTimeInterval(500)
 			)
 			try activeOlderUserWithNewerAgentReply.insert(db)
 
-			var activeNewerUser = PiSession(
+			var activeNewerUser = try PiSession(
 				id: nil,
-				hostID: try #require(host.id),
+				hostID: #require(host.id),
 				summary: "Active newer user",
 				sessionID: "active-newer-user",
 				sessionFile: nil,

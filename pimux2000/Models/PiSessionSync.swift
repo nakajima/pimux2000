@@ -157,7 +157,7 @@ struct PiSessionSync {
 		}
 	}
 
-	nonisolated private static func canonicalRemoteSessions(from remoteSessions: [PimuxListedSession]) -> [PimuxListedSession] {
+	private nonisolated static func canonicalRemoteSessions(from remoteSessions: [PimuxListedSession]) -> [PimuxListedSession] {
 		var sessionsByID: [String: PimuxListedSession] = [:]
 
 		for remoteSession in remoteSessions {
@@ -174,7 +174,7 @@ struct PiSessionSync {
 		return sessionsByID.values.sorted { $0.id < $1.id }
 	}
 
-	nonisolated private static func shouldPrefer(_ candidate: PimuxListedSession, over existing: PimuxListedSession) -> Bool {
+	private nonisolated static func shouldPrefer(_ candidate: PimuxListedSession, over existing: PimuxListedSession) -> Bool {
 		if candidate.hostConnected != existing.hostConnected {
 			return candidate.hostConnected && !existing.hostConnected
 		}
@@ -197,7 +197,7 @@ struct PiSessionSync {
 	nonisolated static func storeMessages(_ remoteMessages: [PimuxTranscriptMessage], piSessionID: Int64, in db: Database) throws {
 		let incomingPayloads = messagePayloads(from: remoteMessages)
 
-		if !incomingPayloads.isEmpty && incomingPayloads.allSatisfy({ $0.serverMessageID != nil }) {
+		if !incomingPayloads.isEmpty, incomingPayloads.allSatisfy({ $0.serverMessageID != nil }) {
 			try storeMessagesIncrementally(incomingPayloads, piSessionID: piSessionID, in: db)
 		} else {
 			let existingPayloads = try messagePayloads(in: db, piSessionID: piSessionID)
@@ -206,7 +206,7 @@ struct PiSessionSync {
 		}
 	}
 
-	nonisolated private static func storeMessagesIncrementally(
+	private nonisolated static func storeMessagesIncrementally(
 		_ incomingPayloads: [MessagePayload],
 		piSessionID: Int64,
 		in db: Database
@@ -313,7 +313,7 @@ struct PiSessionSync {
 		}
 	}
 
-	nonisolated private static func replaceAllMessages(
+	private nonisolated static func replaceAllMessages(
 		_ payloads: [MessagePayload],
 		piSessionID: Int64,
 		in db: Database
@@ -346,7 +346,7 @@ struct PiSessionSync {
 		}
 	}
 
-	nonisolated private static func messagePayloads(from remoteMessages: [PimuxTranscriptMessage]) -> [MessagePayload] {
+	private nonisolated static func messagePayloads(from remoteMessages: [PimuxTranscriptMessage]) -> [MessagePayload] {
 		remoteMessages.enumerated().map { index, remoteMessage in
 			MessagePayload(
 				serverMessageID: remoteMessage.messageId,
@@ -364,8 +364,8 @@ struct PiSessionSync {
 		}
 	}
 
-	nonisolated private static func blockPayloads(from remoteMessage: PimuxTranscriptMessage) -> [BlockPayload] {
-		let explicitBlocks = remoteMessage.blocks.enumerated().compactMap { (index, block) -> BlockPayload? in
+	private nonisolated static func blockPayloads(from remoteMessage: PimuxTranscriptMessage) -> [BlockPayload] {
+		let explicitBlocks = remoteMessage.blocks.enumerated().compactMap { index, block -> BlockPayload? in
 			let normalizedText = block.text?.trimmingCharacters(in: .whitespacesAndNewlines)
 			switch block.type {
 			case "text", "thinking", "other":
@@ -399,7 +399,7 @@ struct PiSessionSync {
 		return [BlockPayload(type: "text", text: remoteMessage.body, toolCallName: nil, mimeType: nil, attachmentID: nil, position: 0)]
 	}
 
-	nonisolated private static func messagePayloads(in db: Database, piSessionID: Int64) throws -> [MessagePayload] {
+	private nonisolated static func messagePayloads(in db: Database, piSessionID: Int64) throws -> [MessagePayload] {
 		let messages = try Message
 			.filter(Column("piSessionID") == piSessionID)
 			.order(Column("position").asc)

@@ -15,7 +15,7 @@ enum PimuxImageLoading {
 		ImageRequest(
 			url: url,
 			processors: [
-				ImageProcessors.Resize(size: transcriptImageSize, contentMode: .aspectFit)
+				ImageProcessors.Resize(size: transcriptImageSize, contentMode: .aspectFit),
 			]
 		)
 	}
@@ -34,7 +34,7 @@ enum PimuxImageLoading {
 					size: size,
 					contentMode: contentMode == .fill ? .aspectFill : .aspectFit,
 					crop: contentMode == .fill
-				)
+				),
 			],
 			options: [.disableDiskCache]
 		)
@@ -75,8 +75,8 @@ extension PimuxImageLoading {
 
 		func cacheIfNeeded() async throws -> URL? {
 			guard !sourceURL.isFileURL,
-				let attachmentID,
-				!attachmentID.isEmpty
+			      let attachmentID,
+			      !attachmentID.isEmpty
 			else {
 				return existingCachedFileURL
 			}

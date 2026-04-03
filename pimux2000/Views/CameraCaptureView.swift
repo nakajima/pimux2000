@@ -12,7 +12,7 @@ struct CameraCaptureView: UIViewControllerRepresentable {
 		return picker
 	}
 
-	func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+	func updateUIViewController(_: UIImagePickerController, context _: Context) {}
 
 	func makeCoordinator() -> Coordinator {
 		Coordinator(onCapture: onCapture, onCancel: onCancel)
@@ -27,7 +27,7 @@ struct CameraCaptureView: UIViewControllerRepresentable {
 			self.onCancel = onCancel
 		}
 
-		func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+		func imagePickerController(_: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
 			if let image = info[.originalImage] as? UIImage {
 				onCapture(image)
 			} else {
@@ -35,7 +35,7 @@ struct CameraCaptureView: UIViewControllerRepresentable {
 			}
 		}
 
-		func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+		func imagePickerControllerDidCancel(_: UIImagePickerController) {
 			onCancel()
 		}
 	}
