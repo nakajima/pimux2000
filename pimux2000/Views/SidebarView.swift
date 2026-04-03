@@ -4,8 +4,9 @@ import SwiftUI
 
 struct SidebarView: View {
 	@Environment(\.databaseContext) private var dbContext
+	@Environment(\.pimuxServerClient) private var pimuxServerClient
 	@Query(PiSessionsRequest()) private var sessions: [SessionInfo]
-	@Query(CurrentServerConfigurationRequest()) private var serverConfiguration: ServerConfiguration?
+	@AppStorage("serverURL") private var serverURL: String?
 	@Binding var selectedSessionID: String?
 	@State private var isShowingServerSheet = false
 	@State private var isShowingSettings = false
@@ -46,19 +47,15 @@ struct SidebarView: View {
 						.tag(sessionInfo.session.sessionID)
 						.contentShape(Rectangle())
 						.onTapGesture {
-							SessionSelectionPerformanceTrace.emitEvent(
-								sessionID: sessionInfo.session.sessionID,
-								name: "SidebarTap",
-								message: "summary=\(sessionInfo.session.summary)"
-							)
-							selectedSessionID = sessionInfo.session.sessionID
-						}
+						selectedSessionID = sessionInfo.session.sessionID
+					}
 					}
 				}
 			}
 		}
 		.refreshable {
-			let syncer = PiSessionSync(dbContext: dbContext)
+			guard let pimuxServerClient else { return }
+			let syncer = PiSessionSync(dbContext: dbContext, pimuxServerClient: pimuxServerClient)
 			await syncer.sync()
 		}
 		.toolbar {
@@ -66,7 +63,7 @@ struct SidebarView: View {
 				Button {
 					isShowingServerSheet = true
 				} label: {
-					Label(serverConfiguration == nil ? "Connect Server" : "Server", systemImage: "server.rack")
+					Label(pimuxServerClient == nil ? "Connect Server" : "Server", systemImage: "server.rack")
 				}
 			}
 			#if os(iOS)
@@ -84,7 +81,7 @@ struct SidebarView: View {
 			#endif
 		}
 		.sheet(isPresented: $isShowingServerSheet) {
-			ServerConnectionSheet(initialServerURL: serverConfiguration?.serverURL ?? "")
+			ServerConnectionSheet(initialServerURL: serverURL ?? "")
 		}
 		.sheet(isPresented: $isShowingSettings) {
 			NavigationStack {
@@ -111,7 +108,7 @@ private struct UnreadSessionBadge: View {
 #Preview {
 	let preview = {
 		let db = AppDatabase.preview()
-		try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
+		try! db.saveServerURL("http://localhost:3000")
 
 		try! db.dbQueue.write { dbConn in
 			let now = Date()
@@ -179,6 +176,7 @@ private struct UnreadSessionBadge: View {
 			SidebarView(selectedSessionID: .constant(nil))
 		}
 		.environment(\.appDatabase, db)
+		.environment(\.pimuxServerClient, try! PimuxServerClient(baseURL: "http://localhost:3000"))
 		.databaseContext(.readWrite { db.dbQueue })
 	}()
 

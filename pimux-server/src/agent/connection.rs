@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tracing::{error, warn};
 use tokio::{
     sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     time::sleep,
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::{error, warn};
 
 use crate::{
     channel::{AgentToServerMessage, ServerToAgentMessage},

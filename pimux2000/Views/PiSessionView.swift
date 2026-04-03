@@ -26,58 +26,92 @@ private enum LiveStreamState {
 	}
 }
 
-private enum DisplayedSessionMessage: Identifiable {
-	case confirmed(MessageInfo)
-	case pending(PendingLocalMessage)
-
-	var id: String {
-		switch self {
-		case let .confirmed(messageInfo):
-			messageInfo.id
-		case let .pending(pendingMessage):
-			"pending-\(pendingMessage.id.uuidString)"
-		}
-	}
-}
-
 // MARK: - PiSessionView
 
 struct PiSessionView: View {
 	let session: PiSession
+
+	// MARK: - Dependencies
+
 	@Environment(\.appDatabase) private var appDatabase
-	@Query(CurrentServerConfigurationRequest()) private var serverConfiguration: ServerConfiguration?
+	@Environment(\.pimuxServerClient) private var pimuxServerClient
 	@Query<MessagesRequest> private var storedMessages: [MessageInfo]
-	@State private var streamedMessages: [MessageInfo]?
-	@State private var draftMessage = ""
-	@State private var draftImages: [ComposerImage] = []
-	@State private var pendingMessages: [PendingLocalMessage] = []
-	@State private var isSendingMessage = false
-	@State private var sendError: String?
-	@State private var isLoadingMessages = false
-	@State private var loadError: String?
-	@State private var transcriptWarnings: [String] = []
-	@State private var transcriptFreshness: PimuxTranscriptFreshness?
-	@State private var transcriptActivity: PimuxSessionActivity?
+
+	// MARK: - Live Transcript
+
+	// Connection state for the live transcript stream.
 	@State private var liveStreamState: LiveStreamState = .idle
+	// Highest stream event sequence processed so stale or out-of-order events are ignored.
 	@State private var lastStreamSequence: UInt64 = 0
-	@State private var customCommands: [PimuxSessionCommand] = []
-	@State private var isLoadingCustomCommands = false
-	@State private var requestedMessageContext: MessageContextRoute?
+	// Tracks explicit transcript reloads from the server.
+	@State private var isLoadingMessages = false
+	// Error shown when transcript loading fails.
+	@State private var loadError: String?
+	// Warnings returned alongside the current transcript snapshot.
+	@State private var transcriptWarnings: [String] = []
+	// Metadata describing whether the transcript is live, persisted, or reconstructed.
+	@State private var transcriptFreshness: PimuxTranscriptFreshness?
+	// Latest active/attached status reported for the session.
+	@State private var transcriptActivity: PimuxSessionActivity?
+	// Increment to force the transcript view to jump back to the bottom.
 	@State private var transcriptForcePinToken = 0
-	@State private var isAgentBusy = false
+	// Whether the transcript has been scrolled far enough up to show the jump-to-bottom affordance.
+	@State private var isScrolledUp = false
+
+	// MARK: - Composer & Sending
+
+	// Current text in the composer.
+	@State private var draftMessage = ""
+	// Images attached in the composer, including any in-flight processing state.
+	@State private var draftImages: [ComposerImage] = []
+	// Optimistic local messages shown until the server transcript confirms them.
+	@State private var pendingMessages: [PendingLocalMessage] = []
+	// Prevents duplicate sends and drives composer loading state.
+	@State private var isSendingMessage = false
+	// Error surfaced by message sending or builtin command execution.
+	@State private var sendError: String?
+	// Server-reported working message shown while the agent is doing work.
+	@State private var currentWorkingMessage: String?
+	// Optimistic "waiting for the agent to start responding" state after sending a message.
+	@State private var isAwaitingAgentActivity = false
+	// Timeout task that clears optimistic agent-waiting state if no activity arrives.
+	@State private var agentActivityConfirmationTask: Task<Void, Never>?
+
+	// MARK: - Commands, Dialogs & UI State
+
+	// Custom slash commands fetched for this session.
+	@State private var customCommands: [PimuxSessionCommand] = []
+	// Prevents overlapping custom-command fetches.
+	@State private var isLoadingCustomCommands = false
+	// Active interactive UI dialog pushed by the session.
 	@State private var currentUIDialog: PimuxSessionUIDialogState?
+	// Active terminal-only UI state shown as a banner above the composer.
 	@State private var currentTerminalOnlyUIState: PimuxSessionTerminalOnlyUIState?
+	// Disables UI dialog controls while a dialog action is being sent.
 	@State private var isUIDialogActionInFlight = false
+	// Error surfaced while interacting with the current UI dialog.
 	@State private var uiDialogActionError: String?
+	// Debounced task that syncs text-value dialog edits back to the server.
 	@State private var uiDialogValueSyncTask: Task<Void, Never>?
-	@State private var agentIdleTask: Task<Void, Never>?
-	@State private var deferredStartupGeneration = 0
-	@State private var deferredStartupRequestID = 0
+
+	// MARK: - Navigation
+
+	// Navigation target for showing message or session context.
+	@State private var requestedMessageContext: MessageContextRoute?
+	// Navigation target created by builtin commands like /new or /fork.
 	@State private var requestedBuiltinSession: PiSession?
+
+	// MARK: - Forking
+
+	// Candidate transcript messages the user can fork from.
 	@State private var availableForkMessages: [PimuxSessionForkMessage] = []
+	// Controls presentation of the fork message picker sheet.
 	@State private var isShowingForkMessagePicker = false
+	// Loading state while a fork session is being created.
 	@State private var isCreatingFork = false
+	// Error surfaced during fork-related commands.
 	@State private var forkCommandError: String?
+
 	@Binding var columnVisibility: NavigationSplitViewVisibility
 	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
@@ -112,9 +146,11 @@ struct PiSessionView: View {
 					attachments: draftImages,
 					customCommands: customCommands,
 					canAttachImages: session.supportsImages ?? true,
-					isEnabled: serverConfiguration != nil,
+					isEnabled: pimuxServerClient != nil,
 					isSending: isSendingMessage,
-					isAgentActive: isAgentBusy,
+					isAgentActive: isAgentWorking,
+					isWorking: isAgentWorking,
+					workingMessage: composerWorkingMessage,
 					errorMessage: sendError,
 					loadArgumentCompletions: { commandName, argumentPrefix in
 						await loadCommandArgumentCompletions(
@@ -183,17 +219,6 @@ struct PiSessionView: View {
 				}
 			}
 		#endif
-			.onAppear {
-				SessionSelectionPerformanceTrace.emitEvent(
-					sessionID: session.sessionID,
-					name: "PiSessionViewAppear",
-					message: "stored=\(storedMessages.count) streamed=\(streamedMessages?.count ?? -1) pending=\(pendingMessages.count)"
-				)
-				scheduleDeferredStartup()
-			}
-			.onChange(of: liveTaskKey) {
-				scheduleDeferredStartup()
-			}
 			.navigationDestination(item: $requestedMessageContext) { route in
 				MessageContextView(route: route)
 			}
@@ -216,13 +241,16 @@ struct PiSessionView: View {
 					}
 				)
 			}
-			.task(id: "live|\(liveTaskKey)|\(deferredStartupGeneration)") {
-				guard deferredStartupGeneration > 0 else { return }
-				await liveMessagesLoop()
-			}
-			.task(id: "commands|\(liveTaskKey)|\(deferredStartupGeneration)") {
-				guard deferredStartupGeneration > 0 else { return }
-				await loadCustomCommands()
+			.task(id: liveTaskKey, priority: .low) {
+				await withTaskGroup(of: Void.self) { group in
+					group.addTask {
+						await liveMessagesLoop()
+					}
+					group.addTask {
+						await loadCustomCommands()
+					}
+					await group.waitForAll()
+				}
 			}
 			.onChange(of: transcriptActivity?.attached) { _, attached in
 				guard attached == true else { return }
@@ -231,52 +259,79 @@ struct PiSessionView: View {
 	}
 
 	private var liveTaskKey: String {
-		"\(session.sessionID)|\(serverConfiguration?.serverURL ?? "none")"
+		"\(session.sessionID)|\(pimuxServerClient.map { String(describing: ObjectIdentifier($0)) } ?? "none")"
 	}
 
-	private func scheduleDeferredStartup() {
-		deferredStartupRequestID &+= 1
-		let requestID = deferredStartupRequestID
-		let scheduledKey = liveTaskKey
-
-		Task { @MainActor in
-			await Task.yield()
-			await Task.yield()
-			guard requestID == deferredStartupRequestID else { return }
-			guard scheduledKey == liveTaskKey else { return }
-			deferredStartupGeneration &+= 1
-			SessionSelectionPerformanceTrace.emitEvent(
-				sessionID: session.sessionID,
-				name: "DeferredStartupActivated",
-				message: "generation=\(deferredStartupGeneration) key=\(scheduledKey)"
-			)
-		}
+	private var isAgentWorking: Bool {
+		isAwaitingAgentActivity || transcriptActivity?.active == true || currentWorkingMessage != nil
 	}
 
-	private var renderedMessages: [MessageInfo] {
-		streamedMessages ?? storedMessages
+	private var composerWorkingMessage: String? {
+		guard isAgentWorking else { return nil }
+		return currentWorkingMessage
 	}
 
-	private func markAgentBusy() {
-		isAgentBusy = true
-		agentIdleTask?.cancel()
-		agentIdleTask = Task {
-			try? await Task.sleep(for: .seconds(3))
+	private func beginAwaitingAgentActivity() {
+		currentWorkingMessage = nil
+		isAwaitingAgentActivity = true
+		agentActivityConfirmationTask?.cancel()
+		agentActivityConfirmationTask = Task { @MainActor in
+			try? await Task.sleep(for: .seconds(10))
 			guard !Task.isCancelled else { return }
-			isAgentBusy = false
+			isAwaitingAgentActivity = false
 		}
 	}
 
-	private var displayedMessages: [DisplayedSessionMessage] {
-		renderedMessages.map(DisplayedSessionMessage.confirmed) + pendingMessages.map(DisplayedSessionMessage.pending)
+	private func confirmAgentActivityState() {
+		agentActivityConfirmationTask?.cancel()
+		agentActivityConfirmationTask = nil
+		isAwaitingAgentActivity = false
+	}
+
+	private func updateTranscriptActivity(
+		_ activity: PimuxSessionActivity,
+		clearsOptimisticWork: Bool
+	) {
+		transcriptActivity = activity
+		if activity.active {
+			confirmAgentActivityState()
+		} else {
+			currentWorkingMessage = nil
+			if clearsOptimisticWork {
+				confirmAgentActivityState()
+			}
+		}
+		persistActivity(activity)
+	}
+
+	private func normalizedWorkingMessage(from state: PimuxSessionUIState) -> String? {
+		guard let workingMessage = state.workingMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !workingMessage.isEmpty else {
+			return nil
+		}
+		return workingMessage
+	}
+
+	private func applyTranscriptSnapshotState(
+		from response: PimuxSessionMessagesResponse,
+		clearsOptimisticWork: Bool
+	) {
+		transcriptWarnings = response.warnings
+		transcriptFreshness = response.freshness
+		updateTranscriptActivity(response.activity, clearsOptimisticWork: clearsOptimisticWork)
+	}
+
+	private func clearTranscriptSnapshotState() {
+		loadError = nil
+		transcriptWarnings = []
+		transcriptFreshness = nil
 	}
 
 	private var transcriptMessages: [TranscriptMessage] {
-		renderedMessages.map(TranscriptMessage.confirmed) + pendingMessages.map(TranscriptMessage.pending)
+		storedMessages.map(TranscriptMessage.confirmed) + pendingMessages.map(TranscriptMessage.pending)
 	}
 
 	private var transcriptEmptyState: TranscriptEmptyState? {
-		guard displayedMessages.isEmpty else { return nil }
+		guard transcriptMessages.isEmpty else { return nil }
 		if isLoadingMessages {
 			return .loading
 		} else if let loadError {
@@ -289,42 +344,56 @@ struct PiSessionView: View {
 	@ViewBuilder
 	private var transcriptView: some View {
 		#if canImport(UIKit) && !os(macOS)
-			SessionTranscriptView(
-				messages: transcriptMessages,
-				sessionID: session.sessionID,
-				serverURL: serverConfiguration?.serverURL,
-				emptyState: transcriptEmptyState,
-				forcePinToken: transcriptForcePinToken,
-				onRetry: { Task { await loadMessages() } },
-				onOpenMessageContext: { requestedMessageContext = $0 }
-			)
+			ZStack(alignment: .bottom) {
+				SessionTranscriptView(
+					messages: transcriptMessages,
+					sessionID: session.sessionID,
+					emptyState: transcriptEmptyState,
+					forcePinToken: transcriptForcePinToken,
+					onRetry: { Task { await loadMessages() } },
+					onOpenMessageContext: { requestedMessageContext = $0 },
+					onScrollOffsetChanged: { offset in
+						let scrolledUp = offset > 100
+						if scrolledUp != isScrolledUp {
+							withAnimation(.easeInOut(duration: 0.2)) {
+								isScrolledUp = scrolledUp
+							}
+						}
+					}
+				)
+
+				if isScrolledUp {
+					Button {
+						transcriptForcePinToken &+= 1
+					} label: {
+						Label("Scroll to bottom", systemImage: "chevron.down")
+							.font(.footnote.weight(.medium))
+							.padding(.horizontal, 14)
+							.padding(.vertical, 8)
+							.background(.thinMaterial, in: Capsule())
+					}
+					.padding(.bottom, 8)
+					.transition(.move(edge: .bottom).combined(with: .opacity))
+				}
+			}
 		#else
 			ScrollViewReader { proxy in
 				ScrollView {
 					LazyVStack(alignment: .leading, spacing: 16) {
-						if let transcriptStatusText {
-							TranscriptStatusView(text: transcriptStatusText)
-						}
-
-						ForEach(transcriptWarnings, id: \.self) { warning in
-							TranscriptWarningView(text: warning)
-						}
-
-						if displayedMessages.isEmpty {
+						if transcriptMessages.isEmpty {
 							emptyStateView
 						} else {
-							ForEach(displayedMessages) { displayedMessage in
-								switch displayedMessage {
+							ForEach(transcriptMessages) { message in
+								switch message {
 								case let .confirmed(messageInfo):
 									TranscriptMessageView(
 										messageInfo: messageInfo,
-										sessionID: session.sessionID,
-										serverURL: serverConfiguration?.serverURL
+										sessionID: session.sessionID
 									)
-									.id(displayedMessage.id)
+									.id(message.id)
 								case let .pending(pendingMessage):
 									PendingLocalMessageView(message: pendingMessage)
-										.id(displayedMessage.id)
+										.id(message.id)
 								}
 							}
 						}
@@ -335,7 +404,7 @@ struct PiSessionView: View {
 					await loadMessages()
 				}
 				.defaultScrollAnchor(.bottom)
-				.onChange(of: displayedMessagesScrollSignature) {
+				.onChange(of: transcriptMessagesScrollSignature) {
 					scrollToBottom(proxy: proxy)
 				}
 			}
@@ -343,15 +412,15 @@ struct PiSessionView: View {
 	}
 
 	private var confirmedUserMessageCount: Int {
-		renderedMessages.reduce(into: 0) { count, messageInfo in
+		storedMessages.reduce(into: 0) { count, messageInfo in
 			if messageInfo.message.role == .user {
 				count += 1
 			}
 		}
 	}
 
-	private var displayedMessagesScrollSignature: String {
-		guard let lastMessage = displayedMessages.last else { return "empty" }
+	private var transcriptMessagesScrollSignature: String {
+		guard let lastMessage = transcriptMessages.last else { return "empty" }
 
 		switch lastMessage {
 		case let .confirmed(messageInfo):
@@ -362,7 +431,7 @@ struct PiSessionView: View {
 	}
 
 	private func confirmedScrollSignature(for messageInfo: MessageInfo) -> String {
-		let count = String(displayedMessages.count)
+		let count = String(transcriptMessages.count)
 		let messageID = messageInfo.id
 		let lastBlock = messageInfo.contentBlocks.last
 		let blockType = lastBlock?.type ?? "none"
@@ -384,7 +453,7 @@ struct PiSessionView: View {
 
 	private func pendingScrollSignature(for pendingMessage: PendingLocalMessage) -> String {
 		let components: [String] = [
-			String(displayedMessages.count),
+			String(transcriptMessages.count),
 			"pending",
 			pendingMessage.id.uuidString,
 			pendingMessage.normalizedBody,
@@ -392,44 +461,13 @@ struct PiSessionView: View {
 		return components.joined(separator: "|")
 	}
 
-	private var transcriptStatusText: String? {
-		var components: [String] = []
-
-		if let transcriptFreshness {
-			switch transcriptFreshness.state {
-			case "live":
-				components.append(transcriptActivity?.active == true ? "Live transcript" : "Recent live snapshot")
-			case "persisted":
-				components.append("Persisted snapshot")
-			case "liveUnknown":
-				components.append("Transcript reconstructed from file")
-			default:
-				components.append(transcriptFreshness.state)
-			}
-
-			if let transcriptActivity {
-				components.append(transcriptActivity.attached ? "attached" : "detached")
-			}
-
-			components.append("source: \(transcriptFreshness.source)")
-		}
-
-		if let streamStatus = liveStreamState.statusText {
-			components.append(streamStatus)
-		}
-
-		return components.isEmpty ? nil : components.joined(separator: " • ")
-	}
-
 	private func liveMessagesLoop() async {
-		SessionSelectionPerformanceTrace.emitEvent(
-			sessionID: session.sessionID,
-			name: "LiveMessagesLoopStart",
-			message: "serverConfigured=\(serverConfiguration != nil) eagerLoad=false stored=\(storedMessages.count)"
-		)
-
-		guard serverConfiguration != nil else {
+		guard let pimuxServerClient else {
 			liveStreamState = .idle
+			transcriptActivity = nil
+			currentWorkingMessage = nil
+			confirmAgentActivityState()
+			clearTranscriptSnapshotState()
 			currentUIDialog = nil
 			currentTerminalOnlyUIState = nil
 			uiDialogActionError = nil
@@ -441,15 +479,9 @@ struct PiSessionView: View {
 
 		while !Task.isCancelled {
 			do {
-				guard let serverConfiguration else {
-					liveStreamState = .idle
-					return
-				}
-
 				liveStreamState = .connecting
 				lastStreamSequence = 0
-				let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-				try await client.streamMessages(sessionID: session.sessionID) { event in
+				try await pimuxServerClient.streamMessages(sessionID: session.sessionID) { event in
 					await handleStreamEvent(event)
 				}
 
@@ -457,9 +489,8 @@ struct PiSessionView: View {
 				liveStreamState = .reconnecting
 			} catch {
 				if Task.isCancelled { break }
-				streamedMessages = nil
 				liveStreamState = .reconnecting
-				if renderedMessages.isEmpty {
+				if storedMessages.isEmpty {
 					loadError = error.localizedDescription
 				}
 				print("Live stream error for \(session.sessionID): \(error)")
@@ -476,40 +507,41 @@ struct PiSessionView: View {
 		case let .snapshot(sequence, sessionResponse):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
-			let newMessages = streamMessageInfos(
-				from: sessionResponse.messages,
-				piSessionID: session.id ?? 0
-			)
-			let contentChanged = streamedMessages != nil
-				&& newMessages.map(\.contentFingerprint) != streamedMessages?.map(\.contentFingerprint)
-			streamedMessages = newMessages
-			if contentChanged {
-				markAgentBusy()
+			do {
+				try await persistMessages(sessionResponse.messages)
+				loadError = nil
+			} catch {
+				if storedMessages.isEmpty {
+					loadError = error.localizedDescription
+				}
+				print("Error persisting live messages for \(session.sessionID): \(error)")
 			}
+			confirmAgentActivityState()
 			reconcilePendingMessages(using: sessionResponse.messages)
-			transcriptWarnings = sessionResponse.warnings
-			transcriptFreshness = sessionResponse.freshness
-			transcriptActivity = sessionResponse.activity
-			persistActivity(sessionResponse.activity)
+			applyTranscriptSnapshotState(from: sessionResponse, clearsOptimisticWork: true)
 			liveStreamState = .live
-			loadError = nil
 		case let .sessionState(sequence, connected, _, _):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
 			liveStreamState = connected ? .live : .reconnecting
 			if !connected {
-				persistActivity(PimuxSessionActivity(active: false, attached: false))
+				currentWorkingMessage = nil
+				updateTranscriptActivity(PimuxSessionActivity(active: false, attached: false), clearsOptimisticWork: true)
 			}
-		case let .uiState(sequence, _):
+		case let .uiState(sequence, state):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
+			currentWorkingMessage = normalizedWorkingMessage(from: state)
+			confirmAgentActivityState()
 		case let .uiDialogState(sequence, state):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
+			confirmAgentActivityState()
 			applyIncomingUIDialogState(state)
 		case let .terminalOnlyUiState(sequence, state):
 			guard sequence > lastStreamSequence else { return }
 			lastStreamSequence = sequence
+			confirmAgentActivityState()
 			currentTerminalOnlyUIState = state
 		case let .keepalive(sequence, _):
 			guard sequence > lastStreamSequence else { return }
@@ -521,7 +553,7 @@ struct PiSessionView: View {
 	}
 
 	private func scrollToBottom(proxy: ScrollViewProxy) {
-		if let lastID = displayedMessages.last?.id {
+		if let lastID = transcriptMessages.last?.id {
 			proxy.scrollTo(lastID, anchor: .bottom)
 		}
 	}
@@ -551,7 +583,7 @@ struct PiSessionView: View {
 
 	private func sendMessage() async {
 		guard !isSendingMessage else { return }
-		guard let serverConfiguration else {
+		guard let pimuxServerClient else {
 			sendError = "No pimux server configured."
 			return
 		}
@@ -561,7 +593,7 @@ struct PiSessionView: View {
 		guard !body.isEmpty || !readyImages.isEmpty else { return }
 
 		if let builtinCommand = builtinCommand(for: body, readyImages: readyImages) {
-			await executeBuiltinCommand(builtinCommand, serverURL: serverConfiguration.serverURL)
+			await executeBuiltinCommand(builtinCommand)
 			return
 		}
 
@@ -586,11 +618,11 @@ struct PiSessionView: View {
 
 		do {
 			let inputImages = readyImages.compactMap(\.inputImage)
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			try await client.sendMessage(sessionID: session.sessionID, body: body, images: inputImages)
-			markAgentBusy()
-			await loadMessages()
+			try await pimuxServerClient.sendMessage(sessionID: session.sessionID, body: body, images: inputImages)
+			beginAwaitingAgentActivity()
 		} catch {
+			confirmAgentActivityState()
+			currentWorkingMessage = nil
 			if let pendingMessage {
 				pendingMessages.removeAll { $0.id == pendingMessage.id }
 			}
@@ -662,7 +694,7 @@ struct PiSessionView: View {
 		}
 	}
 
-	private func executeBuiltinCommand(_ command: BuiltinSlashCommand, serverURL: String) async {
+	private func executeBuiltinCommand(_ command: BuiltinSlashCommand) async {
 		switch command {
 		case .copy:
 			executeCopyBuiltinCommand()
@@ -672,20 +704,26 @@ struct PiSessionView: View {
 				sendError = "Usage: /name <name>"
 				return
 			}
+			guard let pimuxServerClient else {
+				sendError = "No pimux server configured."
+				return
+			}
 			await runBuiltinCommand(restoreDraftOnFailure: true) {
-				let client = try PimuxServerClient(baseURL: serverURL)
-				try await client.setSessionName(sessionID: session.sessionID, name: trimmedName)
+				try await pimuxServerClient.setSessionName(sessionID: session.sessionID, name: trimmedName)
 				draftMessage = ""
 			}
 		case let .compact(customInstructions):
+			guard let pimuxServerClient else {
+				sendError = "No pimux server configured."
+				return
+			}
 			await runBuiltinCommand(restoreDraftOnFailure: true) {
-				let client = try PimuxServerClient(baseURL: serverURL)
-				try await client.compactSession(
+				try await pimuxServerClient.compactSession(
 					sessionID: session.sessionID,
 					customInstructions: customInstructions
 				)
 				draftMessage = ""
-				markAgentBusy()
+				beginAwaitingAgentActivity()
 			}
 		case let .session(argument):
 			guard argument.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -700,9 +738,12 @@ struct PiSessionView: View {
 				sendError = "Usage: /reload"
 				return
 			}
+			guard let pimuxServerClient else {
+				sendError = "No pimux server configured."
+				return
+			}
 			await runBuiltinCommand(restoreDraftOnFailure: true) {
-				let client = try PimuxServerClient(baseURL: serverURL)
-				try await client.reloadSession(sessionID: session.sessionID)
+				try await pimuxServerClient.reloadSession(sessionID: session.sessionID)
 				draftMessage = ""
 				Task {
 					try? await Task.sleep(for: .seconds(1))
@@ -710,9 +751,12 @@ struct PiSessionView: View {
 				}
 			}
 		case .newSession:
+			guard let pimuxServerClient else {
+				sendError = "No pimux server configured."
+				return
+			}
 			await runBuiltinCommand(restoreDraftOnFailure: true) {
-				let client = try PimuxServerClient(baseURL: serverURL)
-				let newSessionID = try await client.createNewSession(sessionID: session.sessionID)
+				let newSessionID = try await pimuxServerClient.createNewSession(sessionID: session.sessionID)
 				draftMessage = ""
 				requestedBuiltinSession = makeTransientBuiltinSession(
 					sessionID: newSessionID,
@@ -720,7 +764,7 @@ struct PiSessionView: View {
 				)
 			}
 		case .fork:
-			await loadForkMessages(serverURL: serverURL)
+			await loadForkMessages()
 		}
 	}
 
@@ -762,7 +806,7 @@ struct PiSessionView: View {
 	}
 
 	private func lastAssistantTextToCopy() -> String? {
-		for messageInfo in renderedMessages.reversed() where messageInfo.message.role == .assistant {
+		for messageInfo in storedMessages.reversed() where messageInfo.message.role == .assistant {
 			let text = messageInfo.contentBlocks
 				.compactMap(\.text)
 				.joined(separator: "\n")
@@ -774,8 +818,12 @@ struct PiSessionView: View {
 		return nil
 	}
 
-	private func loadForkMessages(serverURL: String) async {
+	private func loadForkMessages() async {
 		guard !isSendingMessage else { return }
+		guard let pimuxServerClient else {
+			sendError = "No pimux server configured."
+			return
+		}
 		let savedDraftMessage = draftMessage
 		let savedDraftImages = draftImages
 		isSendingMessage = true
@@ -783,8 +831,7 @@ struct PiSessionView: View {
 		defer { isSendingMessage = false }
 
 		do {
-			let client = try PimuxServerClient(baseURL: serverURL)
-			let messages = try await client.getForkMessages(sessionID: session.sessionID)
+			let messages = try await pimuxServerClient.getForkMessages(sessionID: session.sessionID)
 			guard !messages.isEmpty else {
 				sendError = "No messages to fork from."
 				return
@@ -801,7 +848,7 @@ struct PiSessionView: View {
 	}
 
 	private func createFork(from message: PimuxSessionForkMessage) async {
-		guard let serverConfiguration else {
+		guard let pimuxServerClient else {
 			forkCommandError = "No pimux server configured."
 			return
 		}
@@ -811,8 +858,7 @@ struct PiSessionView: View {
 		defer { isCreatingFork = false }
 
 		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			let newSessionID = try await client.forkSession(
+			let newSessionID = try await pimuxServerClient.forkSession(
 				sessionID: session.sessionID,
 				entryID: message.entryID
 			)
@@ -866,14 +912,14 @@ struct PiSessionView: View {
 	}
 
 	private func sessionInfoMarkdown() -> String {
-		let userCount = renderedMessages.filter { $0.message.role == .user }.count
-		let assistantCount = renderedMessages.filter { $0.message.role == .assistant }.count
-		let toolResultCount = renderedMessages.filter { $0.message.role == .toolResult }.count
-		let bashExecutionCount = renderedMessages.filter { $0.message.role == .bashExecution }.count
-		let customCount = renderedMessages.filter { $0.message.role == .custom }.count
-		let branchSummaryCount = renderedMessages.filter { $0.message.role == .branchSummary }.count
-		let compactionSummaryCount = renderedMessages.filter { $0.message.role == .compactionSummary }.count
-		let otherCount = renderedMessages.count - userCount - assistantCount - toolResultCount - bashExecutionCount - customCount - branchSummaryCount - compactionSummaryCount
+		let userCount = storedMessages.filter { $0.message.role == .user }.count
+		let assistantCount = storedMessages.filter { $0.message.role == .assistant }.count
+		let toolResultCount = storedMessages.filter { $0.message.role == .toolResult }.count
+		let bashExecutionCount = storedMessages.filter { $0.message.role == .bashExecution }.count
+		let customCount = storedMessages.filter { $0.message.role == .custom }.count
+		let branchSummaryCount = storedMessages.filter { $0.message.role == .branchSummary }.count
+		let compactionSummaryCount = storedMessages.filter { $0.message.role == .compactionSummary }.count
+		let otherCount = storedMessages.count - userCount - assistantCount - toolResultCount - bashExecutionCount - customCount - branchSummaryCount - compactionSummaryCount
 
 		var lines: [String] = [
 			"# Session Info",
@@ -941,7 +987,7 @@ struct PiSessionView: View {
 		if otherCount > 0 {
 			lines.append("- Other: \(otherCount)")
 		}
-		lines.append("- Total Confirmed: \(renderedMessages.count)")
+		lines.append("- Total Confirmed: \(storedMessages.count)")
 		if !pendingMessages.isEmpty {
 			lines.append("- Pending Local Messages: \(pendingMessages.count)")
 		}
@@ -986,12 +1032,11 @@ struct PiSessionView: View {
 	}
 
 	private func interruptSession() async {
-		guard let serverConfiguration else { return }
-		agentIdleTask?.cancel()
-		isAgentBusy = false
+		guard let pimuxServerClient else { return }
+		currentWorkingMessage = nil
+		updateTranscriptActivity(PimuxSessionActivity(active: false, attached: false), clearsOptimisticWork: true)
 		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			try await client.interruptSession(sessionID: session.sessionID)
+			try await pimuxServerClient.interruptSession(sessionID: session.sessionID)
 		} catch {
 			print("Error interrupting session \(session.sessionID): \(error)")
 		}
@@ -1047,58 +1092,66 @@ struct PiSessionView: View {
 		}
 	}
 
-	private func currentSessionRow() async throws -> PiSession? {
+	private func localSessionRowID(createIfNeeded: Bool = false) async throws -> Int64? {
 		guard let appDatabase else { return nil }
+		if createIfNeeded {
+			return try await appDatabase.dbQueue.write { db in
+				if let existingSession = try PiSession
+					.filter(Column("sessionID") == session.sessionID)
+					.fetchOne(db),
+					let existingSessionID = existingSession.id
+				{
+					return existingSessionID
+				}
+
+				var localSession = session
+				localSession.id = nil
+				try localSession.insert(db)
+				return localSession.id
+			}
+		}
+
 		return try await appDatabase.dbQueue.read { db in
 			try PiSession
 				.filter(Column("sessionID") == session.sessionID)
-				.fetchOne(db)
+				.fetchOne(db)?
+				.id
+		}
+	}
+
+	private func persistMessages(_ remoteMessages: [PimuxTranscriptMessage]) async throws {
+		guard let appDatabase else { return }
+		guard let sessionRowID = try await localSessionRowID(createIfNeeded: true) else {
+			throw NSError(
+				domain: "PiSessionView",
+				code: 1,
+				userInfo: [NSLocalizedDescriptionKey: "Couldn't create a local session row."]
+			)
+		}
+
+		try await appDatabase.dbQueue.write { dbConn in
+			try PiSessionSync.storeMessages(remoteMessages, piSessionID: sessionRowID, in: dbConn)
 		}
 	}
 
 	private func loadMessages() async {
-		guard let appDatabase, !isLoadingMessages else { return }
-		guard let serverConfiguration else {
+		guard !isLoadingMessages else { return }
+		guard let pimuxServerClient else {
 			loadError = "No pimux server configured."
 			return
 		}
 
-		let interval = SessionSelectionPerformanceTrace.beginInterval(
-			name: "LoadMessages",
-			sessionID: session.sessionID,
-			message: "stored=\(storedMessages.count) rendered=\(renderedMessages.count)"
-		)
 		isLoadingMessages = true
 		defer {
 			isLoadingMessages = false
-			SessionSelectionPerformanceTrace.endInterval(
-				interval,
-				message: "loadError=\(loadError ?? "none") rendered=\(renderedMessages.count)"
-			)
 		}
 
 		do {
-			guard let currentSession = try await currentSessionRow() else {
-				loadError = "This session is no longer available locally."
-				return
-			}
-			guard let sessionRowID = currentSession.id else {
-				loadError = "This session doesn't have a local database ID yet."
-				return
-			}
-
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			let response = try await client.getMessages(sessionID: currentSession.sessionID)
-
-			try await appDatabase.dbQueue.write { dbConn in
-				try PiSessionSync.storeMessages(response.messages, piSessionID: sessionRowID, in: dbConn)
-			}
+			let response = try await pimuxServerClient.getMessages(sessionID: session.sessionID)
+			try await persistMessages(response.messages)
 
 			reconcilePendingMessages(using: response.messages)
-			transcriptWarnings = response.warnings
-			transcriptFreshness = response.freshness
-			transcriptActivity = response.activity
-			persistActivity(response.activity)
+			applyTranscriptSnapshotState(from: response, clearsOptimisticWork: false)
 			loadError = nil
 		} catch {
 			loadError = error.localizedDescription
@@ -1107,7 +1160,7 @@ struct PiSessionView: View {
 	}
 
 	private func loadCustomCommands(force: Bool = false) async {
-		guard let serverConfiguration else { return }
+		guard let pimuxServerClient else { return }
 		guard !isLoadingCustomCommands else { return }
 		if !force, !customCommands.isEmpty { return }
 
@@ -1115,8 +1168,7 @@ struct PiSessionView: View {
 		defer { isLoadingCustomCommands = false }
 
 		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			customCommands = try await client.getCommands(sessionID: session.sessionID)
+			customCommands = try await pimuxServerClient.getCommands(sessionID: session.sessionID)
 		} catch {
 			// Non-critical; built-in commands still work. Retry once the live session reports attached.
 			print("Failed to load custom commands for \(session.sessionID): \(error)")
@@ -1127,11 +1179,10 @@ struct PiSessionView: View {
 		commandName: String,
 		argumentPrefix: String
 	) async -> [SlashCommandArgumentCompletion] {
-		guard let serverConfiguration else { return [] }
+		guard let pimuxServerClient else { return [] }
 
 		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			let completions = try await client.getCommandArgumentCompletions(
+			let completions = try await pimuxServerClient.getCommandArgumentCompletions(
 				sessionID: session.sessionID,
 				commandName: commandName,
 				argumentPrefix: argumentPrefix
@@ -1155,7 +1206,7 @@ struct PiSessionView: View {
 		guard delta != 0 else { return }
 		guard !isUIDialogActionInFlight else { return }
 		guard let dialog = currentUIDialog, dialog.isSelectorDialog, !dialog.options.isEmpty else { return }
-		guard let serverConfiguration else {
+		guard let pimuxServerClient else {
 			uiDialogActionError = "No pimux server configured."
 			return
 		}
@@ -1167,8 +1218,7 @@ struct PiSessionView: View {
 		uiDialogActionError = nil
 
 		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			try await client.sendUIDialogAction(
+			try await pimuxServerClient.sendUIDialogAction(
 				sessionID: session.sessionID,
 				dialogID: dialog.id,
 				action: .move(direction: delta < 0 ? "up" : "down")
@@ -1186,7 +1236,7 @@ struct PiSessionView: View {
 
 	private func chooseUIDialogOption(_ index: Int) async {
 		guard let dialog = currentUIDialog, dialog.isSelectorDialog else { return }
-		guard let serverConfiguration else {
+		guard let pimuxServerClient else {
 			uiDialogActionError = "No pimux server configured."
 			return
 		}
@@ -1196,16 +1246,15 @@ struct PiSessionView: View {
 		defer { isUIDialogActionInFlight = false }
 
 		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
 			if dialog.selectedIndex != index {
 				currentUIDialog = dialog.settingSelectedIndex(index)
-				try await client.sendUIDialogAction(
+				try await pimuxServerClient.sendUIDialogAction(
 					sessionID: session.sessionID,
 					dialogID: dialog.id,
 					action: .selectIndex(index: index)
 				)
 			}
-			try await client.sendUIDialogAction(
+			try await pimuxServerClient.sendUIDialogAction(
 				sessionID: session.sessionID,
 				dialogID: dialog.id,
 				action: .submit
@@ -1222,7 +1271,7 @@ struct PiSessionView: View {
 		uiDialogActionError = nil
 		uiDialogValueSyncTask?.cancel()
 
-		guard let serverConfiguration else {
+		guard let pimuxServerClient else {
 			uiDialogActionError = "No pimux server configured."
 			uiDialogValueSyncTask = nil
 			return
@@ -1233,8 +1282,7 @@ struct PiSessionView: View {
 		uiDialogValueSyncTask = Task {
 			do {
 				try await Task.sleep(for: .milliseconds(150))
-				let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-				try await client.sendUIDialogAction(
+				try await pimuxServerClient.sendUIDialogAction(
 					sessionID: sessionID,
 					dialogID: dialogID,
 					action: .setValue(value: value)
@@ -1254,7 +1302,7 @@ struct PiSessionView: View {
 
 	private func submitUIDialogTextValue() async {
 		guard let dialog = currentUIDialog, dialog.isTextValueDialog else { return }
-		guard let serverConfiguration else {
+		guard let pimuxServerClient else {
 			uiDialogActionError = "No pimux server configured."
 			return
 		}
@@ -1266,13 +1314,12 @@ struct PiSessionView: View {
 		defer { isUIDialogActionInFlight = false }
 
 		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			try await client.sendUIDialogAction(
+			try await pimuxServerClient.sendUIDialogAction(
 				sessionID: session.sessionID,
 				dialogID: dialog.id,
 				action: .setValue(value: dialog.value ?? "")
 			)
-			try await client.sendUIDialogAction(
+			try await pimuxServerClient.sendUIDialogAction(
 				sessionID: session.sessionID,
 				dialogID: dialog.id,
 				action: .submit
@@ -1318,7 +1365,7 @@ struct PiSessionView: View {
 
 	private func cancelUIDialog() async {
 		guard let dialog = currentUIDialog else { return }
-		guard let serverConfiguration else {
+		guard let pimuxServerClient else {
 			uiDialogActionError = "No pimux server configured."
 			return
 		}
@@ -1330,8 +1377,7 @@ struct PiSessionView: View {
 		defer { isUIDialogActionInFlight = false }
 
 		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			try await client.sendUIDialogAction(
+			try await pimuxServerClient.sendUIDialogAction(
 				sessionID: session.sessionID,
 				dialogID: dialog.id,
 				action: .cancel
@@ -1355,110 +1401,6 @@ struct PiSessionView: View {
 			confirmedMessages: confirmedMessages
 		)
 	}
-
-	private func streamMessageInfos(from remoteMessages: [PimuxTranscriptMessage], piSessionID: Int64) -> [MessageInfo] {
-		remoteMessages.enumerated().map { index, remoteMessage in
-			MessageInfo(
-				message: Message(
-					id: nil,
-					piSessionID: piSessionID,
-					role: Message.Role(remoteMessage.role),
-					toolName: {
-						guard let toolName = remoteMessage.toolName?.trimmingCharacters(in: .whitespacesAndNewlines), !toolName.isEmpty else {
-							return nil
-						}
-						return toolName
-					}(),
-					position: index,
-					createdAt: remoteMessage.createdAt
-				),
-				contentBlocks: remoteMessage.blocks.enumerated().compactMap { blockIndex, block in
-					let text = block.text?.trimmingCharacters(in: .whitespacesAndNewlines)
-					switch block.type {
-					case "text", "thinking", "other":
-						guard let text, !text.isEmpty else { return nil }
-						return MessageContentBlock(
-							id: nil,
-							messageID: Int64(index),
-							type: block.type,
-							text: text,
-							toolCallName: nil,
-							position: blockIndex
-						)
-					case "toolCall":
-						guard let toolCallName = block.toolCallName?.trimmingCharacters(in: .whitespacesAndNewlines), !toolCallName.isEmpty else {
-							return nil
-						}
-						return MessageContentBlock(
-							id: nil,
-							messageID: Int64(index),
-							type: "toolCall",
-							text: text,
-							toolCallName: toolCallName,
-							position: blockIndex
-						)
-					case "image":
-						return MessageContentBlock(
-							id: nil,
-							messageID: Int64(index),
-							type: "image",
-							text: nil,
-							toolCallName: nil,
-							mimeType: block.mimeType,
-							attachmentID: block.attachmentId,
-							position: blockIndex
-						)
-					default:
-						guard let text, !text.isEmpty else { return nil }
-						return MessageContentBlock(
-							id: nil,
-							messageID: Int64(index),
-							type: block.type,
-							text: text,
-							toolCallName: block.toolCallName,
-							mimeType: block.mimeType,
-							attachmentID: block.attachmentId,
-							position: blockIndex
-						)
-					}
-				}
-			)
-		}
-	}
-}
-
-private struct TranscriptStatusView: View {
-	let text: String
-
-	var body: some View {
-		Label {
-			Text(verbatim: text)
-		} icon: {
-			Image(systemName: "dot.radiowaves.left.and.right")
-		}
-		.font(.caption)
-		.foregroundStyle(.secondary)
-		.padding(.horizontal, 10)
-		.padding(.vertical, 8)
-		.background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
-	}
-}
-
-private struct TranscriptWarningView: View {
-	let text: String
-
-	var body: some View {
-		Label {
-			Text(verbatim: text)
-		} icon: {
-			Image(systemName: "exclamationmark.triangle.fill")
-		}
-		.font(.caption)
-		.foregroundStyle(.yellow)
-		.padding(.horizontal, 10)
-		.padding(.vertical, 8)
-		.background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
-	}
 }
 
 // MARK: - Preview
@@ -1469,7 +1411,7 @@ private struct TranscriptWarningView: View {
 		let previewSessionID = "test-session-1"
 		let previewAttachmentID = "img-preview"
 		_ = PreviewAttachmentFixture.installImageAttachment(sessionID: previewSessionID, attachmentID: previewAttachmentID)
-		try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
+		try! db.saveServerURL("http://localhost:3000")
 
 		try! db.dbQueue.write { dbConn in
 			let now = Date()
@@ -1661,6 +1603,7 @@ private struct TranscriptWarningView: View {
 			PiSessionView(session: session, columnVisibility: .constant(.automatic))
 		}
 		.environment(\.appDatabase, db)
+		.environment(\.pimuxServerClient, try! PimuxServerClient(baseURL: "http://localhost:3000"))
 		.databaseContext(.readWrite { db.dbQueue })
 	}()
 

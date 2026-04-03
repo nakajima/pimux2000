@@ -37,8 +37,8 @@ struct PiSessionsRequest: ValueObservationQueryable {
 
 struct ContentView: View {
 	@Environment(\.databaseContext) private var dbContext
+	@Environment(\.pimuxServerClient) private var pimuxServerClient
 	@Query(PiSessionsRequest()) private var sessions: [SessionInfo]
-	@Query(CurrentServerConfigurationRequest()) private var serverConfiguration: ServerConfiguration?
 	@State private var selectedSessionID: String?
 	@State private var columnVisibility: NavigationSplitViewVisibility = .automatic
 
@@ -48,21 +48,14 @@ struct ContentView: View {
 		} detail: {
 			detailView
 		}
-		.task(id: serverConfiguration?.serverURL ?? "") {
-			guard serverConfiguration != nil else { return }
-			let syncer = PiSessionSync(dbContext: dbContext)
+		.task(id: syncTaskKey) {
+			guard let pimuxServerClient else { return }
+			let syncer = PiSessionSync(dbContext: dbContext, pimuxServerClient: pimuxServerClient)
 			await syncer.sync()
 			while !Task.isCancelled {
 				try? await Task.sleep(for: .seconds(3))
 				await syncer.sync()
 			}
-		}
-		.onChange(of: selectedSessionID) {
-			guard let selectedSessionID else { return }
-			SessionSelectionPerformanceTrace.beginSelection(
-				sessionID: selectedSessionID,
-				source: "ContentView.selectedSessionID"
-			)
 		}
 		.onChange(of: sessions.map(\.session.sessionID)) {
 			guard !sessions.isEmpty else {
@@ -80,11 +73,15 @@ struct ContentView: View {
 		}
 	}
 
+	private var syncTaskKey: ObjectIdentifier? {
+		pimuxServerClient.map(ObjectIdentifier.init)
+	}
+
 	@ViewBuilder
 	private var detailView: some View {
 		NavigationStack {
 			Group {
-				if serverConfiguration == nil {
+				if pimuxServerClient == nil {
 					ContentUnavailableView(
 						"No Server Configured",
 						systemImage: "network.slash",
@@ -128,13 +125,14 @@ struct ContentView: View {
 #Preview {
 	let preview = {
 		let db = AppDatabase.preview()
-		try! db.saveServerConfiguration(serverURL: "http://localhost:3000")
+		try! db.saveServerURL("http://localhost:3000")
 		try! db.dbQueue.write { dbConn in
 			var host = Host(id: nil, location: "nakajima@arch", createdAt: Date(), updatedAt: Date())
 			try host.insert(dbConn)
 		}
 		return ContentView()
 			.environment(\.appDatabase, db)
+			.environment(\.pimuxServerClient, try! PimuxServerClient(baseURL: "http://localhost:3000"))
 			.databaseContext(.readWrite { db.dbQueue })
 	}()
 

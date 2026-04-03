@@ -136,7 +136,7 @@ struct ServerConnectionSheet: View {
 			let normalized = try PimuxServerClient.normalizedBaseURLString(from: serverURL)
 			let client = try PimuxServerClient(baseURL: normalized)
 			try await client.health()
-			try appDatabase.saveServerConfiguration(serverURL: normalized)
+			try appDatabase.saveServerURL(normalized)
 			dismiss()
 		} catch {
 			errorMessage = error.localizedDescription

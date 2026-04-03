@@ -40,9 +40,10 @@ enum TranscriptEmptyState: Equatable {
 	import UIKit
 
 	struct SessionTranscriptView: UIViewRepresentable {
+		@Environment(\.pimuxServerClient) private var pimuxServerClient
+
 		let messages: [TranscriptMessage]
 		let sessionID: String
-		let serverURL: String?
 		let emptyState: TranscriptEmptyState?
 		var forcePinToken: Int = 0
 		var onRetry: (() -> Void)? = nil
@@ -106,6 +107,7 @@ enum TranscriptEmptyState: Equatable {
 					let ctx = self.renderContext
 					cell.contentConfiguration = UIHostingConfiguration {
 						TranscriptRowSwiftUIView(message: message, context: ctx)
+							.environment(\.pimuxServerClient, self.parent.pimuxServerClient)
 							.transaction { $0.animation = nil }
 					}
 					.margins(.all, 0)
@@ -284,7 +286,6 @@ enum TranscriptEmptyState: Equatable {
 			private var renderContext: TranscriptRenderContext {
 				TranscriptRenderContext(
 					sessionID: parent.sessionID,
-					serverURL: parent.serverURL,
 					onOpenMessageContext: parent.onOpenMessageContext
 				)
 			}
@@ -303,7 +304,6 @@ enum TranscriptEmptyState: Equatable {
 
 	struct TranscriptRenderContext {
 		let sessionID: String
-		let serverURL: String?
 		let onOpenMessageContext: ((MessageContextRoute) -> Void)?
 	}
 
@@ -319,8 +319,7 @@ enum TranscriptEmptyState: Equatable {
 				case let .confirmed(messageInfo):
 					TranscriptMessageView(
 						messageInfo: messageInfo,
-						sessionID: context.sessionID,
-						serverURL: context.serverURL
+						sessionID: context.sessionID
 					)
 				case let .pending(pendingMessage):
 					PendingLocalMessageView(message: pendingMessage)
@@ -424,7 +423,7 @@ enum TranscriptEmptyState: Equatable {
 		]
 
 		NavigationStack {
-			SessionTranscriptView(messages: messages, sessionID: "preview-session", serverURL: nil, emptyState: nil, onOpenMessageContext: { _ in })
+			SessionTranscriptView(messages: messages, sessionID: "preview-session", emptyState: nil, onOpenMessageContext: { _ in })
 				.background(.background)
 		}
 	}

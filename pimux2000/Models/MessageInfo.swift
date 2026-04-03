@@ -8,9 +8,9 @@ struct MessageInfo: Identifiable {
 	let contentFingerprint: UInt64
 	var id: String {
 		if let serverID = message.serverMessageID {
-			return "\(message.piSessionID)-s\(serverID)"
+			return "\(message.piSessionID)-\(serverID)"
 		}
-		return "\(message.piSessionID)-\(message.position)"
+		return "\(message.piSessionID)-p\(message.position)"
 	}
 
 	init(message: Message, contentBlocks: [MessageContentBlock]) {
@@ -42,18 +42,6 @@ struct MessagesRequest: ValueObservationQueryable {
 	let sessionID: String
 
 	func fetch(_ db: Database) throws -> [MessageInfo] {
-		let interval = SessionSelectionPerformanceTrace.beginInterval(
-			name: "MessagesRequestFetch",
-			sessionID: sessionID
-		)
-		var fetchedCount = 0
-		defer {
-			SessionSelectionPerformanceTrace.endInterval(
-				interval,
-				message: "count=\(fetchedCount)"
-			)
-		}
-
 		guard let currentSession = try PiSession
 			.filter(Column("sessionID") == sessionID)
 			.fetchOne(db),
@@ -73,13 +61,11 @@ struct MessagesRequest: ValueObservationQueryable {
 			.fetchAll(db)
 
 		let blocksByMessage = Dictionary(grouping: blocks, by: \.messageID)
-		let messageInfos = messages.map { message in
+		return messages.map { message in
 			MessageInfo(
 				message: message,
 				contentBlocks: blocksByMessage[message.id ?? -1] ?? []
 			)
 		}
-		fetchedCount = messageInfos.count
-		return messageInfos
 	}
 }

@@ -3,14 +3,13 @@ import SwiftUI
 struct TranscriptMessageView: View {
 	let messageInfo: MessageInfo
 	let sessionID: String
-	let serverURL: String?
 
 	var body: some View {
 		switch messageInfo.message.role {
 		case .user:
 			UserMessageView(messageInfo: messageInfo)
 		case .assistant:
-			AssistantMessageView(messageInfo: messageInfo, sessionID: sessionID, serverURL: serverURL)
+			AssistantMessageView(messageInfo: messageInfo, sessionID: sessionID)
 		case .toolResult:
 			ToolResultMessageView(messageInfo: messageInfo)
 		case .bashExecution:
@@ -37,8 +36,7 @@ struct TranscriptMessageView: View {
 						MessageContentBlock(messageID: 1, type: "text", text: "Hello, can you help me?", toolCallName: nil, position: 0),
 					]
 				),
-				sessionID: "preview",
-				serverURL: nil
+				sessionID: "preview"
 			)
 			TranscriptMessageView(
 				messageInfo: MessageInfo(
@@ -47,8 +45,7 @@ struct TranscriptMessageView: View {
 						MessageContentBlock(messageID: 2, type: "text", text: "Of course! What do you need help with?", toolCallName: nil, position: 0),
 					]
 				),
-				sessionID: "preview",
-				serverURL: nil
+				sessionID: "preview"
 			)
 			TranscriptMessageView(
 				messageInfo: MessageInfo(
@@ -57,8 +54,7 @@ struct TranscriptMessageView: View {
 						MessageContentBlock(messageID: 3, type: "text", text: "File contents returned successfully.", toolCallName: nil, position: 0),
 					]
 				),
-				sessionID: "preview",
-				serverURL: nil
+				sessionID: "preview"
 			)
 			TranscriptMessageView(
 				messageInfo: MessageInfo(
@@ -67,8 +63,7 @@ struct TranscriptMessageView: View {
 						MessageContentBlock(messageID: 4, type: "text", text: "$ echo hello\nhello", toolCallName: nil, position: 0),
 					]
 				),
-				sessionID: "preview",
-				serverURL: nil
+				sessionID: "preview"
 			)
 		}
 		.padding()

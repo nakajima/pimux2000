@@ -272,6 +272,8 @@ struct SendMessageRequest {
 }
 
 pub async fn start() -> Result<(), BoxError> {
+    crate::self_update::spawn_auto_update_task();
+
     let app = app(AppState::with_persistent_hosts()?);
     let port = port_from_env()?;
 
@@ -343,10 +345,7 @@ fn app(state: AppState) -> Router {
             "/sessions/{id}/builtin-command",
             post(session_builtin_command),
         )
-        .route(
-            "/sessions/{id}/interrupt",
-            post(interrupt_session),
-        )
+        .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/agent/connect", get(agent_connect))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
@@ -797,9 +796,7 @@ async fn interrupt_session(
     send_to_agent(
         &state,
         &host_location,
-        ServerToAgentMessage::InterruptSession {
-            session_id,
-        },
+        ServerToAgentMessage::InterruptSession { session_id },
     )
     .await?;
 
@@ -3506,6 +3503,7 @@ mod tests {
                 body: body.to_string(),
                 tool_name: None,
                 blocks: vec![MessageContentBlock::text(body).unwrap()],
+                message_id: None,
             }],
             freshness: TranscriptFreshness {
                 state,
@@ -3529,6 +3527,7 @@ mod tests {
                     Some("image/png"),
                     Some("ZmFrZQ=="),
                 )],
+                message_id: None,
             }],
             freshness: TranscriptFreshness {
                 state: TranscriptFreshnessState::Live,

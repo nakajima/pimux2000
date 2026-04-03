@@ -7,13 +7,13 @@ struct Message: Codable, FetchableRecord, MutablePersistableRecord, Identifiable
 
 	var id: Int64?
 	var piSessionID: Int64
-	var serverMessageID: Int?
+	var serverMessageID: String?
 	var role: Role
 	var toolName: String?
 	var position: Int
 	var createdAt: Date
 
-	nonisolated init(id: Int64? = nil, piSessionID: Int64, serverMessageID: Int? = nil, role: Role, toolName: String?, position: Int, createdAt: Date) {
+	nonisolated init(id: Int64? = nil, piSessionID: Int64, serverMessageID: String? = nil, role: Role, toolName: String?, position: Int, createdAt: Date) {
 		self.id = id
 		self.piSessionID = piSessionID
 		self.serverMessageID = serverMessageID

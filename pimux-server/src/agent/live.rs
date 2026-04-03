@@ -290,7 +290,12 @@ impl LiveSessionStoreHandle {
         error: Option<String>,
     ) {
         let mut store = self.inner.lock().await;
-        store.fulfill_get_command_argument_completions(connection_id, request_id, completions, error);
+        store.fulfill_get_command_argument_completions(
+            connection_id,
+            request_id,
+            completions,
+            error,
+        );
     }
 
     pub async fn send_ui_dialog_action(
@@ -385,12 +390,10 @@ impl LiveSessionStoreHandle {
         store.fulfill_builtin_command(connection_id, request_id, error);
     }
 
-    pub async fn interrupt_session(
-        &self,
-        session_id: &str,
-    ) -> Result<(), BoxError> {
+    pub async fn interrupt_session(&self, session_id: &str) -> Result<(), BoxError> {
         let store = self.inner.lock().await;
-        let sender = store.sender_for_session(session_id)
+        let sender = store
+            .sender_for_session(session_id)
             .ok_or_else(|| -> BoxError {
                 format!("session {session_id} has no live command connection").into()
             })?;
@@ -584,8 +587,7 @@ async fn start_listener_impl(
 
                             match message {
                                 LiveSessionIpcMessage::Hello { protocol_version } => {
-                                    if !(MIN_COMMAND_PROTOCOL_VERSION
-                                        ..=LIVE_PROTOCOL_VERSION)
+                                    if !(MIN_COMMAND_PROTOCOL_VERSION..=LIVE_PROTOCOL_VERSION)
                                         .contains(&protocol_version)
                                     {
                                         eprintln!(
@@ -2292,7 +2294,8 @@ struct InflightGetCommands {
 
 struct InflightGetCommandArgumentCompletions {
     connection_id: u64,
-    sender: oneshot::Sender<Result<Vec<SessionCommandCompletion>, GetCommandArgumentCompletionsError>>,
+    sender:
+        oneshot::Sender<Result<Vec<SessionCommandCompletion>, GetCommandArgumentCompletionsError>>,
 }
 
 struct InflightUiDialogAction {

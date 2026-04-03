@@ -24,6 +24,11 @@ pub struct Options {
     pub force: bool,
 }
 
+pub enum AutoUpdateResult {
+    AlreadyCurrent,
+    Updated { from: String, to: String },
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct GithubRelease {
     tag_name: String,
@@ -355,6 +360,83 @@ fn ensure_executable_permissions(path: &Path) -> Result<(), BoxError> {
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions)?;
     Ok(())
+}
+
+pub async fn check_and_apply() -> Result<AutoUpdateResult, BoxError> {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let current_executable = env::current_exe()?;
+    let target = current_release_target()?;
+    let client = github_client()?;
+    let release = fetch_latest_release(&client).await?;
+    let latest_version = normalize_release_tag(&release.tag_name);
+
+    if latest_version == current_version {
+        return Ok(AutoUpdateResult::AlreadyCurrent);
+    }
+
+    let asset = select_asset(
+        &release.assets,
+        RELEASE_BINARY_NAME,
+        &latest_version,
+        &target,
+    )
+    .ok_or_else(|| {
+        format!(
+            "latest release v{} does not contain a {} archive for target {}",
+            latest_version, RELEASE_BINARY_NAME, target
+        )
+    })?;
+
+    let archive_bytes = download_asset(&client, &asset.browser_download_url).await?;
+    replace_current_executable_from_archive(
+        &archive_bytes,
+        &current_executable,
+        RELEASE_BINARY_NAME,
+    )?;
+
+    restart_managed_services();
+
+    Ok(AutoUpdateResult::Updated {
+        from: current_version.to_string(),
+        to: latest_version,
+    })
+}
+
+pub fn spawn_auto_update_task() {
+    if auto_update_disabled() {
+        return;
+    }
+
+    tokio::spawn(auto_update_loop());
+}
+
+const AUTO_UPDATE_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const AUTO_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+async fn auto_update_loop() {
+    tokio::time::sleep(AUTO_UPDATE_INITIAL_DELAY).await;
+
+    let mut interval = tokio::time::interval(AUTO_UPDATE_INTERVAL);
+    loop {
+        interval.tick().await;
+        match check_and_apply().await {
+            Ok(AutoUpdateResult::AlreadyCurrent) => {}
+            Ok(AutoUpdateResult::Updated { from, to }) => {
+                eprintln!("auto-update: updated from v{from} to v{to}, restarting");
+            }
+            Err(error) => {
+                eprintln!("auto-update: check failed: {error}");
+            }
+        }
+    }
+}
+
+fn auto_update_disabled() -> bool {
+    let Ok(value) = env::var("PIMUX_AUTO_UPDATE") else {
+        return false;
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "0" | "false" | "no" | "off")
 }
 
 #[cfg(test)]

@@ -152,7 +152,7 @@ struct AppDatabase {
 		migrator.registerMigration("addMessageServerID") { db in
 			let columnNames = try Self.columnNames(in: "messages", db: db)
 			if !columnNames.contains("serverMessageID") {
-				try db.execute(sql: "ALTER TABLE messages ADD COLUMN serverMessageID INTEGER")
+				try db.execute(sql: "ALTER TABLE messages ADD COLUMN serverMessageID TEXT")
 			}
 		}
 
@@ -161,28 +161,17 @@ struct AppDatabase {
 
 	// MARK: - Writes
 
-	func saveServerConfiguration(serverURL rawValue: String) throws {
+	func saveServerURL(_ rawValue: String) throws {
 		let normalized = try PimuxServerClient.normalizedBaseURLString(from: rawValue)
-		try dbQueue.write { db in
-			let now = Date()
-			let existing = try ServerConfiguration
-				.order(Column("updatedAt").desc)
-				.fetchOne(db)
+		let current = UserDefaults.standard.string(forKey: "serverURL")
 
-			if existing?.serverURL != normalized {
+		if current != normalized {
+			try dbQueue.write { db in
 				try Self.clearSyncedData(in: db)
 			}
-
-			_ = try ServerConfiguration.deleteAll(db)
-
-			var configuration = ServerConfiguration(
-				id: nil,
-				serverURL: normalized,
-				createdAt: existing?.createdAt ?? now,
-				updatedAt: now
-			)
-			try configuration.insert(db)
 		}
+
+		UserDefaults.standard.set(normalized, forKey: "serverURL")
 	}
 
 	func updateSessionActivity(sessionID: String, active: Bool, attached: Bool) throws {
@@ -237,9 +226,18 @@ private struct AppDatabaseKey: EnvironmentKey {
 	static let defaultValue: AppDatabase? = nil
 }
 
+private struct PimuxServerClientKey: EnvironmentKey {
+	static let defaultValue: PimuxServerClient? = nil
+}
+
 extension EnvironmentValues {
 	var appDatabase: AppDatabase? {
 		get { self[AppDatabaseKey.self] }
 		set { self[AppDatabaseKey.self] = newValue }
+	}
+
+	var pimuxServerClient: PimuxServerClient? {
+		get { self[PimuxServerClientKey.self] }
+		set { self[PimuxServerClientKey.self] = newValue }
 	}
 }

@@ -10,6 +10,7 @@ import {
 	type ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
 import { setKeybindings, setKittyProtocolActive } from "@mariozechner/pi-tui";
+import { execFile } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +48,7 @@ interface PimuxMessage {
 	body: string;
 	toolName?: string;
 	blocks?: PimuxMessageBlock[];
+	messageId?: string;
 }
 
 interface PimuxSessionContextUsage {
@@ -648,7 +650,7 @@ export default function (pi: ExtensionAPI) {
 
 
 	pi.registerCommand("pimux", {
-		description: "Pimux helpers (usage: /pimux resummarize)",
+		description: "Pimux helpers (usage: /pimux resummarize | update-server)",
 		handler: async (args, ctx) => {
 			ensureUiPatched(ctx);
 			await attachCurrentSession(ctx);
@@ -662,8 +664,11 @@ export default function (pi: ExtensionAPI) {
 				case "resummarize":
 					await handlePimuxResummarizeCommand(pi, ctx, publishSnapshot);
 					return;
+				case "update-server":
+					await handlePimuxUpdateServerCommand(ctx);
+					return;
 				default:
-					ctx.ui.notify("Usage: /pimux resummarize", "info");
+					ctx.ui.notify("Usage: /pimux resummarize | update-server", "info");
 					return;
 			}
 		},
@@ -2011,6 +2016,29 @@ async function handlePimuxResummarizeCommand(
 	}
 }
 
+async function handlePimuxUpdateServerCommand(ctx: ExtensionCommandContext) {
+	ctx.ui.notify("Checking for pimux updates…", "info");
+
+	try {
+		const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+			execFile("pimux", ["update"], { timeout: 60_000 }, (error, stdout, stderr) => {
+				if (error) {
+					reject(Object.assign(error, { stdout, stderr }));
+				} else {
+					resolve({ stdout, stderr });
+				}
+			});
+		});
+
+		const message = result.stdout.trim() || result.stderr.trim() || "pimux update completed";
+		ctx.ui.notify(message, "info");
+	} catch (error: any) {
+		const message =
+			error.stderr?.trim() || error.stdout?.trim() || error.message || String(error);
+		ctx.ui.notify(`pimux update failed: ${message}`, "error");
+	}
+}
+
 async function resolveResummarizeModel(ctx: ExtensionCommandContext) {
 	const requested = process.env.PIMUX_SUMMARY_MODEL?.trim();
 	if (requested) {
@@ -2133,6 +2161,14 @@ function buildSnapshotMessages(ctx: ExtensionContext): PimuxMessage[] {
 }
 
 function entryToPimuxMessage(entry: any): PimuxMessage | undefined {
+	const message = entryToPimuxMessageContent(entry);
+	if (message && typeof entry?.id === "string") {
+		message.messageId = entry.id;
+	}
+	return message;
+}
+
+function entryToPimuxMessageContent(entry: any): PimuxMessage | undefined {
 	switch (entry?.type) {
 		case "message":
 			return agentMessageToPimuxMessage(entry.message, entry.timestamp);

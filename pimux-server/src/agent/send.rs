@@ -24,7 +24,8 @@ use super::{
     transcript,
 };
 
-const PARTIAL_UPDATE_THROTTLE: Duration = Duration::from_millis(150);
+const PERSISTED_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const PERSISTED_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub async fn send_message_to_session(
     discovered_session: DiscoveredSession,
@@ -157,8 +158,6 @@ async fn run_headless_prompt(
         let mut prompt_accepted = false;
         let mut delivery_confirmed = false;
         let mut saw_user_message_end = false;
-        let mut pending_partial: Option<Message> = None;
-        let mut last_partial_sent_at: Option<Instant> = None;
 
         while let Some(line) = lines
             .next_line()
@@ -199,41 +198,18 @@ async fn run_headless_prompt(
 
             match event_type {
                 "message_update" => {
-                    if let Some(message) = event.get("message").and_then(rpc_message_to_message)
-                        && message.role == Role::Assistant
-                    {
-                        let now = Instant::now();
-                        let should_publish = last_partial_sent_at
-                            .map(|last| now.duration_since(last) >= PARTIAL_UPDATE_THROTTLE)
-                            .unwrap_or(true);
-
-                        if should_publish {
-                            publish_event(
-                                &live_store,
-                                &live_updates,
-                                LiveSessionEvent::AssistantPartial {
-                                    session_id: session_id.clone(),
-                                    message,
-                                },
-                            )
-                            .await;
-                            last_partial_sent_at = Some(now);
-                            pending_partial = None;
-                        } else {
-                            pending_partial = Some(message);
-                        }
-                    }
+                    // Headless RPC message updates do not include durable pi entry IDs.
+                    // Keep the live transcript aligned with persisted transcript IDs by
+                    // only publishing snapshots after the message has been persisted.
                 }
                 "message_end" => {
                     if let Some(message) = event.get("message").and_then(rpc_message_to_message) {
                         let role = message.role.clone();
-                        publish_event(
+                        refresh_persisted_snapshot(
+                            &discovered_session,
                             &live_store,
                             &live_updates,
-                            LiveSessionEvent::SessionAppend {
-                                session_id: session_id.clone(),
-                                messages: vec![message],
-                            },
+                            Some(&message),
                         )
                         .await;
 
@@ -246,28 +222,21 @@ async fn run_headless_prompt(
                     }
                 }
                 "turn_end" => {
+                    refresh_persisted_snapshot(
+                        &discovered_session,
+                        &live_store,
+                        &live_updates,
+                        None,
+                    )
+                    .await;
+
                     if prompt_accepted {
                         confirm_delivery(&mut ack_tx, &mut delivery_confirmed);
                     }
-                    flush_pending_partial(
-                        &session_id,
-                        &live_store,
-                        &live_updates,
-                        &mut pending_partial,
-                    )
-                    .await;
                 }
                 _ => {}
             }
         }
-
-        flush_pending_partial(
-            &session_id,
-            &live_store,
-            &live_updates,
-            &mut pending_partial,
-        )
-        .await;
 
         if !prompt_accepted {
             return Err(format!(
@@ -335,25 +304,115 @@ async fn publish_event(
     }
 }
 
-async fn flush_pending_partial(
-    session_id: &str,
+async fn refresh_persisted_snapshot(
+    discovered_session: &DiscoveredSession,
     live_store: &LiveSessionStoreHandle,
     live_updates: &UnboundedSender<LiveUpdate>,
-    pending_partial: &mut Option<Message>,
+    expected_message: Option<&Message>,
 ) {
-    let Some(message) = pending_partial.take() else {
-        return;
-    };
+    let session_id = discovered_session.id.clone();
+    let deadline = Instant::now() + PERSISTED_SNAPSHOT_TIMEOUT;
+    let mut last_snapshot: Option<Vec<Message>> = None;
+    let mut last_error: Option<String> = None;
 
-    publish_event(
-        live_store,
-        live_updates,
-        LiveSessionEvent::AssistantPartial {
-            session_id: session_id.to_string(),
-            message,
-        },
-    )
-    .await;
+    loop {
+        match transcript::build_persisted_snapshot(discovered_session) {
+            Ok(snapshot) => {
+                let messages = snapshot.messages;
+                let matches_expected = expected_message
+                    .map(|message| snapshot_contains_message(&messages, message))
+                    .unwrap_or(true);
+
+                if matches_expected {
+                    publish_event(
+                        live_store,
+                        live_updates,
+                        LiveSessionEvent::SessionSnapshot {
+                            session_id: session_id.clone(),
+                            messages,
+                        },
+                    )
+                    .await;
+                    return;
+                }
+
+                last_snapshot = Some(messages);
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            break;
+        }
+
+        tokio::time::sleep(PERSISTED_SNAPSHOT_POLL_INTERVAL).await;
+    }
+
+    if let Some(messages) = last_snapshot {
+        publish_event(
+            live_store,
+            live_updates,
+            LiveSessionEvent::SessionSnapshot {
+                session_id: session_id.clone(),
+                messages,
+            },
+        )
+        .await;
+    }
+
+    if let Some(expected_message) = expected_message {
+        warn!(
+            session_id = session_id.as_str(),
+            role = ?expected_message.role,
+            created_at = %expected_message.created_at,
+            "persisted transcript did not include message before timeout"
+        );
+    } else if let Some(error) = last_error {
+        warn!(
+            session_id = session_id.as_str(),
+            error, "failed to rebuild persisted transcript snapshot"
+        );
+    }
+}
+
+fn snapshot_contains_message(messages: &[Message], expected: &Message) -> bool {
+    messages
+        .iter()
+        .any(|message| same_message_ignoring_id(message, expected))
+}
+
+fn same_message_ignoring_id(lhs: &Message, rhs: &Message) -> bool {
+    lhs.created_at == rhs.created_at
+        && lhs.role == rhs.role
+        && lhs.tool_name == rhs.tool_name
+        && text_matches(&lhs.body, &rhs.body)
+        && blocks_match(&lhs.blocks, &rhs.blocks)
+}
+
+fn blocks_match(lhs: &[MessageContentBlock], rhs: &[MessageContentBlock]) -> bool {
+    lhs.len() == rhs.len()
+        && lhs.iter().zip(rhs).all(|(lhs, rhs)| {
+            lhs.kind == rhs.kind
+                && option_text_matches(lhs.text.as_deref(), rhs.text.as_deref())
+                && option_text_matches(lhs.tool_call_name.as_deref(), rhs.tool_call_name.as_deref())
+                && lhs.mime_type == rhs.mime_type
+                && lhs.data == rhs.data
+                && lhs.attachment_id == rhs.attachment_id
+        })
+}
+
+fn option_text_matches(lhs: Option<&str>, rhs: Option<&str>) -> bool {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => text_matches(lhs, rhs),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn text_matches(lhs: &str, rhs: &str) -> bool {
+    lhs == rhs || lhs.starts_with(rhs) || rhs.starts_with(lhs)
 }
 
 async fn log_stderr(session_id: String, stderr: tokio::process::ChildStderr) {
@@ -818,10 +877,11 @@ fn flatten_bash_execution(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use serde_json::json;
 
-    use super::{content_blocks, prompt_payload};
-    use crate::message::{ImageContent, MessageContentBlockKind};
+    use super::{content_blocks, prompt_payload, same_message_ignoring_id};
+    use crate::message::{ImageContent, Message, MessageContentBlockKind, Role};
 
     #[test]
     fn prompt_payload_includes_images_when_present() {
@@ -853,5 +913,17 @@ mod tests {
         assert_eq!(blocks[0].kind, MessageContentBlockKind::Image);
         assert_eq!(blocks[0].mime_type.as_deref(), Some("image/png"));
         assert_eq!(blocks[0].data.as_deref(), Some("ZmFrZQ=="));
+    }
+
+    #[test]
+    fn same_message_ignoring_id_allows_truncated_persisted_text() {
+        let timestamp = Utc::now();
+        let live = Message::from_text(timestamp, Role::Assistant, "abcdef").unwrap();
+        let mut persisted = live.clone();
+        persisted.message_id = Some("entry-1".to_string());
+        persisted.body = "abc".to_string();
+        persisted.blocks[0].text = Some("abc".to_string());
+
+        assert!(same_message_ignoring_id(&persisted, &live));
     }
 }

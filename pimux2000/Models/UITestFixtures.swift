@@ -3,7 +3,7 @@ import GRDB
 
 enum UITestFixtures {
 	static func install(in appDatabase: AppDatabase) throws {
-		try appDatabase.saveServerConfiguration(serverURL: "http://fixture.local:3000")
+		try appDatabase.saveServerURL("http://fixture.local:3000")
 
 		try appDatabase.dbQueue.write { db in
 			let now = Date()

@@ -192,6 +192,8 @@ fn filter_discovered_sessions_by_date(
 }
 
 pub async fn start(config: Config) -> Result<(), BoxError> {
+    crate::self_update::spawn_auto_update_task();
+
     let pi_agent_dir = discovery::resolve_pi_agent_dir(config.pi_agent_dir)?;
     let session_root = discovery::session_root(&pi_agent_dir);
     let summary_config = summarizer::Config {

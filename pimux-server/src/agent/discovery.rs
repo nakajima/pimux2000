@@ -398,7 +398,13 @@ fn parse_model_capabilities(output: &str) -> HashMap<String, ModelCapabilities> 
 
         let supports_images = columns.get(5).map_or(false, |col| *col == "yes");
         let key = format!("{}/{}", columns[0], columns[1]);
-        capabilities.insert(key, ModelCapabilities { context_window, supports_images });
+        capabilities.insert(
+            key,
+            ModelCapabilities {
+                context_window,
+                supports_images,
+            },
+        );
     }
 
     capabilities
@@ -650,8 +656,16 @@ mod tests {
         .join("\n");
 
         let caps = parse_model_capabilities(&output);
-        assert!(caps.get("anthropic/claude-opus-4-6").unwrap().supports_images);
+        assert!(
+            caps.get("anthropic/claude-opus-4-6")
+                .unwrap()
+                .supports_images
+        );
         assert!(!caps.get("openai-codex/gpt-5.4").unwrap().supports_images);
-        assert!(caps.get("anthropic/claude-haiku-4-5").unwrap().supports_images);
+        assert!(
+            caps.get("anthropic/claude-haiku-4-5")
+                .unwrap()
+                .supports_images
+        );
     }
 }

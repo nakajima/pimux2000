@@ -6,45 +6,21 @@ import Testing
 @MainActor
 struct AppDatabaseTests {
 	@Test
-	func saveServerConfigurationTrimsWhitespaceAndNormalizes() async throws {
+	func saveServerURLTrimsWhitespaceAndNormalizes() async throws {
 		let database = AppDatabase.preview()
+		defer { UserDefaults.standard.removeObject(forKey: "serverURL") }
 
-		try database.saveServerConfiguration(serverURL: "  localhost:3000/  ")
+		try database.saveServerURL("  localhost:3000/  ")
 
-		let configurations = try await database.dbQueue.read { db in
-			try ServerConfiguration.fetchAll(db)
-		}
-
-		#expect(configurations.count == 1)
-		#expect(configurations[0].serverURL == "http://localhost:3000")
+		#expect(UserDefaults.standard.string(forKey: "serverURL") == "http://localhost:3000")
 	}
 
 	@Test
-	func saveServerConfigurationKeepsSingleRow() async throws {
+	func changingServerURLClearsSyncedData() async throws {
 		let database = AppDatabase.preview()
+		defer { UserDefaults.standard.removeObject(forKey: "serverURL") }
 
-		try database.saveServerConfiguration(serverURL: "http://localhost:3000")
-		let firstConfiguration = try await database.dbQueue.read { db in
-			try ServerConfiguration.fetchOne(db)
-		}
-		let initialUpdatedAt = try #require(firstConfiguration?.updatedAt)
-
-		try await Task.sleep(for: .milliseconds(20))
-		try database.saveServerConfiguration(serverURL: "localhost:3000")
-
-		let configurations = try await database.dbQueue.read { db in
-			try ServerConfiguration.fetchAll(db)
-		}
-
-		#expect(configurations.count == 1)
-		#expect(configurations[0].serverURL == "http://localhost:3000")
-		#expect(configurations[0].updatedAt >= initialUpdatedAt)
-	}
-
-	@Test
-	func changingServerConfigurationClearsSyncedData() async throws {
-		let database = AppDatabase.preview()
-		try database.saveServerConfiguration(serverURL: "http://localhost:3000")
+		try database.saveServerURL("http://localhost:3000")
 
 		try await database.dbQueue.write { db in
 			var host = Host(id: nil, location: "nakajima@arch", createdAt: Date(), updatedAt: Date())
@@ -72,15 +48,14 @@ struct AppDatabaseTests {
 			try block.insert(db)
 		}
 
-		try database.saveServerConfiguration(serverURL: "http://localhost:4000")
+		try database.saveServerURL("http://localhost:4000")
 
 		let counts = try await database.dbQueue.read { db in
 			try (
 				Host.fetchCount(db),
 				PiSession.fetchCount(db),
 				Message.fetchCount(db),
-				MessageContentBlock.fetchCount(db),
-				ServerConfiguration.fetchOne(db)
+				MessageContentBlock.fetchCount(db)
 			)
 		}
 
@@ -88,7 +63,7 @@ struct AppDatabaseTests {
 		#expect(counts.1 == 0)
 		#expect(counts.2 == 0)
 		#expect(counts.3 == 0)
-		#expect(counts.4?.serverURL == "http://localhost:4000")
+		#expect(UserDefaults.standard.string(forKey: "serverURL") == "http://localhost:4000")
 	}
 
 	@Test

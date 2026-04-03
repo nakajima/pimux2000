@@ -1,0 +1,19 @@
+{
+	"name": "xcode build server",
+	"version": "1.3.0",
+	"bspVersion": "2.2.0",
+	"languages": [
+		"c",
+		"cpp",
+		"objective-c",
+		"objective-cpp",
+		"swift"
+	],
+	"argv": [
+		"/opt/homebrew/bin/xcode-build-server"
+	],
+	"workspace": "/Users/nakajima/apps/pimux2000/pimux2000.xcodeproj/project.xcworkspace",
+	"build_root": "/Users/nakajima/Library/Developer/Xcode/DerivedData/pimux2000-bnfiijtotivvpmfecnhivgmcrjkz",
+	"scheme": "pimux2000",
+	"kind": "xcode"
+}

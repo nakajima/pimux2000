@@ -12,6 +12,8 @@ struct MessageComposerView: View {
 	var isEnabled: Bool = true
 	var isSending: Bool = false
 	var isAgentActive: Bool = false
+	var isWorking: Bool = false
+	var workingMessage: String? = nil
 	var errorMessage: String? = nil
 	var loadArgumentCompletions: @Sendable (String, String) async -> [SlashCommandArgumentCompletion] = { _, _ in [] }
 	var onSend: () -> Void
@@ -42,6 +44,13 @@ struct MessageComposerView: View {
 
 	private var hasLoadingAttachments: Bool {
 		attachments.contains { if case .loading = $0.processingState { return true }; return false }
+	}
+
+	private var normalizedWorkingMessage: String? {
+		guard let trimmedWorkingMessage = workingMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmedWorkingMessage.isEmpty else {
+			return nil
+		}
+		return trimmedWorkingMessage
 	}
 
 	private var slashValidationMessage: String? {
@@ -89,6 +98,16 @@ struct MessageComposerView: View {
 					.foregroundStyle(.orange)
 				}
 
+				if let normalizedWorkingMessage {
+					HStack(spacing: 8) {
+						ProgressView()
+							.controlSize(.small)
+						Text(verbatim: normalizedWorkingMessage)
+					}
+					.font(.caption)
+					.foregroundStyle(.secondary)
+				}
+
 				if !attachments.isEmpty {
 					ComposerAttachmentStrip(attachments: attachments, onRemove: onRemoveAttachment)
 				}
@@ -130,13 +149,20 @@ struct MessageComposerView: View {
 						.onSubmit(handleSubmit)
 
 					if isAgentActive && !isSending {
-						Button(action: onStop) {
-							Image(systemName: "stop.circle.fill")
-								.font(.system(size: 28))
+						HStack(spacing: 8) {
+							if isWorking {
+								ProgressView()
+									.controlSize(.small)
+							}
+
+							Button(action: onStop) {
+								Image(systemName: "stop.circle.fill")
+									.font(.system(size: 28))
+							}
+							.buttonStyle(.plain)
+							.keyboardShortcut(.escape, modifiers: [])
+							.accessibilityLabel("Stop agent")
 						}
-						.buttonStyle(.plain)
-						.keyboardShortcut(.escape, modifiers: [])
-						.accessibilityLabel("Stop agent")
 					} else {
 						Button(action: sendIfAllowed) {
 							if isSending {
@@ -510,6 +536,9 @@ private struct MessageComposerPreviewHost: View {
 	var customCommands: [PimuxSessionCommand] = []
 	var isEnabled: Bool = true
 	var isSending: Bool = false
+	var isAgentActive: Bool = false
+	var isWorking: Bool = false
+	var workingMessage: String? = nil
 	var errorMessage: String? = nil
 	var loadArgumentCompletions: @Sendable (String, String) async -> [SlashCommandArgumentCompletion] = { _, _ in [] }
 
@@ -523,6 +552,9 @@ private struct MessageComposerPreviewHost: View {
 				customCommands: customCommands,
 				isEnabled: isEnabled,
 				isSending: isSending,
+				isAgentActive: isAgentActive,
+				isWorking: isWorking,
+				workingMessage: workingMessage,
 				errorMessage: errorMessage,
 				loadArgumentCompletions: loadArgumentCompletions,
 				onSend: {}
@@ -562,6 +594,15 @@ private struct MessageComposerPreviewHost: View {
 
 #Preview("Sending") {
 	MessageComposerPreviewHost(text: "Continue from here", isSending: true)
+}
+
+#Preview("Working") {
+	MessageComposerPreviewHost(
+		text: "",
+		isAgentActive: true,
+		isWorking: true,
+		workingMessage: "Thinking…"
+	)
 }
 
 #Preview("Error") {

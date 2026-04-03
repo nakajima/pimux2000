@@ -39,9 +39,7 @@ struct pimux2000App: App {
 
 	var body: some Scene {
 		WindowGroup {
-			ContentView()
-				.environment(\.appDatabase, appDatabase)
-				.databaseContext(.readWrite { appDatabase.dbQueue })
+			AppRootView(appDatabase: appDatabase)
 		}
 	}
 
@@ -51,5 +49,45 @@ struct pimux2000App: App {
 
 	private static var databaseURL: URL {
 		URL.documentsDirectory.appending(path: "db.sqlite")
+	}
+}
+
+private struct AppRootView: View {
+	let appDatabase: AppDatabase
+
+	@AppStorage("serverURL") private var serverURL: String?
+	@State private var pimuxServerClient: PimuxServerClient?
+	@State private var configuredServerURL: String?
+
+	var body: some View {
+		ContentView()
+			.environment(\.appDatabase, appDatabase)
+			.environment(\.pimuxServerClient, pimuxServerClient)
+			.databaseContext(.readWrite { appDatabase.dbQueue })
+			.onAppear {
+				updatePimuxServerClient(for: serverURL)
+			}
+			.onChange(of: serverURL) { _, newValue in
+				updatePimuxServerClient(for: newValue)
+			}
+	}
+
+	private func updatePimuxServerClient(for rawServerURL: String?) {
+		let nextServerURL = rawServerURL?
+			.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard configuredServerURL != nextServerURL else { return }
+		configuredServerURL = nextServerURL
+
+		guard let nextServerURL, !nextServerURL.isEmpty else {
+			pimuxServerClient = nil
+			return
+		}
+
+		do {
+			pimuxServerClient = try PimuxServerClient(baseURL: nextServerURL)
+		} catch {
+			pimuxServerClient = nil
+			print("Failed to create pimux server client for \(nextServerURL): \(error)")
+		}
 	}
 }

@@ -64,7 +64,8 @@ pub fn build_persisted_snapshot(
     let mut last_timestamp = discovered_session.activity_timestamp();
 
     for entry in branch {
-        if let Some(message) = entry_to_message(&entry.value) {
+        if let Some(mut message) = entry_to_message(&entry.value) {
+            message.message_id = Some(entry.id.clone());
             last_timestamp = message.created_at;
             messages.push(message);
         }

@@ -4,9 +4,10 @@ import UIKit
 // MARK: - AssistantMessageView
 
 struct AssistantMessageView: View {
+	@Environment(\.pimuxServerClient) private var pimuxServerClient
+
 	let messageInfo: MessageInfo
 	let sessionID: String
-	let serverURL: String?
 
 	private var message: Message { messageInfo.message }
 
@@ -95,14 +96,8 @@ struct AssistantMessageView: View {
 			return cachedURL
 		}
 
-		guard let serverURL else { return nil }
-
-		do {
-			let client = try PimuxServerClient(baseURL: serverURL)
-			return client.attachmentURL(sessionID: sessionID, attachmentID: attachmentID)
-		} catch {
-			return nil
-		}
+		guard let pimuxServerClient else { return nil }
+		return pimuxServerClient.attachmentURL(sessionID: sessionID, attachmentID: attachmentID)
 	}
 }
 
@@ -229,7 +224,7 @@ struct ToolCallDetailsView: View {
 	let attachmentID = "preview-img"
 	_ = PreviewAttachmentFixture.installImageAttachment(sessionID: sessionID, attachmentID: attachmentID)
 
-	NavigationStack {
+	return NavigationStack {
 		AssistantMessageView(
 			messageInfo: MessageInfo(
 				message: Message(piSessionID: 1, role: .assistant, toolName: nil, position: 0, createdAt: Date()),
@@ -246,8 +241,7 @@ struct ToolCallDetailsView: View {
 					MessageContentBlock(messageID: 1, type: "image", text: nil, toolCallName: nil, mimeType: "image/png", attachmentID: attachmentID, position: 3),
 				]
 			),
-			sessionID: sessionID,
-			serverURL: nil
+			sessionID: sessionID
 		)
 		.padding()
 	}

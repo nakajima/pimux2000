@@ -76,6 +76,8 @@ pub struct Message {
     pub tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<MessageContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "messageId")]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +97,8 @@ pub struct ApiMessageContentBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiMessage {
+    #[serde(rename = "messageId", skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub role: Role,
     pub body: String,
@@ -129,11 +133,13 @@ impl Message {
             body: body_from_blocks(role, &blocks),
             tool_name: None,
             blocks,
+            message_id: None,
         })
     }
 
     pub fn to_api(&self) -> ApiMessage {
         ApiMessage {
+            message_id: self.message_id.clone(),
             created_at: self.created_at,
             role: self.role,
             body: self.body.clone(),

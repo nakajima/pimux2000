@@ -4,31 +4,19 @@ import GRDBQuery
 
 struct PiSessionSync {
 	var dbContext: DatabaseContext
+	let pimuxServerClient: PimuxServerClient
 
 	func sync() async {
-		let serverConfiguration: ServerConfiguration?
 		do {
-			serverConfiguration = try await dbContext.reader.read { db in
-				try CurrentServerConfigurationRequest().fetch(db)
-			}
-		} catch {
-			print("Error reading server configuration: \(error)")
-			return
-		}
-
-		guard let serverConfiguration else { return }
-
-		do {
-			let client = try PimuxServerClient(baseURL: serverConfiguration.serverURL)
-			async let remoteHosts = client.listHosts()
-			async let remoteSessions = client.listAllSessions()
+			async let remoteHosts = pimuxServerClient.listHosts()
+			async let remoteSessions = pimuxServerClient.listAllSessions()
 			let (hosts, sessions) = try await (remoteHosts, remoteSessions)
 
 			try await dbContext.writer.write { db in
 				try Self.store(remoteHosts: hosts, remoteSessions: sessions, in: db)
 			}
 		} catch {
-			print("Error syncing \(serverConfiguration.serverURL): \(error)")
+			print("Error syncing pimux server: \(error)")
 		}
 	}
 
@@ -227,7 +215,7 @@ struct PiSessionSync {
 		}
 		let blocksByMessageID = Dictionary(grouping: existingBlocks, by: \.messageID)
 
-		var existingByServerID: [Int: (message: Message, payload: MessagePayload)] = [:]
+		var existingByServerID: [String: (message: Message, payload: MessagePayload)] = [:]
 		for message in existingMessages {
 			if let serverID = message.serverMessageID {
 				existingByServerID[serverID] = (
@@ -432,7 +420,7 @@ struct PiSessionSync {
 }
 
 private struct MessagePayload: Equatable {
-	let serverMessageID: Int?
+	let serverMessageID: String?
 	let role: Message.Role
 	let toolName: String?
 	let position: Int

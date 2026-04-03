@@ -107,7 +107,7 @@ struct PimuxSessionMessagesResponse: Decodable, Equatable, Sendable {
 }
 
 struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
-	let messageId: Int?
+	let messageId: String?
 	let createdAt: Date
 	let role: String
 	let body: String
@@ -123,7 +123,7 @@ struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 		case blocks
 	}
 
-	init(messageId: Int? = nil, createdAt: Date, role: String, body: String, toolName: String? = nil, blocks: [PimuxTranscriptMessageBlock]? = nil) {
+	init(messageId: String? = nil, createdAt: Date, role: String, body: String, toolName: String? = nil, blocks: [PimuxTranscriptMessageBlock]? = nil) {
 		self.messageId = messageId
 		self.createdAt = createdAt
 		self.role = role
@@ -140,7 +140,7 @@ struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 
 	init(from decoder: Decoder) throws {
 		let container = try decoder.container(keyedBy: CodingKeys.self)
-		let messageId = try container.decodeIfPresent(Int.self, forKey: .messageId)
+		let messageId = try container.decodeIfPresent(String.self, forKey: .messageId)
 		let createdAt = try container.decode(Date.self, forKey: .createdAt)
 		let role = try container.decode(String.self, forKey: .role)
 		let body = try container.decodeIfPresent(String.self, forKey: .body) ?? ""
@@ -493,7 +493,7 @@ private struct PimuxSendMessageRequest: Encodable {
 	let images: [PimuxInputImage]
 }
 
-struct PimuxServerClient {
+actor PimuxServerClient {
 	private let baseURL: URL
 	private let session: URLSession
 
@@ -536,7 +536,7 @@ struct PimuxServerClient {
 		try await requestJSON(PimuxSessionMessagesResponse.self, path: "/sessions/\(sessionID)/messages")
 	}
 
-	func attachmentURL(sessionID: String, attachmentID: String) -> URL {
+	nonisolated func attachmentURL(sessionID: String, attachmentID: String) -> URL {
 		baseURL
 			.appendingPathComponent("sessions")
 			.appendingPathComponent(sessionID)
@@ -763,7 +763,7 @@ struct PimuxServerClient {
 		return url
 	}
 
-	private nonisolated func requestJSON<Response: Decodable>(
+	private func requestJSON<Response: Decodable>(
 		_: Response.Type,
 		path: String,
 		queryItems: [URLQueryItem] = [],

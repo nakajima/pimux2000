@@ -4,8 +4,8 @@ use crate::{
     host::HostIdentity,
     message::ImageContent,
     session::{
-        ActiveSession, SessionBuiltinCommandRequest, SessionBuiltinCommandResponse,
-        SessionCommand, SessionCommandCompletion,
+        ActiveSession, SessionBuiltinCommandRequest, SessionBuiltinCommandResponse, SessionCommand,
+        SessionCommandCompletion,
     },
     transcript::{
         SessionMessagesResponse, SessionTerminalOnlyUiState, SessionUiDialogAction,
