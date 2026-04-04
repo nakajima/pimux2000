@@ -183,7 +183,7 @@ enum TranscriptEmptyState: Equatable {
 					let savedOffset = tableView.contentOffset
 					dataSource.applySnapshotUsingReloadData(snapshot)
 					if shouldForcePin, !newMessages.isEmpty {
-						tableView.scrollToRow(at: IndexPath(row: 0, section: 0), at: .bottom, animated: false)
+						tableView.scrollToRow(at: IndexPath(row: 0, section: 0), at: .top, animated: false)
 					} else {
 						tableView.contentOffset = savedOffset
 					}
@@ -215,7 +215,7 @@ enum TranscriptEmptyState: Equatable {
 					if shouldForcePin, !newMessages.isEmpty {
 						tableView.scrollToRow(
 							at: IndexPath(row: 0, section: 0),
-							at: .bottom,
+							at: .top,
 							animated: changedIDs.isEmpty
 						)
 					}

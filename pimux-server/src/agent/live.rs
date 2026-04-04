@@ -38,6 +38,7 @@ const MAX_LIVE_MESSAGE_BODY_CHARS: usize = 8_000;
 const LIVE_PROTOCOL_VERSION: u32 = 8;
 const MIN_COMMAND_PROTOCOL_VERSION: u32 = 7;
 const COMMAND_ARGUMENT_COMPLETIONS_PROTOCOL_VERSION: u32 = 8;
+const AT_COMPLETIONS_PROTOCOL_VERSION: u32 = 8;
 const SEND_USER_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const GET_COMMANDS_TIMEOUT: Duration = Duration::from_secs(5);
 const GET_COMMAND_ARGUMENT_COMPLETIONS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -296,6 +297,52 @@ impl LiveSessionStoreHandle {
             completions,
             error,
         );
+    }
+
+    pub async fn get_at_completions(
+        &self,
+        session_id: &str,
+        prefix: &str,
+    ) -> Result<Vec<SessionCommandCompletion>, GetAtCompletionsError> {
+        let (sender, request_id, receiver) = {
+            let mut store = self.inner.lock().await;
+            store.purge_expired();
+            store.prepare_get_at_completions(session_id)?
+        };
+
+        if sender
+            .send(LiveAgentCommand::GetAtCompletions {
+                request_id: request_id.clone(),
+                session_id: session_id.to_string(),
+                prefix: prefix.to_string(),
+            })
+            .is_err()
+        {
+            let mut store = self.inner.lock().await;
+            store.cancel_get_at_completions(&request_id);
+            return Err(GetAtCompletionsError::Unavailable);
+        }
+
+        match tokio::time::timeout(GET_COMMAND_ARGUMENT_COMPLETIONS_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(GetAtCompletionsError::Disconnected),
+            Err(_) => {
+                let mut store = self.inner.lock().await;
+                store.cancel_get_at_completions(&request_id);
+                Err(GetAtCompletionsError::TimedOut)
+            }
+        }
+    }
+
+    pub async fn fulfill_get_at_completions(
+        &self,
+        connection_id: u64,
+        request_id: &str,
+        completions: Vec<SessionCommandCompletion>,
+        error: Option<String>,
+    ) {
+        let mut store = self.inner.lock().await;
+        store.fulfill_get_at_completions(connection_id, request_id, completions, error);
     }
 
     pub async fn send_ui_dialog_action(
@@ -648,6 +695,21 @@ async fn start_listener_impl(
                                         )
                                         .await;
                                 }
+                                LiveSessionIpcMessage::GetAtCompletionsResult {
+                                    request_id,
+                                    session_id: _,
+                                    completions,
+                                    error,
+                                } => {
+                                    store
+                                        .fulfill_get_at_completions(
+                                            connection_id,
+                                            &request_id,
+                                            completions,
+                                            error,
+                                        )
+                                        .await;
+                                }
                                 LiveSessionIpcMessage::UiDialogActionResult {
                                     request_id,
                                     session_id: _,
@@ -979,6 +1041,28 @@ impl std::fmt::Display for GetCommandArgumentCompletionsError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GetAtCompletionsError {
+    Unavailable,
+    Disconnected,
+    TimedOut,
+    Failed(String),
+}
+
+impl std::fmt::Display for GetAtCompletionsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => write!(
+                f,
+                "no live attached pimux extension is available for this session"
+            ),
+            Self::Disconnected => write!(f, "live session connection disconnected"),
+            Self::TimedOut => write!(f, "timed out waiting for @ completions response"),
+            Self::Failed(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiDialogActionError {
     Unavailable,
     Disconnected,
@@ -1087,6 +1171,13 @@ enum LiveSessionIpcMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    GetAtCompletionsResult {
+        request_id: String,
+        session_id: String,
+        completions: Vec<SessionCommandCompletion>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     UiDialogActionResult {
         request_id: String,
         session_id: String,
@@ -1122,6 +1213,11 @@ enum LiveAgentCommand {
         session_id: String,
         command_name: String,
         argument_prefix: String,
+    },
+    GetAtCompletions {
+        request_id: String,
+        session_id: String,
+        prefix: String,
     },
     UiDialogAction {
         request_id: String,
@@ -1190,6 +1286,7 @@ struct LiveSessionStore {
     inflight_get_commands: HashMap<String, InflightGetCommands>,
     inflight_get_command_argument_completions:
         HashMap<String, InflightGetCommandArgumentCompletions>,
+    inflight_get_at_completions: HashMap<String, InflightGetAtCompletions>,
     inflight_ui_dialog_actions: HashMap<String, InflightUiDialogAction>,
     inflight_builtin_commands: HashMap<String, InflightBuiltinCommand>,
     next_send_request_id: u64,
@@ -1210,6 +1307,7 @@ impl LiveSessionStore {
             inflight_send_user_messages: HashMap::new(),
             inflight_get_commands: HashMap::new(),
             inflight_get_command_argument_completions: HashMap::new(),
+            inflight_get_at_completions: HashMap::new(),
             inflight_ui_dialog_actions: HashMap::new(),
             inflight_builtin_commands: HashMap::new(),
             next_send_request_id: 1,
@@ -1770,6 +1868,69 @@ impl LiveSessionStore {
             .remove(request_id);
     }
 
+    fn prepare_get_at_completions(
+        &mut self,
+        session_id: &str,
+    ) -> Result<
+        (
+            UnboundedSender<LiveAgentCommand>,
+            String,
+            oneshot::Receiver<Result<Vec<SessionCommandCompletion>, GetAtCompletionsError>>,
+        ),
+        GetAtCompletionsError,
+    > {
+        let Some(connection_id) = self.command_session_connections.get(session_id).copied() else {
+            return Err(GetAtCompletionsError::Unavailable);
+        };
+        let Some(connection) = self.command_connections.get(&connection_id) else {
+            self.command_session_connections.remove(session_id);
+            return Err(GetAtCompletionsError::Unavailable);
+        };
+        if connection.protocol_version < AT_COMPLETIONS_PROTOCOL_VERSION {
+            return Err(GetAtCompletionsError::Unavailable);
+        }
+
+        let request_id = format!("live-at-comp-{}", self.next_send_request_id);
+        self.next_send_request_id += 1;
+
+        let (sender, receiver) = oneshot::channel();
+        self.inflight_get_at_completions.insert(
+            request_id.clone(),
+            InflightGetAtCompletions {
+                connection_id,
+                sender,
+            },
+        );
+
+        Ok((connection.sender.clone(), request_id, receiver))
+    }
+
+    fn fulfill_get_at_completions(
+        &mut self,
+        connection_id: u64,
+        request_id: &str,
+        completions: Vec<SessionCommandCompletion>,
+        error: Option<String>,
+    ) {
+        let Some(inflight) = self.inflight_get_at_completions.remove(request_id) else {
+            return;
+        };
+
+        if inflight.connection_id != connection_id {
+            return;
+        }
+
+        let result = match error {
+            Some(error) => Err(GetAtCompletionsError::Failed(error)),
+            None => Ok(completions),
+        };
+        let _ = inflight.sender.send(result);
+    }
+
+    fn cancel_get_at_completions(&mut self, request_id: &str) {
+        self.inflight_get_at_completions.remove(request_id);
+    }
+
     fn prepare_ui_dialog_action(
         &mut self,
         session_id: &str,
@@ -1920,6 +2081,10 @@ impl LiveSessionStore {
             connection_id,
             GetCommandArgumentCompletionsError::Disconnected,
         );
+        self.fail_inflight_get_at_completions_for_connection(
+            connection_id,
+            GetAtCompletionsError::Disconnected,
+        );
         self.fail_inflight_ui_dialog_actions_for_connection(
             connection_id,
             UiDialogActionError::Disconnected,
@@ -1995,6 +2160,26 @@ impl LiveSessionStore {
                 .inflight_get_command_argument_completions
                 .remove(&request_id)
             {
+                let _ = inflight.sender.send(Err(error.clone()));
+            }
+        }
+    }
+
+    fn fail_inflight_get_at_completions_for_connection(
+        &mut self,
+        connection_id: u64,
+        error: GetAtCompletionsError,
+    ) {
+        let request_ids = self
+            .inflight_get_at_completions
+            .iter()
+            .filter_map(|(request_id, inflight)| {
+                (inflight.connection_id == connection_id).then_some(request_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for request_id in request_ids {
+            if let Some(inflight) = self.inflight_get_at_completions.remove(&request_id) {
                 let _ = inflight.sender.send(Err(error.clone()));
             }
         }
@@ -2296,6 +2481,11 @@ struct InflightGetCommandArgumentCompletions {
     connection_id: u64,
     sender:
         oneshot::Sender<Result<Vec<SessionCommandCompletion>, GetCommandArgumentCompletionsError>>,
+}
+
+struct InflightGetAtCompletions {
+    connection_id: u64,
+    sender: oneshot::Sender<Result<Vec<SessionCommandCompletion>, GetAtCompletionsError>>,
 }
 
 struct InflightUiDialogAction {

@@ -16,6 +16,7 @@ struct MessageComposerView: View {
 	var workingMessage: String? = nil
 	var errorMessage: String? = nil
 	var loadArgumentCompletions: @Sendable (String, String) async -> [SlashCommandArgumentCompletion] = { _, _ in [] }
+	var loadAtCompletions: @Sendable (String) async -> [AtCompletionItem] = { _ in [] }
 	var onSend: () -> Void
 	var onStop: () -> Void = {}
 	var onRemoveAttachment: (UUID) -> Void = { _ in }
@@ -29,6 +30,10 @@ struct MessageComposerView: View {
 	@State private var slashMenuSelection: Int = 0
 	@State private var slashMenuItems: [SlashCompletionMenuItem] = []
 	@State private var slashCompletionTask: Task<Void, Never>?
+	@State private var atMenuSelection: Int = 0
+	@State private var atMenuItems: [AtCompletionItem] = []
+	@State private var atCompletionCache: [String: [AtCompletionItem]] = [:]
+	@State private var atCompletionTask: Task<Void, Never>?
 
 	private var trimmedText: String {
 		text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -71,7 +76,12 @@ struct MessageComposerView: View {
 			Divider()
 
 			VStack(alignment: .leading, spacing: 8) {
-				if !slashMenuItems.isEmpty {
+				if !atMenuItems.isEmpty {
+					AtCompletionMenuView(items: atMenuItems, selectedIndex: atMenuSelection) { item in
+						applyAtCompletion(item)
+					}
+					.transition(.move(edge: .bottom).combined(with: .opacity))
+				} else if !slashMenuItems.isEmpty {
 					SlashCommandMenuView(items: slashMenuItems, selectedIndex: slashMenuSelection) { item in
 						applySlashCompletion(item)
 					}
@@ -184,15 +194,19 @@ struct MessageComposerView: View {
 			.padding(.horizontal)
 			.padding(.vertical, 12)
 			.background(.thinMaterial)
+			.animation(.easeOut(duration: 0.15), value: atMenuItems.map(\.id))
 			.animation(.easeOut(duration: 0.15), value: slashMenuItems.map(\.id))
 			.animation(.easeOut(duration: 0.15), value: attachments.map(\.id))
 			.onAppear(perform: refreshSlashMenuItems)
 			.onDisappear {
 				slashCompletionTask?.cancel()
 				slashCompletionTask = nil
+				atCompletionTask?.cancel()
+				atCompletionTask = nil
 			}
 			.onChange(of: text) {
 				refreshSlashMenuItems()
+				refreshAtMenuItems()
 			}
 			.onChange(of: customCommands.map(\.id)) {
 				refreshSlashMenuItems()
@@ -200,22 +214,39 @@ struct MessageComposerView: View {
 			.onChange(of: slashMenuItems.map(\.id)) {
 				slashMenuSelection = 0
 			}
+			.onChange(of: atMenuItems.map(\.id)) {
+				atMenuSelection = 0
+			}
 			.onKeyPress(phases: [.down, .repeat]) { press in
-				let hasMenu = !slashMenuItems.isEmpty
+				let hasAtMenu = !atMenuItems.isEmpty
+				let hasMenu = hasAtMenu || !slashMenuItems.isEmpty
+				let menuCount = hasAtMenu ? atMenuItems.count : slashMenuItems.count
 				let isDown = press.key == .downArrow
 					|| (press.key == KeyEquivalent("n") && press.modifiers.contains(.control))
 				let isUp = press.key == .upArrow
 					|| (press.key == KeyEquivalent("p") && press.modifiers.contains(.control))
 
 				if hasMenu && isDown {
-					slashMenuSelection = min(slashMenuSelection + 1, slashMenuItems.count - 1)
+					if hasAtMenu {
+						atMenuSelection = min(atMenuSelection + 1, menuCount - 1)
+					} else {
+						slashMenuSelection = min(slashMenuSelection + 1, menuCount - 1)
+					}
 					return .handled
 				}
 				if hasMenu && isUp {
-					slashMenuSelection = max(slashMenuSelection - 1, 0)
+					if hasAtMenu {
+						atMenuSelection = max(atMenuSelection - 1, 0)
+					} else {
+						slashMenuSelection = max(slashMenuSelection - 1, 0)
+					}
 					return .handled
 				}
 				if press.key == .escape {
+					if hasAtMenu {
+						dismissAtMenu()
+						return .handled
+					}
 					if hasMenu || SlashCommand.draftContext(for: text) != nil {
 						text = ""
 						return .handled
@@ -227,7 +258,11 @@ struct MessageComposerView: View {
 					return .ignored
 				}
 				if hasMenu && (press.key == .return || press.key == .tab) {
-					acceptSelectedSlashCompletion()
+					if hasAtMenu {
+						acceptSelectedAtCompletion()
+					} else {
+						acceptSelectedSlashCompletion()
+					}
 					return .handled
 				}
 				if !hasMenu && press.key == .escape && isAgentActive && !isSending {
@@ -347,6 +382,100 @@ struct MessageComposerView: View {
 		}
 	}
 
+	// MARK: - @ Completions
+
+	/// Extracts the @-prefix from the current text, if the cursor is inside one.
+	/// Returns `nil` if there's no active @ context.
+	/// e.g. "hello @src/ma" → "src/ma", "hello @" → "", "@" → ""
+	private func extractAtContext() -> String? {
+		// Don't trigger @ completions inside slash commands
+		guard !text.hasPrefix("/") else { return nil }
+
+		// Find the last @ that starts a file reference
+		guard let atIndex = text.lastIndex(of: "@") else { return nil }
+
+		// @ must be at the start or preceded by whitespace
+		if atIndex != text.startIndex {
+			let before = text[text.index(before: atIndex)]
+			guard before == " " || before == "\n" || before == "\t" else { return nil }
+		}
+
+		let afterAt = text[text.index(after: atIndex)...]
+
+		// If there's a space after the prefix, the @ context is closed
+		guard !afterAt.contains(" ") else { return nil }
+
+		return String(afterAt)
+	}
+
+	/// The directory portion of a prefix, used as the cache key.
+	/// "src/main" → "src/", "" → "", "src/" → "src/"
+	private func directoryKey(for prefix: String) -> String {
+		guard let lastSlash = prefix.lastIndex(of: "/") else { return "" }
+		return String(prefix[...lastSlash])
+	}
+
+	private func refreshAtMenuItems() {
+		atCompletionTask?.cancel()
+		atCompletionTask = nil
+
+		guard let prefix = extractAtContext() else {
+			dismissAtMenu()
+			return
+		}
+
+		let dirKey = directoryKey(for: prefix)
+		let filterText = String(prefix.dropFirst(dirKey.count)).lowercased()
+
+		// Check cache for this directory level
+		if let cached = atCompletionCache[dirKey] {
+			atMenuItems = filterAtItems(cached, filter: filterText)
+			return
+		}
+
+		// Cache miss — fetch from server
+		let expectedText = text
+		atCompletionTask = Task {
+			let completions = await loadAtCompletions(dirKey)
+			guard !Task.isCancelled, text == expectedText else { return }
+			let items = completions
+			atCompletionCache[dirKey] = items
+			atMenuItems = filterAtItems(items, filter: filterText)
+		}
+	}
+
+	private func filterAtItems(_ items: [AtCompletionItem], filter: String) -> [AtCompletionItem] {
+		guard !filter.isEmpty else { return items }
+		return items.filter { $0.label.lowercased().hasPrefix(filter) }
+	}
+
+	private func acceptSelectedAtCompletion() {
+		guard atMenuSelection >= 0, atMenuSelection < atMenuItems.count else { return }
+		applyAtCompletion(atMenuItems[atMenuSelection])
+	}
+
+	private func applyAtCompletion(_ item: AtCompletionItem) {
+		guard let atIndex = text.lastIndex(of: "@") else { return }
+
+		let beforeAt = text[..<atIndex]
+		if item.isDirectory {
+			// Replace prefix with directory path, keep @ context open for next level
+			text = beforeAt + "@" + item.value
+			refreshAtMenuItems()
+		} else {
+			// Replace prefix with full path, close @ context
+			text = beforeAt + "@" + item.value + " "
+			dismissAtMenu()
+		}
+	}
+
+	private func dismissAtMenu() {
+		atMenuItems = []
+		atCompletionCache = [:]
+		atCompletionTask?.cancel()
+		atCompletionTask = nil
+	}
+
 	private func pasteFromClipboard() {
 		let pasteboard = UIPasteboard.general
 		let imageTypes = [
@@ -367,6 +496,23 @@ struct MessageComposerView: View {
 			onImportImageData(data, .paste)
 		}
 	}
+}
+
+struct AtCompletionItem: Identifiable, Equatable, Sendable {
+	let value: String
+	let label: String
+	let description: String?
+
+	var id: String { value }
+
+	/// The directory portion of the value, used as the cache key.
+	/// e.g. "src/main.swift" → "src/", "" → "", "src/" → "src/"
+	var directoryPrefix: String {
+		guard let lastSlash = value.lastIndex(of: "/") else { return "" }
+		return String(value[...lastSlash])
+	}
+
+	var isDirectory: Bool { value.hasSuffix("/") }
 }
 
 private struct SlashCompletionMenuItem: Identifiable, Equatable {
@@ -474,6 +620,63 @@ private struct ComposerAttachmentTile: View {
 			}
 			.buttonStyle(.plain)
 			.offset(x: 6, y: -6)
+		}
+	}
+}
+
+// MARK: - Slash Command Menu
+
+// MARK: - @ Completion Menu
+
+private struct AtCompletionMenuView: View {
+	let items: [AtCompletionItem]
+	var selectedIndex: Int = 0
+	let onSelect: (AtCompletionItem) -> Void
+
+	var body: some View {
+		ScrollViewReader { proxy in
+			ScrollView {
+				LazyVStack(alignment: .leading, spacing: 0) {
+					ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+						Button {
+							onSelect(item)
+						} label: {
+							HStack(spacing: 8) {
+								Image(systemName: item.isDirectory ? "folder.fill" : "doc.fill")
+									.foregroundStyle(item.isDirectory ? .blue : .secondary)
+									.frame(width: 16)
+								Text(item.label)
+									.fontWeight(.medium)
+									.foregroundStyle(.primary)
+								if let description = item.description, !description.isEmpty {
+									Text(description)
+										.foregroundStyle(.secondary)
+										.lineLimit(1)
+								}
+								Spacer()
+							}
+							.font(.callout)
+							.padding(.horizontal, 12)
+							.padding(.vertical, 8)
+							.background(
+								index == selectedIndex ? Color.accentColor.opacity(0.15) : Color.clear,
+								in: RoundedRectangle(cornerRadius: 6)
+							)
+							.contentShape(Rectangle())
+						}
+						.buttonStyle(.plain)
+						.id(item.id)
+					}
+				}
+			}
+			.frame(maxHeight: 200)
+			.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+			.onChange(of: selectedIndex) {
+				guard selectedIndex < items.count else { return }
+				withAnimation {
+					proxy.scrollTo(items[selectedIndex].id, anchor: .center)
+				}
+			}
 		}
 	}
 }

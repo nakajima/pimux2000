@@ -197,6 +197,15 @@ private struct PimuxCommandArgumentCompletionsResponse: Decodable, Sendable {
 	let completions: [PimuxCommandCompletion]
 }
 
+private struct PimuxAtCompletionsRequest: Encodable, Sendable {
+	let prefix: String
+}
+
+private struct PimuxAtCompletionsResponse: Decodable, Sendable {
+	let sessionId: String
+	let completions: [PimuxCommandCompletion]
+}
+
 struct PimuxSessionForkMessage: Decodable, Equatable, Sendable, Identifiable {
 	let entryID: String
 	let text: String
@@ -605,6 +614,22 @@ actor PimuxServerClient {
 		let response = try await requestJSON(
 			PimuxCommandArgumentCompletionsResponse.self,
 			path: "/sessions/\(sessionID)/command-argument-completions",
+			method: "POST",
+			bodyData: bodyData,
+			contentType: "application/json"
+		)
+		return response.completions
+	}
+
+	func getAtCompletions(
+		sessionID: String,
+		prefix: String
+	) async throws -> [PimuxCommandCompletion] {
+		let request = PimuxAtCompletionsRequest(prefix: prefix)
+		let bodyData = try JSONEncoder().encode(request)
+		let response = try await requestJSON(
+			PimuxAtCompletionsResponse.self,
+			path: "/sessions/\(sessionID)/at-completions",
 			method: "POST",
 			bodyData: bodyData,
 			contentType: "application/json"

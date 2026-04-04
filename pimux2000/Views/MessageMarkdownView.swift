@@ -13,7 +13,7 @@ struct MessageMarkdownView: View {
 	@Environment(\.markdownTextStyle) private var textStyle
 
 	private var previewHeight: CGFloat {
-		ceil(chatLineHeight(style: .body) * CGFloat(MessageMarkdownRenderer.maxPreviewLines))
+		ceil(chatLineHeight(style: textStyle) * CGFloat(MessageMarkdownRenderer.maxPreviewLines))
 	}
 
 	private var shouldCollapsePreview: Bool {
@@ -29,7 +29,7 @@ struct MessageMarkdownView: View {
 					.overlay(alignment: .bottom, content: previewFade)
 
 				NavigationLink(value: Route.messageContext(route)) {
-					Label("View full context", systemImage: "arrow.right.circle")
+					Label(contextLinkLabel, systemImage: "arrow.right.circle")
 						.font(.caption.weight(.semibold))
 						.foregroundStyle(.tint)
 				}
@@ -43,6 +43,17 @@ struct MessageMarkdownView: View {
 
 	private var route: MessageContextRoute {
 		MessageContextRoute(title: title, text: text, role: role)
+	}
+
+	private var contextLinkLabel: String {
+		switch role {
+		case .toolResult:
+			return "View full tool result"
+		case .bashExecution:
+			return "View full bash output"
+		default:
+			return "View full context"
+		}
 	}
 
 	private var renderedMarkdown: some View {
@@ -71,14 +82,14 @@ struct MessageMarkdownView: View {
 		let isMonospaced = role == .toolResult || role == .bashExecution
 
 		return Text(verbatim: MessageMarkdownRenderer.previewText(for: text))
-			.font(isMonospaced ? .system(.body, design: .monospaced) : chatFont(style: .body))
+			.font(isMonospaced ? .system(textStyle, design: .monospaced) : chatFont(style: textStyle))
 			.frame(maxWidth: .infinity, alignment: .leading)
 	}
 
 	private func previewFade() -> some View {
 		Rectangle()
 			.fill(.background)
-			.frame(height: chatLineHeight(style: .body) * 2)
+			.frame(height: chatLineHeight(style: textStyle) * 2)
 			.mask(
 				LinearGradient(
 					colors: [.clear, .black],

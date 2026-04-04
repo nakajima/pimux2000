@@ -653,6 +653,24 @@ async fn handle_server_message(
                 error,
             });
         }
+        ServerToAgentMessage::GetAtCompletions {
+            request_id,
+            session_id,
+            prefix,
+        } => {
+            let result = live_store
+                .get_at_completions(&session_id, &prefix)
+                .await;
+            let (completions, error) = match result {
+                Ok(completions) => (Some(completions), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            let _ = channel_tx.send(AgentToServerMessage::GetAtCompletionsResult {
+                request_id,
+                completions,
+                error,
+            });
+        }
         ServerToAgentMessage::UiDialogAction {
             request_id,
             session_id,

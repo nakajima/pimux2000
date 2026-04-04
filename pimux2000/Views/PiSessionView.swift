@@ -158,6 +158,9 @@ struct PiSessionView: View {
 							argumentPrefix: argumentPrefix
 						)
 					},
+					loadAtCompletions: { prefix in
+						await loadAtCompletions(prefix: prefix)
+					},
 					onSend: { Task { await sendMessage() } },
 					onStop: { Task { await interruptSession() } },
 					onRemoveAttachment: { id in draftImages.removeAll { $0.id == id } },
@@ -1198,6 +1201,27 @@ struct PiSessionView: View {
 			print(
 				"Failed to load command argument completions for \(session.sessionID) /\(commandName): \(error)"
 			)
+			return []
+		}
+	}
+
+	private func loadAtCompletions(prefix: String) async -> [AtCompletionItem] {
+		guard let pimuxServerClient else { return [] }
+
+		do {
+			let completions = try await pimuxServerClient.getAtCompletions(
+				sessionID: session.sessionID,
+				prefix: prefix
+			)
+			return completions.map {
+				AtCompletionItem(
+					value: $0.value,
+					label: $0.label,
+					description: $0.description
+				)
+			}
+		} catch {
+			print("Failed to load @ completions for \(session.sessionID): \(error)")
 			return []
 		}
 	}

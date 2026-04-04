@@ -63,6 +63,11 @@ pub enum AgentToServerMessage {
         completions: Option<Vec<SessionCommandCompletion>>,
         error: Option<String>,
     },
+    GetAtCompletionsResult {
+        request_id: String,
+        completions: Option<Vec<SessionCommandCompletion>>,
+        error: Option<String>,
+    },
     UiDialogActionResult {
         request_id: String,
         error: Option<String>,
@@ -104,6 +109,11 @@ pub enum ServerToAgentMessage {
         session_id: String,
         command_name: String,
         argument_prefix: String,
+    },
+    GetAtCompletions {
+        request_id: String,
+        session_id: String,
+        prefix: String,
     },
     UiDialogAction {
         request_id: String,

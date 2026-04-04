@@ -12,13 +12,10 @@ struct ToolResultMessageView: View {
 			VStack(alignment: .leading, spacing: 6) {
 				MessageHeader(icon: "wrench.fill", label: "Tool Result", color: .orange, toolName: message.toolName)
 
-				VStack {
-					ForEach(messageInfo.contentBlocks, id: \.position) { block in
-						if block.type == "text", let text = block.text, !text.isEmpty {
-							Text(verbatim: text)
-								.font(.caption)
-								.fontDesign(.monospaced)
-						}
+				ForEach(messageInfo.contentBlocks, id: \.position) { block in
+					if block.type == "text", let text = block.text, !text.isEmpty {
+						MessageMarkdownView(text: text, role: .toolResult, title: messageTitle)
+							.environment(\.markdownTextStyle, .caption)
 					}
 				}
 			}
@@ -34,13 +31,34 @@ struct ToolResultMessageView: View {
 }
 
 #Preview {
-	ToolResultMessageView(
-		messageInfo: MessageInfo(
-			message: Message(piSessionID: 1, role: .toolResult, toolName: "read", position: 0, createdAt: Date()),
-			contentBlocks: [
-				MessageContentBlock(messageID: 1, type: "text", text: "File contents returned successfully.", toolCallName: nil, position: 0),
-			]
-		)
-	)
-	.padding()
+	NavigationStack {
+		ScrollView {
+			VStack(alignment: .leading, spacing: 16) {
+				ToolResultMessageView(
+					messageInfo: MessageInfo(
+						message: Message(piSessionID: 1, role: .toolResult, toolName: "read", position: 0, createdAt: Date()),
+						contentBlocks: [
+							MessageContentBlock(messageID: 1, type: "text", text: "File contents returned successfully.", toolCallName: nil, position: 0),
+						]
+					)
+				)
+
+				ToolResultMessageView(
+					messageInfo: MessageInfo(
+						message: Message(piSessionID: 1, role: .toolResult, toolName: "bash", position: 1, createdAt: Date()),
+						contentBlocks: [
+							MessageContentBlock(
+								messageID: 2,
+								type: "text",
+								text: (1 ... 20).map { "output line \($0): lorem ipsum dolor sit amet" }.joined(separator: "\n"),
+								toolCallName: nil,
+								position: 0
+							),
+						]
+					)
+				)
+			}
+			.padding()
+		}
+	}
 }
