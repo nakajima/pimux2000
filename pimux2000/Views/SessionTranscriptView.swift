@@ -31,6 +31,7 @@ enum TranscriptMessage: Identifiable {
 enum TranscriptEmptyState: Equatable {
 	case loading
 	case error(String)
+	case noServer
 	case empty
 }
 
@@ -365,6 +366,9 @@ enum TranscriptEmptyState: Equatable {
 					button.addAction(UIAction { _ in onRetry() }, for: .touchUpInside)
 					stack.addArrangedSubview(button)
 				}
+			case .noServer:
+				icon.image = UIImage(systemName: "server.rack")
+				stack.addArrangedSubview(makeLabel("No server configured", style: .body, color: .secondaryLabel, alignment: .center))
 			case .empty:
 				icon.image = UIImage(systemName: "text.bubble")
 				stack.addArrangedSubview(makeLabel("No messages yet", style: .body, color: .secondaryLabel, alignment: .center))

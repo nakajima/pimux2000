@@ -339,6 +339,10 @@ struct PiSessionView: View {
 			return .loading
 		} else if let loadError {
 			return .error(loadError)
+		} else if pimuxServerClient == nil {
+			return .noServer
+		} else if liveStreamState == .idle || liveStreamState == .connecting {
+			return .loading
 		} else {
 			return .empty
 		}
@@ -578,6 +582,14 @@ struct PiSessionView: View {
 				Button("Retry") {
 					Task { await loadMessages() }
 				}
+			}
+		} else if pimuxServerClient == nil {
+			ContentUnavailableView("No server configured", systemImage: "server.rack")
+		} else if liveStreamState == .idle || liveStreamState == .connecting {
+			ContentUnavailableView {
+				ProgressView()
+			} description: {
+				Text("Loading messages…")
 			}
 		} else {
 			ContentUnavailableView("No messages yet", systemImage: "text.bubble")

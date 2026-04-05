@@ -12,8 +12,8 @@ struct MarkdownTextView: UIViewRepresentable {
 		textView.textContainerInset = .zero
 		textView.textContainer.lineFragmentPadding = 0
 		textView.adjustsFontForContentSizeCategory = true
-		textView.setContentCompressionResistancePriority(.required, for: .vertical)
-		textView.setContentHuggingPriority(.required, for: .vertical)
+		textView.setContentCompressionResistancePriority(.defaultHigh, for: .vertical)
+		textView.setContentHuggingPriority(.defaultHigh, for: .vertical)
 		return textView
 	}
 
@@ -28,6 +28,7 @@ struct MarkdownTextView: UIViewRepresentable {
 		let targetWidth = proposal.width ?? uiView.bounds.width
 		guard targetWidth > 0 else { return .zero }
 		let size = uiView.sizeThatFits(CGSize(width: targetWidth, height: CGFloat.greatestFiniteMagnitude))
-		return CGSize(width: targetWidth, height: ceil(size.height))
+		let height = min(ceil(size.height), proposal.height ?? .greatestFiniteMagnitude)
+		return CGSize(width: targetWidth, height: height)
 	}
 }

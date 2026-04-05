@@ -113,6 +113,12 @@ struct ThinkingBlockView: View {
 		return lines.count > Self.maxVisibleLines || text.count > Self.maxVisibleLines * 60
 	}
 
+	private var displayText: String {
+		guard needsTruncation else { return text }
+		let lines = text.components(separatedBy: .newlines)
+		return lines.suffix(Self.maxVisibleLines).joined(separator: "\n")
+	}
+
 	private var maxHeight: CGFloat {
 		UIFont.preferredFont(forTextStyle: .callout).lineHeight * CGFloat(Self.maxVisibleLines)
 	}
@@ -123,9 +129,9 @@ struct ThinkingBlockView: View {
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 6) {
-			MessageMarkdownView(text: text, role: .assistant, title: "Thinking")
+			MessageMarkdownView(text: displayText, role: .assistant, title: "Thinking")
 				.opacity(0.7)
-				.frame(maxWidth: .infinity, maxHeight: maxHeight, alignment: .bottomLeading)
+				.frame(maxWidth: .infinity, maxHeight: maxHeight, alignment: .topLeading)
 				.clipped()
 				.mask {
 					VStack(spacing: 0) {
@@ -166,6 +172,12 @@ struct ToolCallDetailsView: View {
 		return lines.count > Self.maxVisibleLines || text.count > Self.maxVisibleLines * 60
 	}
 
+	private var displayText: String {
+		guard needsTruncation else { return text }
+		let lines = text.components(separatedBy: .newlines)
+		return lines.prefix(Self.maxVisibleLines).joined(separator: "\n")
+	}
+
 	private var maxHeight: CGFloat {
 		UIFont.preferredFont(forTextStyle: .caption1).lineHeight * CGFloat(Self.maxVisibleLines)
 	}
@@ -182,7 +194,7 @@ struct ToolCallDetailsView: View {
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 6) {
-			Text(verbatim: text)
+			Text(verbatim: displayText)
 				.frame(maxWidth: .infinity, maxHeight: maxHeight, alignment: .topLeading)
 				.font(.system(.caption, design: .monospaced))
 				.foregroundStyle(.secondary)
