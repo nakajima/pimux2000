@@ -156,6 +156,24 @@ struct AppDatabase {
 			}
 		}
 
+		migrator.registerMigration("deduplicateMessagesByServerID") { db in
+			try db.execute(sql: """
+				DELETE FROM messages
+				WHERE serverMessageID IS NOT NULL
+				  AND id NOT IN (
+					SELECT MAX(id)
+					FROM messages
+					WHERE serverMessageID IS NOT NULL
+					GROUP BY piSessionID, serverMessageID
+				  )
+				""")
+			try db.execute(sql: """
+				CREATE UNIQUE INDEX IF NOT EXISTS messages_on_piSessionID_serverMessageID
+				ON messages(piSessionID, serverMessageID)
+				WHERE serverMessageID IS NOT NULL
+				""")
+		}
+
 		return migrator
 	}
 

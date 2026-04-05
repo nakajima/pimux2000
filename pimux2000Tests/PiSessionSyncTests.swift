@@ -137,6 +137,55 @@ struct PiSessionSyncTests {
 		#expect(messages[0].contentBlocks[2].toolCallName == "bash")
 	}
 
+	@Test
+	func storeMessagesDeduplicatesDuplicateServerMessageIDs() throws {
+		let database = AppDatabase.preview()
+		let stableSessionID = "session-1"
+		let createdAt = Date(timeIntervalSince1970: 2_000)
+		let remoteMessages = [
+			PimuxTranscriptMessage(messageId: "msg-1", createdAt: createdAt, role: "assistant", body: "Old body"),
+			PimuxTranscriptMessage(messageId: "msg-1", createdAt: createdAt.addingTimeInterval(1), role: "assistant", body: "New body"),
+			PimuxTranscriptMessage(messageId: "msg-2", createdAt: createdAt.addingTimeInterval(2), role: "user", body: "Follow up")
+		]
+
+		try database.dbQueue.write { db in
+			var host = Host(id: nil, location: "nakajima@macstudio", createdAt: Date(), updatedAt: Date())
+			try host.insert(db)
+
+			var session = PiSession(
+				id: nil,
+				hostID: host.id!,
+				summary: "Streaming session",
+				sessionID: stableSessionID,
+				sessionFile: nil,
+				model: "openai-codex/gpt-5.4",
+				lastMessage: nil,
+				lastMessageAt: Date(),
+				lastMessageRole: "assistant",
+				startedAt: Date(),
+				lastSeenAt: Date()
+			)
+			try session.insert(db)
+
+			try PiSessionSync.storeMessages(remoteMessages, piSessionID: session.id!, in: db)
+		}
+
+		let (storedRows, messages) = try database.dbQueue.read { db in
+			try (
+				Message.fetchAll(db),
+				MessagesRequest(sessionID: stableSessionID).fetch(db)
+			)
+		}
+
+		#expect(storedRows.count == 2)
+		#expect(messages.count == 2)
+		#expect(messages[0].message.serverMessageID == "msg-1")
+		#expect(messages[0].message.position == 0)
+		#expect(messages[0].contentBlocks.first?.text == "New body")
+		#expect(messages[1].message.serverMessageID == "msg-2")
+		#expect(messages[1].message.position == 1)
+	}
+
 	private func decodeHosts(from json: String) throws -> [PimuxHostSessions] {
 		let decoder = JSONDecoder()
 		decoder.dateDecodingStrategy = .iso8601

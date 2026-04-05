@@ -335,7 +335,7 @@ struct PiSessionSync {
 	}
 
 	private nonisolated static func messagePayloads(from remoteMessages: [PimuxTranscriptMessage]) -> [MessagePayload] {
-		remoteMessages.enumerated().map { index, remoteMessage in
+		let rawPayloads = remoteMessages.enumerated().map { index, remoteMessage in
 			MessagePayload(
 				serverMessageID: remoteMessage.messageId,
 				role: Message.Role(remoteMessage.role),
@@ -349,6 +349,28 @@ struct PiSessionSync {
 				createdAt: remoteMessage.createdAt,
 				blocks: blockPayloads(from: remoteMessage)
 			)
+		}
+		return deduplicatedMessagePayloads(rawPayloads)
+	}
+
+	private nonisolated static func deduplicatedMessagePayloads(_ payloads: [MessagePayload]) -> [MessagePayload] {
+		guard payloads.count > 1 else { return payloads }
+
+		var seenServerMessageIDs: Set<String> = []
+		var deduplicatedReversed: [MessagePayload] = []
+		deduplicatedReversed.reserveCapacity(payloads.count)
+
+		for payload in payloads.reversed() {
+			if let serverMessageID = payload.serverMessageID,
+			   !seenServerMessageIDs.insert(serverMessageID).inserted
+			{
+				continue
+			}
+			deduplicatedReversed.append(payload)
+		}
+
+		return deduplicatedReversed.reversed().enumerated().map { index, payload in
+			payload.settingPosition(index)
 		}
 	}
 
@@ -426,6 +448,17 @@ private struct MessagePayload: Equatable {
 	let position: Int
 	let createdAt: Date
 	let blocks: [BlockPayload]
+
+	func settingPosition(_ position: Int) -> MessagePayload {
+		MessagePayload(
+			serverMessageID: serverMessageID,
+			role: role,
+			toolName: toolName,
+			position: position,
+			createdAt: createdAt,
+			blocks: blocks
+		)
+	}
 }
 
 private struct BlockPayload: Equatable {
