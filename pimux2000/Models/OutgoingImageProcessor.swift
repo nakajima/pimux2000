@@ -4,14 +4,14 @@ import ImageIO
 import UIKit
 import UniformTypeIdentifiers
 
-struct ProcessedImageResult: Sendable {
+nonisolated struct ProcessedImageResult: Sendable {
 	let mimeType: String
 	let base64Data: String
 	let predictedAttachmentID: String
 	let previewData: Data
 }
 
-enum OutgoingImageProcessor {
+nonisolated enum OutgoingImageProcessor {
 	private static let maxLongEdge: CGFloat = 2000
 	private static let maxBase64Characters = 4 * 1024 * 1024
 	private static let initialJPEGQuality: CGFloat = 0.85

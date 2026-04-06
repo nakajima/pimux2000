@@ -892,22 +892,32 @@ actor PimuxServerClient {
 		try Self.decoder.decode(Response.self, from: data)
 	}
 
+	private struct DateFormatters: @unchecked Sendable {
+		let fractional: ISO8601DateFormatter
+		let plain: ISO8601DateFormatter
+	}
+
+	private nonisolated static let dateFormatters: DateFormatters = {
+		let fractional = ISO8601DateFormatter()
+		fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+		let plain = ISO8601DateFormatter()
+		plain.formatOptions = [.withInternetDateTime]
+		return DateFormatters(fractional: fractional, plain: plain)
+	}()
+
 	private nonisolated static let decoder: JSONDecoder = {
 		let decoder = JSONDecoder()
-		let fractionalFormatter = ISO8601DateFormatter()
-		fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-		let plainFormatter = ISO8601DateFormatter()
-		plainFormatter.formatOptions = [.withInternetDateTime]
+		let formatters = dateFormatters
 
 		decoder.dateDecodingStrategy = .custom { decoder in
 			let container = try decoder.singleValueContainer()
 			let string = try container.decode(String.self)
 
-			if let date = fractionalFormatter.date(from: string) {
+			if let date = formatters.fractional.date(from: string) {
 				return date
 			}
 
-			if let date = plainFormatter.date(from: string) {
+			if let date = formatters.plain.date(from: string) {
 				return date
 			}
 

@@ -1,8 +1,8 @@
 import Foundation
 import GRDB
 
-struct MessageContentBlock: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable, Sendable {
-	nonisolated static let databaseTableName = "messageContentBlocks"
+nonisolated struct MessageContentBlock: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable, Sendable {
+	static let databaseTableName = "messageContentBlocks"
 
 	var id: Int64?
 	var messageID: Int64

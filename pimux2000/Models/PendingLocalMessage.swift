@@ -1,11 +1,11 @@
 import Foundation
 
-struct PendingImagePreview: Identifiable, Equatable, Sendable {
+nonisolated struct PendingImagePreview: Identifiable, Equatable, Sendable {
 	let id: UUID
 	let previewData: Data
 }
 
-struct PendingLocalMessage: Identifiable, Equatable {
+nonisolated struct PendingLocalMessage: Identifiable, Equatable, Sendable {
 	let id: UUID
 	let body: String
 	let normalizedBody: String
@@ -30,7 +30,7 @@ struct PendingLocalMessage: Identifiable, Equatable {
 	}
 }
 
-func pendingMessagesAwaitingConfirmation(
+nonisolated func pendingMessagesAwaitingConfirmation(
 	_ pendingMessages: [PendingLocalMessage],
 	confirmedMessages: [PimuxTranscriptMessage]
 ) -> [PendingLocalMessage] {
@@ -58,7 +58,7 @@ func pendingMessagesAwaitingConfirmation(
 	return remainingPendingMessages
 }
 
-func normalizedPendingMessageBody(_ text: String) -> String {
+nonisolated func normalizedPendingMessageBody(_ text: String) -> String {
 	text
 		.replacingOccurrences(of: "\r\n", with: "\n")
 		.replacingOccurrences(of: "\r", with: "\n")
@@ -67,12 +67,12 @@ func normalizedPendingMessageBody(_ text: String) -> String {
 
 // MARK: - Signature matching
 
-private struct PendingMessageSignature: Equatable {
+private nonisolated struct PendingMessageSignature: Equatable, Sendable {
 	let normalizedBody: String
 	let imageAttachmentIDs: [String]
 }
 
-private func confirmedMessageSignature(_ message: PimuxTranscriptMessage) -> PendingMessageSignature {
+private nonisolated func confirmedMessageSignature(_ message: PimuxTranscriptMessage) -> PendingMessageSignature {
 	let imageIDs = message.blocks
 		.filter { $0.type == "image" }
 		.compactMap(\.attachmentId)

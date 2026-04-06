@@ -10,7 +10,7 @@ import GRDB
 import GRDBQuery
 import SwiftUI
 
-struct PiSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+nonisolated struct PiSession: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
 	static let databaseTableName = "piSessions"
 	static let messages = hasMany(Message.self)
 	static let host = belongsTo(Host.self)

@@ -1,9 +1,9 @@
 import Foundation
 import GRDB
 
-struct Message: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable, Sendable {
-	nonisolated static let databaseTableName = "messages"
-	nonisolated static let contentBlocks = hasMany(MessageContentBlock.self)
+nonisolated struct Message: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable, Sendable {
+	static let databaseTableName = "messages"
+	static let contentBlocks = hasMany(MessageContentBlock.self)
 
 	var id: Int64?
 	var piSessionID: Int64
@@ -69,19 +69,19 @@ extension Message {
 	}
 }
 
-extension Message.Role: nonisolated Equatable {
+nonisolated extension Message.Role: Equatable {
 	static func == (lhs: Self, rhs: Self) -> Bool {
 		lhs.rawString == rhs.rawString
 	}
 }
 
-extension Message.Role: nonisolated Hashable {
+nonisolated extension Message.Role: Hashable {
 	func hash(into hasher: inout Hasher) {
 		hasher.combine(rawString)
 	}
 }
 
-extension Message.Role: Codable {
+nonisolated extension Message.Role: Codable {
 	init(from decoder: Decoder) throws {
 		let container = try decoder.singleValueContainer()
 		try self.init(container.decode(String.self))
@@ -93,7 +93,7 @@ extension Message.Role: Codable {
 	}
 }
 
-extension Message.Role: DatabaseValueConvertible {
+nonisolated extension Message.Role: DatabaseValueConvertible {
 	var databaseValue: DatabaseValue {
 		rawString.databaseValue
 	}

@@ -441,7 +441,7 @@ struct PiSessionSync {
 	}
 }
 
-private struct MessagePayload: Equatable {
+private nonisolated struct MessagePayload: Equatable, Sendable {
 	let serverMessageID: String?
 	let role: Message.Role
 	let toolName: String?
@@ -461,7 +461,7 @@ private struct MessagePayload: Equatable {
 	}
 }
 
-private struct BlockPayload: Equatable {
+private nonisolated struct BlockPayload: Equatable, Sendable {
 	let type: String
 	let text: String?
 	let toolCallName: String?

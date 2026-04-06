@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-struct Host: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
+nonisolated struct Host: Codable, FetchableRecord, MutablePersistableRecord, Identifiable, Equatable, Hashable {
 	static let databaseTableName = "hosts"
 
 	var id: Int64?

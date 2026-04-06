@@ -335,7 +335,7 @@ struct MessageComposerView: View {
 		switch context.phase {
 		case let .commandName(prefix):
 			let query = "/\(prefix)"
-			slashMenuItems = SlashCommand.matching(query: query, from: allCommands).map(SlashCompletionMenuItem.init)
+			slashMenuItems = SlashCommand.matching(query: query, from: allCommands).map { SlashCompletionMenuItem($0) }
 		case let .arguments(commandName, argumentText):
 			guard let command = SlashCommand.command(named: commandName, from: allCommands) else {
 				slashMenuItems = []
@@ -759,7 +759,9 @@ private struct MessageComposerPreviewHost: View {
 				isWorking: isWorking,
 				workingMessage: workingMessage,
 				errorMessage: errorMessage,
-				loadArgumentCompletions: loadArgumentCompletions,
+				loadArgumentCompletions: { @Sendable [loadArgumentCompletions] a, b in
+					await loadArgumentCompletions(a, b)
+				},
 				onSend: {}
 			)
 		}
