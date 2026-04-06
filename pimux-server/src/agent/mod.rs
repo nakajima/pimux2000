@@ -707,6 +707,7 @@ async fn handle_server_message(
                 &session_id,
                 action,
                 pi_agent_dir,
+                summary_config,
                 live_store,
                 live_updates_tx,
             )
@@ -997,10 +998,21 @@ async fn handle_pimux_resummarize_command(
     .await
 }
 
+async fn resummarize_session_name_headless(
+    session_id: &str,
+    pi_agent_dir: &Path,
+    summary_config: &summarizer::Config,
+) -> Result<(), String> {
+    let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+    let summary = summarizer::resummarize_session(&discovered_session, summary_config).await;
+    send::set_session_name(discovered_session, summary, pi_agent_dir.to_path_buf()).await
+}
+
 async fn handle_builtin_command(
     session_id: &str,
     action: SessionBuiltinCommandRequest,
     pi_agent_dir: &Path,
+    summary_config: &summarizer::Config,
     live_store: &live::LiveSessionStoreHandle,
     live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
 ) -> Result<SessionBuiltinCommandResponse, String> {
@@ -1038,6 +1050,9 @@ async fn handle_builtin_command(
                 pi_agent_dir.to_path_buf(),
             )
             .await?;
+            if let Err(error) = resummarize_session_name_headless(session_id, pi_agent_dir, summary_config).await {
+                warn!(session_id, %error, "failed to re-summarize session after compaction");
+            }
             publish_persisted_snapshot_for_session(session_id, pi_agent_dir, live_updates_tx).await;
             Ok(SessionBuiltinCommandResponse::default())
         }

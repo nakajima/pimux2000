@@ -1760,7 +1760,13 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_compact", async (_event, ctx) => {
-		publishSnapshot(ctx);
+		const summary = await resummarizeSessionName(pi, ctx, publishSnapshot, {
+			notify: false,
+			waitForIdle: true,
+		});
+		if (!summary) {
+			publishSnapshot(ctx);
+		}
 	});
 
 	pi.on("model_select", async (_event, ctx) => {
@@ -1949,32 +1955,57 @@ async function handlePimuxResummarizeCommand(
 	ctx: ExtensionCommandContext,
 	publishSnapshot: (ctx: ExtensionContext) => void
 ) {
-	await ctx.waitForIdle();
+	await resummarizeSessionName(pi, ctx, publishSnapshot, {
+		notify: true,
+		waitForIdle: true,
+	});
+}
 
-	const messages = buildSnapshotMessages(ctx);
+async function resummarizeSessionName(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext | ExtensionCommandContext,
+	publishSnapshot: (ctx: ExtensionContext) => void,
+	options: { notify: boolean; waitForIdle: boolean }
+): Promise<string | undefined> {
+	if (options.waitForIdle && "waitForIdle" in ctx && typeof ctx.waitForIdle === "function") {
+		await ctx.waitForIdle();
+	}
+
+	const extensionContext = ctx as ExtensionContext;
+	const messages = buildSnapshotMessages(extensionContext);
 	const summaryInput = buildResummarizeInput(messages);
 	if (!summaryInput) {
-		ctx.ui.notify("No conversation text found to summarize", "warning");
-		return;
+		if (options.notify) {
+			ctx.ui.notify("No conversation text found to summarize", "warning");
+		}
+		return undefined;
 	}
 
 	const model = await resolveResummarizeModel(ctx);
 	if (!model) {
-		ctx.ui.notify("No model available to generate a session summary", "warning");
-		return;
+		if (options.notify) {
+			ctx.ui.notify("No model available to generate a session summary", "warning");
+		}
+		return undefined;
 	}
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (!auth.ok) {
-		ctx.ui.notify(auth.error, "warning");
-		return;
+		if (options.notify) {
+			ctx.ui.notify(auth.error, "warning");
+		}
+		return undefined;
 	}
 	if (!auth.apiKey) {
-		ctx.ui.notify(`No API key available for ${model.provider}/${model.id}`, "warning");
-		return;
+		if (options.notify) {
+			ctx.ui.notify(`No API key available for ${model.provider}/${model.id}`, "warning");
+		}
+		return undefined;
 	}
 
-	ctx.ui.notify("Generating session summary…", "info");
+	if (options.notify) {
+		ctx.ui.notify("Generating session summary…", "info");
+	}
 
 	try {
 		const response = await complete(
@@ -2006,18 +2037,30 @@ async function handlePimuxResummarizeCommand(
 				.join("\n")
 		);
 		if (!summary) {
-			ctx.ui.notify("The model returned an empty session summary", "warning");
-			return;
+			if (options.notify) {
+				ctx.ui.notify("The model returned an empty session summary", "warning");
+			}
+			return undefined;
 		}
 
 		pi.setSessionName(summary);
-		publishSnapshot(ctx);
-		ctx.ui.notify(`Session summary updated: ${summary}`, "info");
+		publishSnapshot(extensionContext);
+		if (options.notify) {
+			ctx.ui.notify(`Session summary updated: ${summary}`, "info");
+		}
+		return summary;
 	} catch (error) {
-		ctx.ui.notify(
-			`Failed to generate session summary: ${error instanceof Error ? error.message : String(error)}`,
-			"error"
-		);
+		if (options.notify) {
+			ctx.ui.notify(
+				`Failed to generate session summary: ${error instanceof Error ? error.message : String(error)}`,
+				"error"
+			);
+		} else {
+			console.error(
+				`pimux auto-resummarize failed: ${error instanceof Error ? error.message : String(error)}`
+			);
+		}
+		return undefined;
 	}
 }
 
@@ -2044,7 +2087,7 @@ async function handlePimuxUpdateServerCommand(ctx: ExtensionCommandContext) {
 	}
 }
 
-async function resolveResummarizeModel(ctx: ExtensionCommandContext) {
+async function resolveResummarizeModel(ctx: ExtensionContext | ExtensionCommandContext) {
 	const requested = process.env.PIMUX_SUMMARY_MODEL?.trim();
 	if (requested) {
 		const [provider, ...rest] = requested.split("/");
