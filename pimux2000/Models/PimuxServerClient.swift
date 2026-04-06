@@ -98,7 +98,7 @@ struct PimuxListedSession: Decodable, Equatable, Sendable {
 	}
 }
 
-struct PimuxSessionMessagesResponse: Decodable, Equatable, Sendable {
+nonisolated struct PimuxSessionMessagesResponse: Decodable, Equatable, Sendable {
 	let sessionId: String
 	let messages: [PimuxTranscriptMessage]
 	let freshness: PimuxTranscriptFreshness
@@ -106,7 +106,7 @@ struct PimuxSessionMessagesResponse: Decodable, Equatable, Sendable {
 	let warnings: [String]
 }
 
-struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
+nonisolated struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 	let messageId: String?
 	let createdAt: Date
 	let role: String
@@ -150,7 +150,7 @@ struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 	}
 }
 
-struct PimuxTranscriptMessageBlock: Decodable, Equatable, Sendable {
+nonisolated struct PimuxTranscriptMessageBlock: Decodable, Equatable, Sendable {
 	let type: String
 	let text: String?
 	let toolCallName: String?
@@ -182,26 +182,26 @@ struct PimuxCommandCompletion: Codable, Equatable, Identifiable, Sendable {
 	var id: String { value + "|" + label + "|" + (description ?? "") }
 }
 
-struct PimuxSessionCommandsResponse: Decodable, Sendable {
+nonisolated struct PimuxSessionCommandsResponse: Decodable, Sendable {
 	let sessionId: String
 	let commands: [PimuxSessionCommand]
 }
 
-private struct PimuxCommandArgumentCompletionsRequest: Encodable, Sendable {
+private nonisolated struct PimuxCommandArgumentCompletionsRequest: Encodable, Sendable {
 	let commandName: String
 	let argumentPrefix: String
 }
 
-private struct PimuxCommandArgumentCompletionsResponse: Decodable, Sendable {
+private nonisolated struct PimuxCommandArgumentCompletionsResponse: Decodable, Sendable {
 	let sessionId: String
 	let completions: [PimuxCommandCompletion]
 }
 
-private struct PimuxAtCompletionsRequest: Encodable, Sendable {
+private nonisolated struct PimuxAtCompletionsRequest: Encodable, Sendable {
 	let prefix: String
 }
 
-private struct PimuxAtCompletionsResponse: Decodable, Sendable {
+private nonisolated struct PimuxAtCompletionsResponse: Decodable, Sendable {
 	let sessionId: String
 	let completions: [PimuxCommandCompletion]
 }
@@ -218,12 +218,12 @@ struct PimuxSessionForkMessage: Decodable, Equatable, Sendable, Identifiable {
 	}
 }
 
-struct PimuxSessionBuiltinCommandResponse: Decodable, Equatable, Sendable {
+nonisolated struct PimuxSessionBuiltinCommandResponse: Decodable, Equatable, Sendable {
 	let sessionId: String?
 	let forkMessages: [PimuxSessionForkMessage]?
 }
 
-enum PimuxSessionBuiltinCommandRequest: Encodable, Equatable, Sendable {
+nonisolated enum PimuxSessionBuiltinCommandRequest: Encodable, Equatable, Sendable {
 	case setSessionName(name: String)
 	case compact(customInstructions: String?)
 	case reload
@@ -260,7 +260,7 @@ enum PimuxSessionBuiltinCommandRequest: Encodable, Equatable, Sendable {
 	}
 }
 
-struct PimuxSessionUIState: Decodable, Equatable, Sendable {
+nonisolated struct PimuxSessionUIState: Decodable, Equatable, Sendable {
 	let statuses: [String: String]
 	let widgets: [PimuxSessionUIWidget]
 	let title: String?
@@ -304,7 +304,7 @@ struct PimuxSessionUIState: Decodable, Equatable, Sendable {
 	}
 }
 
-struct PimuxSessionUIWidget: Decodable, Equatable, Sendable, Identifiable {
+nonisolated struct PimuxSessionUIWidget: Decodable, Equatable, Sendable, Identifiable {
 	let key: String
 	let lines: [String]
 	let placement: String
@@ -312,7 +312,7 @@ struct PimuxSessionUIWidget: Decodable, Equatable, Sendable, Identifiable {
 	var id: String { key }
 }
 
-struct PimuxSessionUIDialogState: Decodable, Equatable, Sendable, Identifiable {
+nonisolated struct PimuxSessionUIDialogState: Decodable, Equatable, Sendable, Identifiable {
 	let id: String
 	let kind: String
 	let title: String
@@ -323,7 +323,7 @@ struct PimuxSessionUIDialogState: Decodable, Equatable, Sendable, Identifiable {
 	let value: String?
 }
 
-struct PimuxSessionTerminalOnlyUIState: Decodable, Equatable, Sendable {
+nonisolated struct PimuxSessionTerminalOnlyUIState: Decodable, Equatable, Sendable {
 	let kind: String
 	let reason: String
 }
@@ -372,7 +372,7 @@ extension PimuxSessionUIDialogState {
 	}
 }
 
-enum PimuxSessionUIDialogAction: Encodable, Equatable, Sendable {
+nonisolated enum PimuxSessionUIDialogAction: Encodable, Equatable, Sendable {
 	case move(direction: String)
 	case selectIndex(index: Int)
 	case setValue(value: String)
@@ -406,23 +406,23 @@ enum PimuxSessionUIDialogAction: Encodable, Equatable, Sendable {
 	}
 }
 
-private struct PimuxSessionUIDialogActionRequest: Encodable {
+private nonisolated struct PimuxSessionUIDialogActionRequest: Encodable, Sendable {
 	let dialogId: String
 	let action: PimuxSessionUIDialogAction
 }
 
-struct PimuxTranscriptFreshness: Decodable, Equatable, Sendable {
+nonisolated struct PimuxTranscriptFreshness: Decodable, Equatable, Sendable {
 	let state: String
 	let source: String
 	let asOf: Date
 }
 
-struct PimuxSessionActivity: Decodable, Equatable, Sendable {
+nonisolated struct PimuxSessionActivity: Decodable, Equatable, Sendable {
 	let active: Bool
 	let attached: Bool
 }
 
-enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
+nonisolated enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 	case snapshot(sequence: UInt64, session: PimuxSessionMessagesResponse)
 	case sessionState(sequence: UInt64, connected: Bool, missing: Bool, lastSeenAt: Date?)
 	case uiState(sequence: UInt64, state: PimuxSessionUIState)
@@ -485,7 +485,7 @@ enum PimuxSessionStreamEvent: Decodable, Equatable, Sendable {
 	}
 }
 
-struct PimuxInputImage: Encodable, Equatable, Sendable {
+nonisolated struct PimuxInputImage: Encodable, Equatable, Sendable {
 	let type: String
 	let mimeType: String
 	let data: String
@@ -497,7 +497,7 @@ struct PimuxInputImage: Encodable, Equatable, Sendable {
 	}
 }
 
-private struct PimuxSendMessageRequest: Encodable {
+private nonisolated struct PimuxSendMessageRequest: Encodable, Sendable {
 	let body: String
 	let images: [PimuxInputImage]
 }
@@ -583,7 +583,7 @@ actor PimuxServerClient {
 			let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
 			if trimmed.isEmpty { continue }
 			do {
-				let event = try await Self.decodeJSON(PimuxSessionStreamEvent.self, from: Data(trimmed.utf8))
+				let event = try Self.decodeJSON(PimuxSessionStreamEvent.self, from: Data(trimmed.utf8))
 				await onEvent(event)
 			} catch {
 				let preview = String(trimmed.prefix(200))
@@ -804,7 +804,7 @@ actor PimuxServerClient {
 			contentType: contentType
 		)
 		do {
-			return try await Self.decodeJSON(Response.self, from: data)
+			return try Self.decodeJSON(Response.self, from: data)
 		} catch {
 			throw PimuxServerError.invalidResponse("Invalid JSON response from the server.")
 		}
@@ -888,40 +888,33 @@ actor PimuxServerClient {
 	private nonisolated static func decodeJSON<Response: Decodable>(
 		_: Response.Type,
 		from data: Data
-	) async throws -> Response {
-		try await withCheckedThrowingContinuation { continuation in
-			DispatchQueue.global(qos: .userInitiated).async {
-				do {
-					try continuation.resume(returning: Self.decoder.decode(Response.self, from: data))
-				} catch {
-					continuation.resume(throwing: error)
-				}
-			}
-		}
+	) throws -> Response {
+		try Self.decoder.decode(Response.self, from: data)
 	}
 
-	private nonisolated static var decoder: JSONDecoder {
+	private nonisolated static let decoder: JSONDecoder = {
 		let decoder = JSONDecoder()
+		let fractionalFormatter = ISO8601DateFormatter()
+		fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+		let plainFormatter = ISO8601DateFormatter()
+		plainFormatter.formatOptions = [.withInternetDateTime]
+
 		decoder.dateDecodingStrategy = .custom { decoder in
 			let container = try decoder.singleValueContainer()
 			let string = try container.decode(String.self)
 
-			let fractionalFormatter = ISO8601DateFormatter()
-			fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 			if let date = fractionalFormatter.date(from: string) {
 				return date
 			}
 
-			let formatter = ISO8601DateFormatter()
-			formatter.formatOptions = [.withInternetDateTime]
-			if let date = formatter.date(from: string) {
+			if let date = plainFormatter.date(from: string) {
 				return date
 			}
 
 			throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid date: \(string)")
 		}
 		return decoder
-	}
+	}()
 
 	private static func errorMessage(from data: Data, statusCode: Int) -> String {
 		if let errorResponse = try? decoder.decode(PimuxErrorResponse.self, from: data) {
@@ -946,7 +939,7 @@ actor PimuxServerClient {
 	}
 }
 
-private struct PimuxErrorResponse: Decodable {
+private nonisolated struct PimuxErrorResponse: Decodable, Sendable {
 	let error: String
 }
 

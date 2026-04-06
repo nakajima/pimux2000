@@ -7,7 +7,7 @@ struct TranscriptMessageView: View {
 	var body: some View {
 		switch messageInfo.message.role {
 		case .user:
-			UserMessageView(messageInfo: messageInfo)
+			UserMessageView(messageInfo: messageInfo, sessionID: sessionID)
 		case .assistant:
 			AssistantMessageView(messageInfo: messageInfo, sessionID: sessionID)
 		case .toolResult:

@@ -1484,6 +1484,11 @@ export default function (pi: ExtensionAPI) {
 			trimmedBody.startsWith("/") && trimmedBody.length > 1
 				? (spaceIndex === -1 ? trimmedBody.slice(1) : trimmedBody.slice(1, spaceIndex))
 				: undefined;
+		const slashCommand = commandName ? pi.getCommands().find((command) => command.name === commandName) : undefined;
+		if (commandName && !slashCommand) {
+			return `unknown slash command /${commandName}`;
+		}
+
 		const extensionCommand = commandName ? extensionRunner?.getCommand(commandName) : undefined;
 		if (extensionCommand) {
 			const ctx = extensionRunner?.createCommandContext();

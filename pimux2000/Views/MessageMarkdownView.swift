@@ -294,6 +294,16 @@ enum MessageMarkdownRenderer {
 			)
 
 			MessageMarkdownView(
+				text: """
+				What changed:
+				- wraps `readability.parse()` in `catch_unwind` so future parser panics become normal errors instead of escaping the worker task
+				- keeps long inline markdown spans inside their own list item bounds on iOS
+				""",
+				role: .assistant,
+				title: "Assistant"
+			)
+
+			MessageMarkdownView(
 				text: (1 ... 16).map { "tool output line \($0)" }.joined(separator: "\n"),
 				role: .toolResult,
 				title: "Tool Result"

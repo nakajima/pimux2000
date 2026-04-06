@@ -8,7 +8,7 @@ mod summarizer;
 mod transcript;
 
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -294,6 +294,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
         &mut last_report,
         &mut last_full_summary_at,
         false,
+        false,
         &channel_tx,
     )
     .await
@@ -406,6 +407,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                     &mut last_report,
                     &mut last_full_summary_at,
                     connected,
+                    false,
                     &channel_tx,
                 ).await {
                     error!(%error, "failed to refresh host snapshot");
@@ -435,6 +437,7 @@ async fn send_current_state(
         summary_cache,
         last_report,
         last_full_summary_at,
+        true,
         true,
         channel_tx,
     )
@@ -482,6 +485,7 @@ async fn refresh_host_snapshot(
     summary_cache: &mut summarizer::SummaryCache,
     last_report: &mut Option<ReportPayload>,
     last_full_summary_at: &mut Option<Instant>,
+    publish: bool,
     force_send: bool,
     channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
 ) -> Result<(), BoxError> {
@@ -509,7 +513,7 @@ async fn refresh_host_snapshot(
         *last_report = Some(report.clone());
     }
 
-    if changed || force_send {
+    if publish && (changed || force_send) {
         let _ = channel_tx.send(AgentToServerMessage::HostSnapshot {
             sessions: report.active_sessions.clone(),
         });
@@ -539,7 +543,18 @@ fn merge_live_sessions(
         }
     }
 
-    sessions_by_id.into_values().collect()
+    let mut merged = sessions_by_id.into_values().collect::<Vec<_>>();
+    sort_active_sessions(&mut merged);
+    merged
+}
+
+fn sort_active_sessions(sessions: &mut [crate::session::ActiveSession]) {
+    sessions.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 async fn handle_server_message(
@@ -658,9 +673,7 @@ async fn handle_server_message(
             session_id,
             prefix,
         } => {
-            let result = live_store
-                .get_at_completions(&session_id, &prefix)
-                .await;
+            let result = live_store.get_at_completions(&session_id, &prefix).await;
             let (completions, error) = match result {
                 Ok(completions) => (Some(completions), None),
                 Err(error) => (None, Some(error.to_string())),
@@ -889,6 +902,8 @@ async fn handle_send_message(
     live_store: &live::LiveSessionStoreHandle,
     live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
 ) -> Result<SendMessageDispatch, String> {
+    let is_slash_command_message = looks_like_slash_command_message(&body);
+
     if is_pimux_resummarize_command(&body, &images)
         && !live_store.has_command_connection(session_id).await
     {
@@ -908,6 +923,9 @@ async fn handle_send_message(
         .await
     {
         Ok(()) => return Ok(SendMessageDispatch::LiveExtension),
+        Err(live::SendUserMessageError::Unavailable) if is_slash_command_message => {
+            return Err("slash commands require an attached live pi session".to_string());
+        }
         Err(live::SendUserMessageError::Unavailable) => {}
         Err(error) => return Err(error.to_string()),
     }
@@ -931,6 +949,10 @@ async fn handle_send_message(
     )
     .await
     .map(|_| SendMessageDispatch::HeadlessRpc)
+}
+
+fn looks_like_slash_command_message(body: &str) -> bool {
+    body.trim_start().starts_with('/')
 }
 
 fn is_pimux_resummarize_command(body: &str, images: &[ImageContent]) -> bool {
@@ -1145,22 +1167,18 @@ async fn publish_persisted_snapshot_for_session(
 }
 
 fn build_server_url(server_url: &str, path: &str) -> Result<Url, BoxError> {
-    Ok(Url::parse(&format!(
-        "{}{}",
-        server_url.trim_end_matches('/'),
-        path
-    ))?)
+    join_server_url(server_url, path)
 }
 
 fn build_websocket_url(server_url: &str, path: &str) -> Result<String, BoxError> {
-    let mut url = Url::parse(server_url)?;
+    let mut url = join_server_url(server_url, path)?;
     match url.scheme() {
         "http" => url
             .set_scheme("ws")
-            .map_err(|_| "failed to set ws scheme")?,
+            .map_err(|()| "failed to set ws scheme")?,
         "https" => url
             .set_scheme("wss")
-            .map_err(|_| "failed to set wss scheme")?,
+            .map_err(|()| "failed to set wss scheme")?,
         scheme => {
             return Err(format!(
                 "unsupported server URL scheme `{scheme}`; use http:// or https://"
@@ -1168,10 +1186,22 @@ fn build_websocket_url(server_url: &str, path: &str) -> Result<String, BoxError>
             .into());
         }
     }
-    url.set_path(path);
-    url.set_query(None);
-    url.set_fragment(None);
     Ok(url.to_string())
+}
+
+fn join_server_url(server_url: &str, path: &str) -> Result<Url, BoxError> {
+    let mut url = Url::parse(server_url)?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("server URL must not contain a query string or fragment".into());
+    }
+
+    let suffix = path.trim_start_matches('/');
+    let joined_path = match url.path().trim_end_matches('/') {
+        "" | "/" => format!("/{suffix}"),
+        base_path => format!("{base_path}/{suffix}"),
+    };
+    url.set_path(&joined_path);
+    Ok(url)
 }
 
 async fn ensure_server_reachable(
@@ -1250,8 +1280,7 @@ fn create_watcher(
     session_root: &Path,
     tx: tokio::sync::mpsc::UnboundedSender<()>,
 ) -> Result<RecommendedWatcher, BoxError> {
-    let watched_path = nearest_existing_ancestor(session_root)
-        .ok_or_else(|| format!("no existing ancestor found for {}", session_root.display()))?;
+    let watched_path = watch_path_for_session_root(session_root)?;
     let session_root = session_root.to_path_buf();
 
     let mut watcher =
@@ -1273,10 +1302,19 @@ fn create_watcher(
     Ok(watcher)
 }
 
-fn nearest_existing_ancestor(path: &Path) -> Option<PathBuf> {
-    path.ancestors()
-        .find(|candidate| candidate.exists())
-        .map(PathBuf::from)
+fn watch_path_for_session_root(session_root: &Path) -> Result<PathBuf, BoxError> {
+    if session_root.exists() {
+        return Ok(session_root.to_path_buf());
+    }
+
+    let parent = session_root.parent().ok_or_else(|| {
+        format!(
+            "session root {} does not have a parent directory to watch",
+            session_root.display()
+        )
+    })?;
+    fs::create_dir_all(parent)?;
+    Ok(parent.to_path_buf())
 }
 
 async fn debounce_changes(rx: &mut UnboundedReceiver<()>) {
@@ -1314,6 +1352,40 @@ mod tests {
     }
 
     #[test]
+    fn preserves_base_path_when_building_server_urls() {
+        let health = build_server_url("https://example.com/pimux", "/health").unwrap();
+        let websocket = build_websocket_url("https://example.com/pimux", "/agent/connect").unwrap();
+
+        assert_eq!(health.as_str(), "https://example.com/pimux/health");
+        assert_eq!(websocket, "wss://example.com/pimux/agent/connect");
+    }
+
+    #[test]
+    fn watch_path_prefers_session_root_when_present() {
+        let base = temp_test_dir("watch-root-present");
+        let session_root = base.join("sessions");
+        fs::create_dir_all(&session_root).unwrap();
+
+        let watched = watch_path_for_session_root(&session_root).unwrap();
+        assert_eq!(watched, session_root);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn watch_path_falls_back_to_direct_parent_and_creates_it() {
+        let base = temp_test_dir("watch-parent");
+        let session_root = base.join("missing").join("sessions");
+
+        let watched = watch_path_for_session_root(&session_root).unwrap();
+        assert_eq!(watched, base.join("missing"));
+        assert!(watched.exists());
+        assert!(!session_root.exists());
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn filters_discovered_sessions_by_local_date() {
         let today = Local::now().date_naive();
         let (start, _) = utc_range_for_local_date(today).unwrap();
@@ -1333,6 +1405,17 @@ mod tests {
     }
 
     #[test]
+    fn detects_slash_command_messages() {
+        assert!(looks_like_slash_command_message("/bump"));
+        assert!(looks_like_slash_command_message("  /todo later"));
+        assert!(looks_like_slash_command_message(
+            "/skill:swift-app-conventions"
+        ));
+        assert!(!looks_like_slash_command_message("hello /bump"));
+        assert!(!looks_like_slash_command_message("hello"));
+    }
+
+    #[test]
     fn detects_pimux_resummarize_command() {
         assert!(is_pimux_resummarize_command("/pimux resummarize", &[]));
         assert!(is_pimux_resummarize_command(
@@ -1343,11 +1426,49 @@ mod tests {
         assert!(!is_pimux_resummarize_command("/pimux resummarize now", &[]));
         assert!(!is_pimux_resummarize_command(
             "/pimux resummarize",
-            &[ImageContent::new(
-                "image/png".to_string(),
-                "abc".to_string()
-            )]
+            &[ImageContent::new("image/png", "abc")]
         ));
+    }
+
+    #[test]
+    fn merge_live_sessions_sorts_deterministically() {
+        let updated_at = Utc::now();
+        let merged = merge_live_sessions(
+            vec![
+                sample_active_session("b", updated_at),
+                sample_active_session("a", updated_at),
+                sample_active_session("stale", updated_at - ChronoDuration::minutes(1)),
+            ],
+            vec![sample_active_session(
+                "live",
+                updated_at + ChronoDuration::minutes(1),
+            )],
+        );
+
+        assert_eq!(
+            merged
+                .into_iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>(),
+            vec!["live", "a", "b", "stale"]
+        );
+    }
+
+    fn sample_active_session(
+        id: &str,
+        updated_at: chrono::DateTime<Utc>,
+    ) -> crate::session::ActiveSession {
+        sample_discovered_session(id, updated_at).into_active_session(format!("Summary {id}"))
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "pimux-agent-test-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
     }
 
     fn sample_discovered_session(

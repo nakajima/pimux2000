@@ -56,6 +56,13 @@ pub struct LiveSessionMetadata {
     pub context_usage: Option<SessionContextUsage>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LiveSessionTransport {
+    Extension,
+    Helper,
+}
+
 #[derive(Debug, Clone)]
 pub enum LiveUpdate {
     Transcript {
@@ -758,6 +765,7 @@ async fn start_listener_impl(
                                         }
                                         guard.apply_event(LiveSessionEvent::SessionAttached {
                                             session_id: session_id.clone(),
+                                            transport: LiveSessionTransport::Extension,
                                         })
                                     };
 
@@ -1244,6 +1252,7 @@ enum LiveAgentCommand {
 pub enum LiveSessionEvent {
     SessionAttached {
         session_id: String,
+        transport: LiveSessionTransport,
     },
     SessionSnapshot {
         session_id: String,
@@ -1318,7 +1327,10 @@ impl LiveSessionStore {
 
     fn apply_event(&mut self, event: LiveSessionEvent) -> Option<SessionMessagesResponse> {
         match event {
-            LiveSessionEvent::SessionAttached { session_id } => {
+            LiveSessionEvent::SessionAttached {
+                session_id,
+                transport,
+            } => {
                 self.warned_legacy_sessions.remove(&session_id);
                 self.warned_missing_metadata_sessions.remove(&session_id);
                 if self.active_sessions.contains_key(&session_id) {
@@ -1335,9 +1347,10 @@ impl LiveSessionStore {
                             detached.ui_state,
                             detached.ui_dialog_state,
                             detached.terminal_only_ui_state,
+                            transport,
                         )
                     } else {
-                        LiveSessionState::new(session_id.clone())
+                        LiveSessionState::new_with_transport(session_id.clone(), transport)
                     };
 
                 self.active_sessions.insert(session_id, state);
@@ -1355,7 +1368,7 @@ impl LiveSessionStore {
                 state.messages = messages.into_iter().map(sanitize_message).collect();
                 state.in_progress_assistant = None;
                 state.last_update_at = state.latest_message_timestamp();
-                Some(state.as_response(true, true))
+                Some(state.active_response())
             }
             LiveSessionEvent::SessionAppend {
                 session_id,
@@ -1380,7 +1393,7 @@ impl LiveSessionStore {
 
                 state.messages.extend(messages);
                 state.last_update_at = state.latest_message_timestamp();
-                Some(state.as_response(true, true))
+                Some(state.active_response())
             }
             LiveSessionEvent::AssistantPartial {
                 session_id,
@@ -1395,7 +1408,7 @@ impl LiveSessionStore {
                 let message = sanitize_message(message);
                 state.in_progress_assistant = Some(message.clone());
                 state.last_update_at = message.created_at;
-                Some(state.as_response(true, true))
+                Some(state.active_response())
             }
             LiveSessionEvent::UiState { session_id, state } => {
                 let entry = self
@@ -1432,7 +1445,7 @@ impl LiveSessionStore {
                 let ui_state = state.ui_state.clone();
                 let ui_dialog_state = state.ui_dialog_state.clone();
                 let terminal_only_ui_state = state.terminal_only_ui_state.clone();
-                let response = state.as_response(false, false);
+                let response = state.detached_response();
                 self.insert_detached(
                     response.clone(),
                     metadata,
@@ -1467,7 +1480,7 @@ impl LiveSessionStore {
     fn snapshot_for_session(&self, session_id: &str) -> Option<SessionMessagesResponse> {
         self.active_sessions
             .get(session_id)
-            .map(|state| state.as_response(true, true))
+            .map(LiveSessionState::active_response)
             .or_else(|| {
                 self.recent_detached_sessions
                     .get(session_id)
@@ -1479,7 +1492,7 @@ impl LiveSessionStore {
         let mut snapshots = self
             .active_sessions
             .iter()
-            .map(|(session_id, state)| (session_id.clone(), state.as_response(true, true)))
+            .map(|(session_id, state)| (session_id.clone(), state.active_response()))
             .collect::<HashMap<_, _>>();
 
         for (session_id, state) in &self.recent_detached_sessions {
@@ -2287,10 +2300,15 @@ struct LiveSessionState {
     ui_state: Option<SessionUiState>,
     ui_dialog_state: Option<SessionUiDialogState>,
     terminal_only_ui_state: Option<SessionTerminalOnlyUiState>,
+    transport: LiveSessionTransport,
 }
 
 impl LiveSessionState {
     fn new(session_id: String) -> Self {
+        Self::new_with_transport(session_id, LiveSessionTransport::Extension)
+    }
+
+    fn new_with_transport(session_id: String, transport: LiveSessionTransport) -> Self {
         Self {
             session_id,
             messages: Vec::new(),
@@ -2300,6 +2318,7 @@ impl LiveSessionState {
             ui_state: None,
             ui_dialog_state: None,
             terminal_only_ui_state: None,
+            transport,
         }
     }
 
@@ -2309,6 +2328,7 @@ impl LiveSessionState {
         ui_state: Option<SessionUiState>,
         ui_dialog_state: Option<SessionUiDialogState>,
         terminal_only_ui_state: Option<SessionTerminalOnlyUiState>,
+        transport: LiveSessionTransport,
     ) -> Self {
         let last_update_at = response
             .messages
@@ -2325,6 +2345,7 @@ impl LiveSessionState {
             ui_state,
             ui_dialog_state,
             terminal_only_ui_state,
+            transport,
         }
     }
 
@@ -2375,18 +2396,36 @@ impl LiveSessionState {
             })
     }
 
-    fn as_response(&self, active: bool, attached: bool) -> SessionMessagesResponse {
+    fn active_response(&self) -> SessionMessagesResponse {
+        self.response_with_activity(true, self.transport == LiveSessionTransport::Extension)
+    }
+
+    fn detached_response(&self) -> SessionMessagesResponse {
+        self.response_with_activity(false, false)
+    }
+
+    fn response_with_activity(&self, active: bool, attached: bool) -> SessionMessagesResponse {
         let mut messages = self.messages.clone();
         if let Some(in_progress) = &self.in_progress_assistant {
             messages.push(in_progress.clone());
         }
 
+        let (state, source) = match self.transport {
+            LiveSessionTransport::Extension => {
+                (TranscriptFreshnessState::Live, TranscriptSource::Extension)
+            }
+            LiveSessionTransport::Helper => (
+                TranscriptFreshnessState::LiveUnknown,
+                TranscriptSource::Helper,
+            ),
+        };
+
         SessionMessagesResponse {
             session_id: self.session_id.clone(),
             messages,
             freshness: TranscriptFreshness {
-                state: TranscriptFreshnessState::Live,
-                source: TranscriptSource::Extension,
+                state,
+                source,
                 as_of: self.latest_message_timestamp(),
             },
             activity: SessionActivity { active, attached },
@@ -2583,6 +2622,7 @@ mod tests {
         handle
             .apply_event(LiveSessionEvent::SessionAttached {
                 session_id: "session-1".to_string(),
+                transport: LiveSessionTransport::Extension,
             })
             .await;
         handle
@@ -2730,6 +2770,7 @@ mod tests {
         handle
             .apply_event(LiveSessionEvent::SessionAttached {
                 session_id: "session-1".to_string(),
+                transport: LiveSessionTransport::Extension,
             })
             .await;
         handle
@@ -2757,6 +2798,7 @@ mod tests {
         handle
             .apply_event(LiveSessionEvent::SessionAttached {
                 session_id: session_id.clone(),
+                transport: LiveSessionTransport::Extension,
             })
             .await;
 
@@ -2792,6 +2834,47 @@ mod tests {
                 max_tokens: Some(200_000),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn helper_sessions_are_not_marked_as_extension_attached() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+
+        handle
+            .apply_event(LiveSessionEvent::SessionAttached {
+                session_id: "session-1".to_string(),
+                transport: LiveSessionTransport::Helper,
+            })
+            .await;
+
+        let snapshot = handle
+            .apply_event(LiveSessionEvent::SessionSnapshot {
+                session_id: "session-1".to_string(),
+                messages: vec![sample_message(Role::User, "hello from helper")],
+            })
+            .await
+            .unwrap();
+        assert!(snapshot.activity.active);
+        assert!(!snapshot.activity.attached);
+        assert_eq!(
+            snapshot.freshness.state,
+            TranscriptFreshnessState::LiveUnknown
+        );
+        assert_eq!(snapshot.freshness.source, TranscriptSource::Helper);
+
+        let detached = handle
+            .apply_event(LiveSessionEvent::SessionDetached {
+                session_id: "session-1".to_string(),
+            })
+            .await
+            .unwrap();
+        assert!(!detached.activity.active);
+        assert!(!detached.activity.attached);
+        assert_eq!(
+            detached.freshness.state,
+            TranscriptFreshnessState::LiveUnknown
+        );
+        assert_eq!(detached.freshness.source, TranscriptSource::Helper);
     }
 
     #[test]

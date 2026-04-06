@@ -259,6 +259,12 @@ struct PiSessionView: View {
 				guard attached == true else { return }
 				Task { await loadCustomCommands(force: true) }
 			}
+			.onChange(of: storedMessages.last?.message.createdAt) {
+				markSessionAsRead()
+			}
+			.onAppear {
+				markSessionAsRead()
+			}
 	}
 
 	private var liveTaskKey: String {
@@ -609,6 +615,14 @@ struct PiSessionView: View {
 
 		if let builtinCommand = builtinCommand(for: body, readyImages: readyImages) {
 			await executeBuiltinCommand(builtinCommand)
+			return
+		}
+
+		if let slashValidationMessage = SlashCommand.validationMessage(
+			for: body,
+			commands: SlashCommand.merged(custom: customCommands)
+		) {
+			sendError = slashValidationMessage
 			return
 		}
 
@@ -1428,6 +1442,14 @@ struct PiSessionView: View {
 			sessionID: session.sessionID,
 			active: activity.active,
 			attached: activity.attached
+		)
+	}
+
+	private func markSessionAsRead() {
+		guard let lastMessageAt = storedMessages.last?.message.createdAt else { return }
+		try? appDatabase?.markSessionRead(
+			sessionID: session.sessionID,
+			through: lastMessageAt
 		)
 	}
 

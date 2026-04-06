@@ -33,7 +33,7 @@ use tokio::{
     sync::{Mutex, RwLock, mpsc, oneshot},
     time::interval,
 };
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
     channel::{AgentToServerMessage, ServerToAgentMessage},
@@ -58,6 +58,8 @@ type SendResult = Result<(), String>;
 const ON_DEMAND_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SEND_MESSAGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const STREAM_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const SESSION_SUBSCRIPTION_BUFFER_CAPACITY: usize = 16;
+const STREAM_BODY_BUFFER_CAPACITY: usize = 16;
 const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SEND_MESSAGE_IMAGES: usize = 8;
 const MAX_SEND_MESSAGE_IMAGE_BASE64_CHARS: usize = 8 * 1024 * 1024;
@@ -113,11 +115,12 @@ struct AppState {
     inflight_get_at_completions: Arc<Mutex<HashMap<String, InflightGetAtCompletions>>>,
     inflight_ui_dialog_actions: Arc<Mutex<HashMap<String, InflightUiDialogAction>>>,
     inflight_builtin_commands: Arc<Mutex<HashMap<String, InflightBuiltinCommand>>>,
-    session_subscribers:
-        Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<SessionSubscriptionEvent>>>>>,
+    session_subscribers: Arc<Mutex<HashMap<String, Vec<SessionSubscriber>>>>,
     next_request_id: Arc<AtomicU64>,
     next_connection_id: Arc<AtomicU64>,
+    next_subscriber_id: Arc<AtomicU64>,
     host_registry_path: Option<PathBuf>,
+    host_persist_lock: Arc<Mutex<()>>,
 }
 
 impl AppState {
@@ -140,7 +143,9 @@ impl AppState {
             session_subscribers: Arc::new(Mutex::new(HashMap::new())),
             next_request_id: Arc::new(AtomicU64::new(1)),
             next_connection_id: Arc::new(AtomicU64::new(1)),
+            next_subscriber_id: Arc::new(AtomicU64::new(1)),
             host_registry_path,
+            host_persist_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -190,6 +195,12 @@ struct PersistedHostRecord {
 #[derive(Clone)]
 struct CachedTranscript {
     response: SessionMessagesResponse,
+}
+
+#[derive(Clone)]
+struct SessionSubscriber {
+    id: u64,
+    sender: mpsc::Sender<SessionSubscriptionEvent>,
 }
 
 #[derive(Clone)]
@@ -602,7 +613,7 @@ async fn session_commands(
         );
     }
 
-    send_to_agent(
+    if let Err(error) = send_to_agent(
         &state,
         &host_location,
         ServerToAgentMessage::GetCommands {
@@ -610,7 +621,11 @@ async fn session_commands(
             session_id: session_id.clone(),
         },
     )
-    .await?;
+    .await
+    {
+        cancel_get_commands(&state, &request_id).await;
+        return Err(error);
+    }
 
     match tokio::time::timeout(GET_COMMANDS_TIMEOUT, receiver).await {
         Ok(Ok(Ok(commands))) => Ok(Json(SessionCommandsResponse {
@@ -656,7 +671,7 @@ async fn session_command_argument_completions(
         );
     }
 
-    send_to_agent(
+    if let Err(error) = send_to_agent(
         &state,
         &host_location,
         ServerToAgentMessage::GetCommandArgumentCompletions {
@@ -666,7 +681,11 @@ async fn session_command_argument_completions(
             argument_prefix: request.argument_prefix,
         },
     )
-    .await?;
+    .await
+    {
+        cancel_get_command_argument_completions(&state, &request_id).await;
+        return Err(error);
+    }
 
     match tokio::time::timeout(GET_COMMANDS_TIMEOUT, receiver).await {
         Ok(Ok(Ok(completions))) => Ok(Json(SessionCommandArgumentCompletionsResponse {
@@ -716,7 +735,7 @@ async fn session_at_completions(
         );
     }
 
-    send_to_agent(
+    if let Err(error) = send_to_agent(
         &state,
         &host_location,
         ServerToAgentMessage::GetAtCompletions {
@@ -725,7 +744,11 @@ async fn session_at_completions(
             prefix: request.prefix,
         },
     )
-    .await?;
+    .await
+    {
+        cancel_get_at_completions(&state, &request_id).await;
+        return Err(error);
+    }
 
     match tokio::time::timeout(GET_COMMANDS_TIMEOUT, receiver).await {
         Ok(Ok(Ok(completions))) => Ok(Json(SessionAtCompletionsResponse {
@@ -775,7 +798,7 @@ async fn session_ui_dialog_action(
         );
     }
 
-    send_to_agent(
+    if let Err(error) = send_to_agent(
         &state,
         &host_location,
         ServerToAgentMessage::UiDialogAction {
@@ -785,7 +808,11 @@ async fn session_ui_dialog_action(
             action: request.action,
         },
     )
-    .await?;
+    .await
+    {
+        cancel_ui_dialog_action(&state, &request_id).await;
+        return Err(error);
+    }
 
     match tokio::time::timeout(GET_COMMANDS_TIMEOUT, receiver).await {
         Ok(Ok(Ok(()))) => Ok(StatusCode::NO_CONTENT),
@@ -838,7 +865,7 @@ async fn session_builtin_command(
         );
     }
 
-    send_to_agent(
+    if let Err(error) = send_to_agent(
         &state,
         &host_location,
         ServerToAgentMessage::BuiltinCommand {
@@ -847,7 +874,11 @@ async fn session_builtin_command(
             action,
         },
     )
-    .await?;
+    .await
+    {
+        cancel_builtin_command(&state, &request_id).await;
+        return Err(error);
+    }
 
     match tokio::time::timeout(BUILTIN_COMMAND_TIMEOUT, receiver).await {
         Ok(Ok(Ok(response))) => Ok(Json(SessionBuiltinCommandApiResponse {
@@ -928,10 +959,13 @@ async fn session_stream(
     let initial_ui_dialog_state = cached_ui_dialog_state(&state, &session_id).await;
     let initial_terminal_only_ui_state = cached_terminal_only_ui_state(&state, &session_id).await;
 
-    let (subscription_tx, mut subscription_rx) = mpsc::unbounded_channel();
-    subscribe_session(&state, &session_id, subscription_tx).await;
+    let (subscription_tx, mut subscription_rx) =
+        mpsc::channel(SESSION_SUBSCRIPTION_BUFFER_CAPACITY);
+    let subscription_id = subscribe_session(&state, &session_id, subscription_tx).await;
 
-    let (body_tx, body_rx) = mpsc::unbounded_channel::<Bytes>();
+    let (body_tx, body_rx) = mpsc::channel::<Bytes>(STREAM_BODY_BUFFER_CAPACITY);
+    let stream_state = state.clone();
+    let stream_session_id = session_id.clone();
     tokio::spawn(async move {
         let mut sequence = 1_u64;
         if send_stream_event(
@@ -943,37 +977,19 @@ async fn session_stream(
         )
         .is_err()
         {
+            unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
             return;
         }
         sequence += 1;
 
         if let Some(event) = initial_state {
-            let stream_event = match event {
-                SessionSubscriptionEvent::Snapshot(session) => SessionStreamEvent::Snapshot {
-                    sequence,
-                    session: ApiSessionMessagesResponse::from(&session),
-                },
-                SessionSubscriptionEvent::SessionState {
-                    connected,
-                    missing,
-                    last_seen_at,
-                } => SessionStreamEvent::SessionState {
-                    sequence,
-                    connected,
-                    missing,
-                    last_seen_at,
-                },
-                SessionSubscriptionEvent::UiState(state) => {
-                    SessionStreamEvent::UiState { sequence, state }
-                }
-                SessionSubscriptionEvent::UiDialogState(state) => {
-                    SessionStreamEvent::UiDialogState { sequence, state }
-                }
-                SessionSubscriptionEvent::TerminalOnlyUiState(state) => {
-                    SessionStreamEvent::TerminalOnlyUiState { sequence, state }
-                }
-            };
-            if send_stream_event(&body_tx, stream_event).is_err() {
+            if send_stream_event(
+                &body_tx,
+                session_subscription_event_to_stream_event(event, sequence),
+            )
+            .is_err()
+            {
+                unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
                 return;
             }
             sequence += 1;
@@ -989,6 +1005,7 @@ async fn session_stream(
             )
             .is_err()
             {
+                unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
                 return;
             }
             sequence += 1;
@@ -1004,6 +1021,7 @@ async fn session_stream(
             )
             .is_err()
             {
+                unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
                 return;
             }
             sequence += 1;
@@ -1018,6 +1036,7 @@ async fn session_stream(
         )
         .is_err()
         {
+            unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
             return;
         }
         sequence += 1;
@@ -1029,35 +1048,10 @@ async fn session_stream(
                     let Some(event) = maybe_event else {
                         break;
                     };
-                    let stream_event = match event {
-                        SessionSubscriptionEvent::Snapshot(session) => SessionStreamEvent::Snapshot {
-                            sequence,
-                            session: ApiSessionMessagesResponse::from(&session),
-                        },
-                        SessionSubscriptionEvent::SessionState {
-                            connected,
-                            missing,
-                            last_seen_at,
-                        } => SessionStreamEvent::SessionState {
-                            sequence,
-                            connected,
-                            missing,
-                            last_seen_at,
-                        },
-                        SessionSubscriptionEvent::UiState(state) => SessionStreamEvent::UiState {
-                            sequence,
-                            state,
-                        },
-                        SessionSubscriptionEvent::UiDialogState(state) => SessionStreamEvent::UiDialogState {
-                            sequence,
-                            state,
-                        },
-                        SessionSubscriptionEvent::TerminalOnlyUiState(state) => SessionStreamEvent::TerminalOnlyUiState {
-                            sequence,
-                            state,
-                        },
-                    };
-                    if send_stream_event(&body_tx, stream_event).is_err() {
+                    if send_stream_event(
+                        &body_tx,
+                        session_subscription_event_to_stream_event(event, sequence),
+                    ).is_err() {
                         break;
                     }
                     sequence += 1;
@@ -1076,9 +1070,11 @@ async fn session_stream(
                 }
             }
         }
+
+        unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
     });
 
-    let stream = UnboundedReceiverStream::new(body_rx).map(Ok::<Bytes, std::convert::Infallible>);
+    let stream = ReceiverStream::new(body_rx).map(Ok::<Bytes, std::convert::Infallible>);
     let mut response = Response::new(Body::from_stream(stream));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -1179,7 +1175,7 @@ async fn send_session_message(
         );
     }
 
-    send_to_agent(
+    if let Err(error) = send_to_agent(
         &state,
         &host_location,
         ServerToAgentMessage::SendMessage {
@@ -1189,7 +1185,11 @@ async fn send_session_message(
             images,
         },
     )
-    .await?;
+    .await
+    {
+        cancel_send_message(&state, &request_id).await;
+        return Err(error);
+    }
 
     match tokio::time::timeout(SEND_MESSAGE_TIMEOUT, receiver).await {
         Ok(Ok(Ok(()))) => Ok(StatusCode::NO_CONTENT),
@@ -1263,6 +1263,18 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                         continue;
                     }
                 };
+
+                if !matches!(&incoming, AgentToServerMessage::Hello { .. })
+                    && let Some(host) = current_host.as_ref()
+                    && !is_current_agent_connection(&state, &host.location, connection_id).await
+                {
+                    info!(
+                        host_location = %host.location,
+                        connection_id,
+                        "closing stale agent connection"
+                    );
+                    break;
+                }
 
                 match incoming {
                     AgentToServerMessage::Hello { host } => {
@@ -1516,7 +1528,7 @@ async fn register_agent_connection(
     sender: mpsc::UnboundedSender<ServerToAgentMessage>,
     close_sender: mpsc::UnboundedSender<()>,
 ) -> bool {
-    {
+    let previous_connection = {
         let mut connections = state.agent_connections.write().await;
         connections.insert(
             host.location.clone(),
@@ -1525,7 +1537,19 @@ async fn register_agent_connection(
                 sender,
                 close_sender,
             },
+        )
+    };
+
+    if let Some(previous_connection) = previous_connection
+        && previous_connection.connection_id != connection_id
+    {
+        info!(
+            host_location = %host.location,
+            previous_connection_id = previous_connection.connection_id,
+            replacement_connection_id = connection_id,
+            "replacing existing agent connection"
         );
+        let _ = previous_connection.close_sender.send(());
     }
 
     let now = Utc::now();
@@ -1718,6 +1742,18 @@ async fn send_to_agent(
     })
 }
 
+async fn is_current_agent_connection(
+    state: &AppState,
+    host_location: &str,
+    connection_id: u64,
+) -> bool {
+    let connections = state.agent_connections.read().await;
+    connections
+        .get(host_location)
+        .map(|connection| connection.connection_id == connection_id)
+        .unwrap_or(false)
+}
+
 async fn resolve_session_snapshot(
     state: &AppState,
     session_id: &str,
@@ -1745,7 +1781,7 @@ async fn resolve_session_snapshot(
         );
     }
 
-    send_to_agent(
+    if let Err(error) = send_to_agent(
         state,
         &host_location,
         ServerToAgentMessage::FetchTranscript {
@@ -1753,7 +1789,11 @@ async fn resolve_session_snapshot(
             session_id: session_id.to_string(),
         },
     )
-    .await?;
+    .await
+    {
+        cancel_fetch(state, &request_id).await;
+        return Err(error);
+    }
 
     match tokio::time::timeout(ON_DEMAND_FETCH_TIMEOUT, receiver).await {
         Ok(Ok(Ok(session))) => Ok(session),
@@ -1799,7 +1839,7 @@ async fn fetch_attachment_from_host(
         );
     }
 
-    send_to_agent(
+    if let Err(error) = send_to_agent(
         state,
         &host_location,
         ServerToAgentMessage::FetchAttachment {
@@ -1808,7 +1848,11 @@ async fn fetch_attachment_from_host(
             attachment_id: attachment_id.to_string(),
         },
     )
-    .await?;
+    .await
+    {
+        cancel_attachment_fetch(state, &request_id).await;
+        return Err(error);
+    }
 
     match tokio::time::timeout(ON_DEMAND_FETCH_TIMEOUT, receiver).await {
         Ok(Ok(Ok(attachment))) => Ok(attachment),
@@ -1833,15 +1877,34 @@ async fn fetch_attachment_from_host(
 async fn subscribe_session(
     state: &AppState,
     session_id: &str,
-    sender: mpsc::UnboundedSender<SessionSubscriptionEvent>,
-) {
+    sender: mpsc::Sender<SessionSubscriptionEvent>,
+) -> u64 {
+    let subscriber_id = state.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
     state
         .session_subscribers
         .lock()
         .await
         .entry(session_id.to_string())
         .or_default()
-        .push(sender);
+        .push(SessionSubscriber {
+            id: subscriber_id,
+            sender,
+        });
+    subscriber_id
+}
+
+async fn unsubscribe_session(state: &AppState, session_id: &str, subscriber_id: u64) {
+    let mut subscribers = state.session_subscribers.lock().await;
+    let mut remove_entry = false;
+
+    if let Some(entries) = subscribers.get_mut(session_id) {
+        entries.retain(|entry| entry.id != subscriber_id);
+        remove_entry = entries.is_empty();
+    }
+
+    if remove_entry {
+        subscribers.remove(session_id);
+    }
 }
 
 async fn current_session_subscription_state(
@@ -1927,11 +1990,41 @@ async fn broadcast_session_event(
     session_id: &str,
     event: SessionSubscriptionEvent,
 ) {
+    let subscribers = {
+        let subscribers = state.session_subscribers.lock().await;
+        subscribers.get(session_id).cloned().unwrap_or_default()
+    };
+
+    if subscribers.is_empty() {
+        return;
+    }
+
+    let mut failed_subscriber_ids = Vec::new();
+    for subscriber in subscribers {
+        match subscriber.sender.try_send(event.clone()) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                failed_subscriber_ids.push(subscriber.id);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    session_id = %session_id,
+                    subscriber_id = subscriber.id,
+                    "dropping slow session stream subscriber"
+                );
+                failed_subscriber_ids.push(subscriber.id);
+            }
+        }
+    }
+
+    if failed_subscriber_ids.is_empty() {
+        return;
+    }
+
     let mut subscribers = state.session_subscribers.lock().await;
     let mut remove_entry = false;
-
     if let Some(entries) = subscribers.get_mut(session_id) {
-        entries.retain(|sender| sender.send(event.clone()).is_ok());
+        entries.retain(|entry| !failed_subscriber_ids.contains(&entry.id));
         remove_entry = entries.is_empty();
     }
 
@@ -1940,13 +2033,39 @@ async fn broadcast_session_event(
     }
 }
 
-fn send_stream_event(
-    sender: &mpsc::UnboundedSender<Bytes>,
-    event: SessionStreamEvent,
-) -> Result<(), ()> {
+fn session_subscription_event_to_stream_event(
+    event: SessionSubscriptionEvent,
+    sequence: u64,
+) -> SessionStreamEvent {
+    match event {
+        SessionSubscriptionEvent::Snapshot(session) => SessionStreamEvent::Snapshot {
+            sequence,
+            session: ApiSessionMessagesResponse::from(&session),
+        },
+        SessionSubscriptionEvent::SessionState {
+            connected,
+            missing,
+            last_seen_at,
+        } => SessionStreamEvent::SessionState {
+            sequence,
+            connected,
+            missing,
+            last_seen_at,
+        },
+        SessionSubscriptionEvent::UiState(state) => SessionStreamEvent::UiState { sequence, state },
+        SessionSubscriptionEvent::UiDialogState(state) => {
+            SessionStreamEvent::UiDialogState { sequence, state }
+        }
+        SessionSubscriptionEvent::TerminalOnlyUiState(state) => {
+            SessionStreamEvent::TerminalOnlyUiState { sequence, state }
+        }
+    }
+}
+
+fn send_stream_event(sender: &mpsc::Sender<Bytes>, event: SessionStreamEvent) -> Result<(), ()> {
     let mut payload = serde_json::to_string(&event).map_err(|_| ())?;
     payload.push('\n');
-    sender.send(Bytes::from(payload)).map_err(|_| ())
+    sender.try_send(Bytes::from(payload)).map_err(|_| ())
 }
 
 async fn fulfill_fetch_result(
@@ -1956,6 +2075,20 @@ async fn fulfill_fetch_result(
     session: Option<SessionMessagesResponse>,
     error: Option<String>,
 ) {
+    let inflight = {
+        let mut inflight_fetches = state.inflight_fetches.lock().await;
+        take_matching_inflight(
+            &mut inflight_fetches,
+            request_id,
+            host_location,
+            |inflight| &inflight.host_location,
+        )
+    };
+
+    let Some(inflight) = inflight else {
+        return;
+    };
+
     if let Some(session) = session.clone() {
         let changed = {
             let mut transcripts = state.transcripts.write().await;
@@ -1966,35 +2099,30 @@ async fn fulfill_fetch_result(
         }
     }
 
-    let sender = {
-        let mut inflight_fetches = state.inflight_fetches.lock().await;
-        inflight_fetches.remove(request_id)
+    let result = match (session, error) {
+        (Some(session), _) => Ok(session),
+        (None, Some(error)) => Err(error),
+        (None, None) => Err("agent returned an empty transcript response".to_string()),
     };
-
-    if let Some(inflight) = sender {
-        let result = match (session, error) {
-            (Some(session), _) => Ok(session),
-            (None, Some(error)) => Err(error),
-            (None, None) => Err("agent returned an empty transcript response".to_string()),
-        };
-        let _ = inflight.sender.send(result);
-    }
+    let _ = inflight.sender.send(result);
 }
 
 async fn fulfill_attachment_fetch_result(
     state: &AppState,
-    _host_location: &str,
+    host_location: &str,
     request_id: &str,
     mime_type: Option<String>,
     data: Option<String>,
     error: Option<String>,
 ) {
-    let sender = {
+    let inflight = {
         let mut inflight = state.inflight_attachment_fetches.lock().await;
-        inflight.remove(request_id)
+        take_matching_inflight(&mut inflight, request_id, host_location, |inflight| {
+            &inflight.host_location
+        })
     };
 
-    if let Some(inflight) = sender {
+    if let Some(inflight) = inflight {
         let result = match (mime_type, data, error) {
             (Some(mime_type), Some(data), _) => Ok((mime_type, data)),
             (_, _, Some(error)) => Err(error),
@@ -2006,16 +2134,21 @@ async fn fulfill_attachment_fetch_result(
 
 async fn fulfill_send_result(
     state: &AppState,
-    _host_location: &str,
+    host_location: &str,
     request_id: &str,
     error: Option<String>,
 ) {
-    let sender = {
+    let inflight = {
         let mut inflight_send_messages = state.inflight_send_messages.lock().await;
-        inflight_send_messages.remove(request_id)
+        take_matching_inflight(
+            &mut inflight_send_messages,
+            request_id,
+            host_location,
+            |inflight| &inflight.host_location,
+        )
     };
 
-    if let Some(inflight) = sender {
+    if let Some(inflight) = inflight {
         let result = match error {
             Some(error) => Err(error),
             None => Ok(()),
@@ -2026,17 +2159,19 @@ async fn fulfill_send_result(
 
 async fn fulfill_get_commands_result(
     state: &AppState,
-    _host_location: &str,
+    host_location: &str,
     request_id: &str,
     commands: Option<Vec<SessionCommand>>,
     error: Option<String>,
 ) {
-    let sender = {
+    let inflight = {
         let mut inflight = state.inflight_get_commands.lock().await;
-        inflight.remove(request_id)
+        take_matching_inflight(&mut inflight, request_id, host_location, |inflight| {
+            &inflight.host_location
+        })
     };
 
-    if let Some(inflight) = sender {
+    if let Some(inflight) = inflight {
         let result = match (commands, error) {
             (Some(commands), _) => Ok(commands),
             (None, Some(error)) => Err(error),
@@ -2048,17 +2183,19 @@ async fn fulfill_get_commands_result(
 
 async fn fulfill_get_command_argument_completions_result(
     state: &AppState,
-    _host_location: &str,
+    host_location: &str,
     request_id: &str,
     completions: Option<Vec<SessionCommandCompletion>>,
     error: Option<String>,
 ) {
-    let sender = {
+    let inflight = {
         let mut inflight = state.inflight_get_command_argument_completions.lock().await;
-        inflight.remove(request_id)
+        take_matching_inflight(&mut inflight, request_id, host_location, |inflight| {
+            &inflight.host_location
+        })
     };
 
-    if let Some(inflight) = sender {
+    if let Some(inflight) = inflight {
         let result = match (completions, error) {
             (Some(completions), _) => Ok(completions),
             (None, Some(error)) => Err(error),
@@ -2070,17 +2207,19 @@ async fn fulfill_get_command_argument_completions_result(
 
 async fn fulfill_get_at_completions_result(
     state: &AppState,
-    _host_location: &str,
+    host_location: &str,
     request_id: &str,
     completions: Option<Vec<SessionCommandCompletion>>,
     error: Option<String>,
 ) {
-    let sender = {
+    let inflight = {
         let mut inflight = state.inflight_get_at_completions.lock().await;
-        inflight.remove(request_id)
+        take_matching_inflight(&mut inflight, request_id, host_location, |inflight| {
+            &inflight.host_location
+        })
     };
 
-    if let Some(inflight) = sender {
+    if let Some(inflight) = inflight {
         let result = match (completions, error) {
             (Some(completions), _) => Ok(completions),
             (None, Some(error)) => Err(error),
@@ -2092,16 +2231,18 @@ async fn fulfill_get_at_completions_result(
 
 async fn fulfill_ui_dialog_action_result(
     state: &AppState,
-    _host_location: &str,
+    host_location: &str,
     request_id: &str,
     error: Option<String>,
 ) {
-    let sender = {
+    let inflight = {
         let mut inflight = state.inflight_ui_dialog_actions.lock().await;
-        inflight.remove(request_id)
+        take_matching_inflight(&mut inflight, request_id, host_location, |inflight| {
+            &inflight.host_location
+        })
     };
 
-    if let Some(inflight) = sender {
+    if let Some(inflight) = inflight {
         let result = match error {
             Some(error) => Err(error),
             None => Ok(()),
@@ -2112,17 +2253,19 @@ async fn fulfill_ui_dialog_action_result(
 
 async fn fulfill_builtin_command_result(
     state: &AppState,
-    _host_location: &str,
+    host_location: &str,
     request_id: &str,
     response: Option<SessionBuiltinCommandResponse>,
     error: Option<String>,
 ) {
-    let sender = {
+    let inflight = {
         let mut inflight = state.inflight_builtin_commands.lock().await;
-        inflight.remove(request_id)
+        take_matching_inflight(&mut inflight, request_id, host_location, |inflight| {
+            &inflight.host_location
+        })
     };
 
-    if let Some(inflight) = sender {
+    if let Some(inflight) = inflight {
         let result = match (response, error) {
             (Some(response), _) => Ok(response),
             (None, Some(error)) => Err(error),
@@ -2392,6 +2535,26 @@ async fn cancel_send_message(state: &AppState, request_id: &str) {
     state.inflight_send_messages.lock().await.remove(request_id);
 }
 
+async fn cancel_get_commands(state: &AppState, request_id: &str) {
+    state.inflight_get_commands.lock().await.remove(request_id);
+}
+
+async fn cancel_get_command_argument_completions(state: &AppState, request_id: &str) {
+    state
+        .inflight_get_command_argument_completions
+        .lock()
+        .await
+        .remove(request_id);
+}
+
+async fn cancel_get_at_completions(state: &AppState, request_id: &str) {
+    state
+        .inflight_get_at_completions
+        .lock()
+        .await
+        .remove(request_id);
+}
+
 async fn cancel_ui_dialog_action(state: &AppState, request_id: &str) {
     state
         .inflight_ui_dialog_actions
@@ -2413,6 +2576,7 @@ async fn persist_hosts(state: &AppState) {
         return;
     };
 
+    let _guard = state.host_persist_lock.lock().await;
     let hosts = state.hosts.read().await.clone();
     if let Err(error) = persist_host_registry(&path, &hosts) {
         warn!(
@@ -2598,6 +2762,35 @@ fn should_replace_cached_transcript(
     transcript_score(incoming) >= transcript_score(&existing.response)
 }
 
+fn take_matching_inflight<T, F>(
+    inflight: &mut HashMap<String, T>,
+    request_id: &str,
+    host_location: &str,
+    host_for: F,
+) -> Option<T>
+where
+    F: Fn(&T) -> &str,
+{
+    let Some(expected_host) = inflight
+        .get(request_id)
+        .map(|entry| host_for(entry).to_string())
+    else {
+        return None;
+    };
+
+    if expected_host != host_location {
+        warn!(
+            request_id,
+            expected_host = %expected_host,
+            actual_host = %host_location,
+            "ignoring inflight response from unexpected host"
+        );
+        return None;
+    }
+
+    inflight.remove(request_id)
+}
+
 fn transcript_score(response: &SessionMessagesResponse) -> (i64, u8, u8, usize) {
     (
         response.freshness.as_of.timestamp_millis(),
@@ -2650,6 +2843,8 @@ fn status_for_fetch_error(error: &str) -> StatusCode {
 fn status_for_send_error(error: &str) -> StatusCode {
     if error.contains("was not found") {
         StatusCode::NOT_FOUND
+    } else if error.contains("slash commands require") || error.contains("unknown slash command") {
+        StatusCode::CONFLICT
     } else {
         StatusCode::BAD_GATEWAY
     }
@@ -2999,6 +3194,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacing_agent_connection_closes_previous_connection() {
+        let state = AppState::default();
+        let host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+
+        let (sender_a, _receiver_a) = mpsc::unbounded_channel();
+        let (close_sender_a, mut close_receiver_a) = mpsc::unbounded_channel();
+        assert!(register_agent_connection(&state, &host, 1, sender_a, close_sender_a).await);
+
+        let (sender_b, _receiver_b) = mpsc::unbounded_channel();
+        let (close_sender_b, _close_receiver_b) = mpsc::unbounded_channel();
+        assert!(register_agent_connection(&state, &host, 2, sender_b, close_sender_b).await);
+
+        assert_eq!(close_receiver_a.recv().await, Some(()));
+        assert!(!is_current_agent_connection(&state, &host.location, 1).await);
+        assert!(is_current_agent_connection(&state, &host.location, 2).await);
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_session_removes_idle_subscriber() {
+        let state = AppState::default();
+        let (sender, _receiver) = mpsc::channel(1);
+        let subscriber_id = subscribe_session(&state, "session-1", sender).await;
+
+        unsubscribe_session(&state, "session-1", subscriber_id).await;
+
+        assert!(state.session_subscribers.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn broadcast_drops_slow_session_subscriber() {
+        let state = AppState::default();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let subscriber_id = subscribe_session(&state, "session-1", sender).await;
+
+        broadcast_session_event(
+            &state,
+            "session-1",
+            SessionSubscriptionEvent::UiState(SessionUiState::default()),
+        )
+        .await;
+        assert!(receiver.recv().await.is_some());
+
+        broadcast_session_event(
+            &state,
+            "session-1",
+            SessionSubscriptionEvent::UiState(SessionUiState {
+                title: Some("first".to_string()),
+                ..SessionUiState::default()
+            }),
+        )
+        .await;
+        broadcast_session_event(
+            &state,
+            "session-1",
+            SessionSubscriptionEvent::UiState(SessionUiState {
+                title: Some("second".to_string()),
+                ..SessionUiState::default()
+            }),
+        )
+        .await;
+
+        let subscribers = state.session_subscribers.lock().await;
+        assert!(subscribers.get("session-1").is_none());
+        drop(subscribers);
+
+        assert_eq!(subscriber_id, 1);
+    }
+
+    #[tokio::test]
     async fn returns_default_page_of_sessions() {
         let state = AppState::default();
         let mut all_sessions = Vec::new();
@@ -3255,6 +3522,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clears_fetch_inflight_when_host_cannot_receive_request() {
+        let state = AppState::default();
+        let host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+        update_host_snapshot(&state, host, vec![sample_active_session("session-1")]).await;
+
+        let result = session_messages(State(state.clone()), Path("session-1".to_string())).await;
+        let (status, _) = result.err().expect("request should fail");
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(state.inflight_fetches.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clears_command_inflight_when_host_cannot_receive_request() {
+        let state = AppState::default();
+        let host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+        update_host_snapshot(&state, host, vec![sample_active_session("session-1")]).await;
+
+        let result = session_commands(State(state.clone()), Path("session-1".to_string())).await;
+        let (status, _) = result.err().expect("request should fail");
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(state.inflight_get_commands.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn fetches_transcript_on_cache_miss() {
         let state = AppState::default();
         let host = HostIdentity {
@@ -3290,6 +3589,91 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         };
+
+        fulfill_fetch_result(
+            &state,
+            &host.location,
+            &request_id,
+            Some(sample_transcript(
+                "session-1",
+                "fetched transcript",
+                TranscriptFreshnessState::Live,
+                TranscriptSource::Extension,
+                true,
+                true,
+                3_000,
+            )),
+            None,
+        )
+        .await;
+
+        let returned = waiter.await.unwrap();
+        assert_eq!(returned.session_id, "session-1");
+        assert_eq!(returned.messages[0].body, "fetched transcript");
+    }
+
+    #[tokio::test]
+    async fn ignores_fetch_result_from_unexpected_host() {
+        let state = AppState::default();
+        let host = HostIdentity {
+            location: "dev@mac".to_string(),
+            auth: HostAuth::None,
+        };
+        update_host_snapshot(
+            &state,
+            host.clone(),
+            vec![sample_active_session("session-1")],
+        )
+        .await;
+        let mut receiver = register_test_agent(&state, host.clone()).await;
+
+        let waiter = tokio::spawn({
+            let state = state.clone();
+            async move {
+                session_messages(State(state), Path("session-1".to_string()))
+                    .await
+                    .unwrap()
+                    .0
+            }
+        });
+
+        let message = receiver.recv().await.unwrap();
+        let request_id = match message {
+            ServerToAgentMessage::FetchTranscript {
+                request_id,
+                session_id,
+            } => {
+                assert_eq!(session_id, "session-1");
+                request_id
+            }
+            other => panic!("unexpected message: {other:?}"),
+        };
+
+        fulfill_fetch_result(
+            &state,
+            "other@host",
+            &request_id,
+            Some(sample_transcript(
+                "session-1",
+                "wrong host transcript",
+                TranscriptFreshnessState::Live,
+                TranscriptSource::Extension,
+                true,
+                true,
+                3_000,
+            )),
+            None,
+        )
+        .await;
+
+        assert!(
+            state
+                .inflight_fetches
+                .lock()
+                .await
+                .contains_key(&request_id)
+        );
+        assert!(state.transcripts.read().await.get("session-1").is_none());
 
         fulfill_fetch_result(
             &state,

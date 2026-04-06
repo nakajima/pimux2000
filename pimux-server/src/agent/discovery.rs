@@ -5,8 +5,8 @@ use std::{
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::Command,
-    sync::OnceLock,
-    time::UNIX_EPOCH,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use chrono::{DateTime, TimeZone, Utc};
@@ -22,6 +22,8 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 const MAX_SUMMARY_LEN: usize = 120;
 const MAX_SUMMARY_TRANSCRIPT_EDGE_ENTRIES: usize = 5;
 const MAX_TRANSCRIPT_ENTRY_CHARS: usize = 400;
+const MODEL_CAPABILITIES_SUCCESS_TTL: Duration = Duration::from_secs(15 * 60);
+const MODEL_CAPABILITIES_FAILURE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredSession {
@@ -338,10 +340,39 @@ fn positive_u64(value: &Value) -> Option<u64> {
         .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelCapabilities {
     context_window: u64,
     supports_images: bool,
+}
+
+#[derive(Debug, Default)]
+struct ModelCapabilitiesCache {
+    capabilities: HashMap<String, ModelCapabilities>,
+    last_success_at: Option<Instant>,
+    retry_after: Option<Instant>,
+}
+
+impl ModelCapabilitiesCache {
+    fn should_refresh(&self, now: Instant) -> bool {
+        if let Some(last_success_at) = self.last_success_at
+            && now.duration_since(last_success_at) < MODEL_CAPABILITIES_SUCCESS_TTL
+        {
+            return false;
+        }
+
+        self.retry_after.is_none_or(|retry_after| now >= retry_after)
+    }
+
+    fn apply_success(&mut self, now: Instant, capabilities: HashMap<String, ModelCapabilities>) {
+        self.capabilities = capabilities;
+        self.last_success_at = Some(now);
+        self.retry_after = None;
+    }
+
+    fn apply_failure(&mut self, now: Instant) {
+        self.retry_after = Some(now + MODEL_CAPABILITIES_FAILURE_TTL);
+    }
 }
 
 fn model_context_window_tokens(model: &str) -> Option<u64> {
@@ -353,18 +384,26 @@ fn model_supports_images(model: &str) -> Option<bool> {
 }
 
 fn model_capabilities(model: &str) -> Option<ModelCapabilities> {
-    static CAPABILITIES: OnceLock<HashMap<String, ModelCapabilities>> = OnceLock::new();
+    static CAPABILITIES: OnceLock<Mutex<ModelCapabilitiesCache>> = OnceLock::new();
 
-    CAPABILITIES
-        .get_or_init(|| match load_model_capabilities() {
-            Ok(caps) => caps,
+    let cache = CAPABILITIES.get_or_init(|| Mutex::new(ModelCapabilitiesCache::default()));
+    let mut cache = match cache.lock() {
+        Ok(cache) => cache,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let now = Instant::now();
+    if cache.should_refresh(now) {
+        match load_model_capabilities() {
+            Ok(capabilities) => cache.apply_success(now, capabilities),
             Err(error) => {
                 warn!(%error, "failed to load pi model capabilities");
-                HashMap::new()
+                cache.apply_failure(now);
             }
-        })
-        .get(model)
-        .cloned()
+        }
+    }
+
+    cache.capabilities.get(model).cloned()
 }
 
 fn load_model_capabilities() -> Result<HashMap<String, ModelCapabilities>, BoxError> {
@@ -396,7 +435,7 @@ fn parse_model_capabilities(output: &str) -> HashMap<String, ModelCapabilities> 
             continue;
         };
 
-        let supports_images = columns.get(5).map_or(false, |col| *col == "yes");
+        let supports_images = columns.get(5).is_some_and(|col| *col == "yes");
         let key = format!("{}/{}", columns[0], columns[1]);
         capabilities.insert(
             key,
@@ -410,6 +449,7 @@ fn parse_model_capabilities(output: &str) -> HashMap<String, ModelCapabilities> 
     capabilities
 }
 
+#[cfg(test)]
 fn parse_model_context_windows(output: &str) -> HashMap<String, u64> {
     parse_model_capabilities(output)
         .into_iter()
@@ -667,5 +707,35 @@ mod tests {
                 .unwrap()
                 .supports_images
         );
+    }
+
+    #[test]
+    fn model_capabilities_cache_retries_after_failure_backoff() {
+        let mut cache = ModelCapabilitiesCache::default();
+        let now = Instant::now();
+
+        assert!(cache.should_refresh(now));
+
+        cache.apply_failure(now);
+        assert!(!cache.should_refresh(now + Duration::from_secs(5)));
+        assert!(cache.should_refresh(now + MODEL_CAPABILITIES_FAILURE_TTL));
+    }
+
+    #[test]
+    fn model_capabilities_cache_keeps_success_until_ttl_expires() {
+        let mut cache = ModelCapabilitiesCache::default();
+        let now = Instant::now();
+        let capabilities = HashMap::from([(
+            "anthropic/claude-haiku-4-5".to_string(),
+            ModelCapabilities {
+                context_window: 200_000,
+                supports_images: true,
+            },
+        )]);
+
+        cache.apply_success(now, capabilities.clone());
+        assert_eq!(cache.capabilities, capabilities);
+        assert!(!cache.should_refresh(now + Duration::from_secs(30)));
+        assert!(cache.should_refresh(now + MODEL_CAPABILITIES_SUCCESS_TTL));
     }
 }

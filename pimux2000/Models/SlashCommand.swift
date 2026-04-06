@@ -156,10 +156,16 @@ struct SlashCommand: Identifiable, Equatable, Sendable {
 
 		switch context.phase {
 		case let .commandName(prefix):
-			guard let command = command(named: prefix, from: commands) else { return nil }
+			guard !prefix.isEmpty else { return nil }
+			guard let command = command(named: prefix, from: commands) else {
+				return "Unknown slash command: /\(prefix)"
+			}
 			return command.validationMessage(argumentText: nil)
 		case let .arguments(commandName, argumentText):
-			guard let command = command(named: commandName, from: commands) else { return nil }
+			guard !commandName.isEmpty else { return nil }
+			guard let command = command(named: commandName, from: commands) else {
+				return "Unknown slash command: /\(commandName)"
+			}
 			return command.validationMessage(argumentText: argumentText)
 		}
 	}

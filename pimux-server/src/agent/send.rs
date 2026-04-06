@@ -20,7 +20,7 @@ use crate::message::{
 
 use super::{
     discovery::DiscoveredSession,
-    live::{LiveSessionEvent, LiveSessionStoreHandle, LiveUpdate},
+    live::{LiveSessionEvent, LiveSessionStoreHandle, LiveSessionTransport, LiveUpdate},
     transcript,
 };
 
@@ -48,6 +48,7 @@ pub async fn send_message_to_session(
             &live_updates,
             LiveSessionEvent::SessionAttached {
                 session_id: session_id.clone(),
+                transport: LiveSessionTransport::Helper,
             },
         )
         .await;
