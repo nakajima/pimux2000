@@ -2,6 +2,9 @@ import Foundation
 import GRDB
 import GRDBQuery
 import SwiftUI
+#if canImport(UIKit)
+	import UIKit
+#endif
 
 @main
 struct pimux2000App: App {
@@ -61,6 +64,7 @@ private struct AppRootView: View {
 	@AppStorage("serverURL") private var serverURL: String?
 	@State private var pimuxServerClient: PimuxServerClient?
 	@State private var configuredServerURL: String?
+	@State private var hasRequestedScreenshotLandscape = false
 
 	var body: some View {
 		ContentView()
@@ -73,6 +77,28 @@ private struct AppRootView: View {
 			.onChange(of: serverURL) { _, newValue in
 				updatePimuxServerClient(for: newValue)
 			}
+			.task {
+				await requestScreenshotLandscapeIfNeeded()
+			}
+	}
+
+	@MainActor
+	private func requestScreenshotLandscapeIfNeeded() {
+		guard !hasRequestedScreenshotLandscape else { return }
+		hasRequestedScreenshotLandscape = true
+
+		#if canImport(UIKit)
+			guard ProcessInfo.processInfo.arguments.contains("--uitesting-force-landscape") else { return }
+			guard UIDevice.current.userInterfaceIdiom == .pad else { return }
+			guard let windowScene = UIApplication.shared.connectedScenes
+				.compactMap({ $0 as? UIWindowScene })
+				.first else { return }
+
+			let preferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .landscape)
+			windowScene.requestGeometryUpdate(preferences) { error in
+				print("Failed to request screenshot landscape orientation: \(error)")
+			}
+		#endif
 	}
 
 	private func updatePimuxServerClient(for rawServerURL: String?) {

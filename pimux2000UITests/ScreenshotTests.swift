@@ -1,6 +1,7 @@
 import XCTest
 #if canImport(UIKit)
 	import UIKit
+	import UniformTypeIdentifiers
 #endif
 
 final class ScreenshotTests: XCTestCase {
@@ -16,7 +17,7 @@ final class ScreenshotTests: XCTestCase {
 		let readyText = app.staticTexts["Stable fixtures and a screenshot script are ready."]
 		XCTAssertTrue(readyText.waitForExistence(timeout: 5))
 
-		captureScreenshot(named: "app-overview")
+		captureScreenshot(named: "app-overview", in: app)
 	}
 
 	@MainActor
@@ -27,7 +28,7 @@ final class ScreenshotTests: XCTestCase {
 		let readyText = app.staticTexts["Done — added screenshot scenarios and an export script so the app can generate repeatable screenshots."]
 		XCTAssertTrue(readyText.waitForExistence(timeout: 5))
 
-		captureScreenshot(named: "transcript")
+		captureScreenshot(named: "transcript", in: app)
 	}
 
 	@MainActor
@@ -43,7 +44,7 @@ final class ScreenshotTests: XCTestCase {
 		let compactCommand = app.staticTexts["/compact"]
 		XCTAssertTrue(compactCommand.waitForExistence(timeout: 3))
 
-		captureScreenshot(named: "slash-commands")
+		captureScreenshot(named: "slash-commands", in: app)
 	}
 
 	private func launchApp(for scenario: String) -> XCUIApplication {
@@ -57,6 +58,9 @@ final class ScreenshotTests: XCTestCase {
 			"-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryM",
 		]
 		app.launchEnvironment["TZ"] = "UTC"
+		if isPadDevice {
+			app.launchArguments += ["--uitesting-force-landscape"]
+		}
 
 		configureDeviceOrientation()
 		app.launch()
@@ -92,10 +96,27 @@ final class ScreenshotTests: XCTestCase {
 		#endif
 	}
 
-	private func captureScreenshot(named name: String) {
-		let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+	private func captureScreenshot(named name: String, in app: XCUIApplication) {
+		let screenshot = app.screenshot()
+
+		#if canImport(UIKit)
+			let image = normalizedScreenshotImage(from: screenshot.image)
+			let attachment = XCTAttachment(data: image.pngData()!, uniformTypeIdentifier: UTType.png.identifier)
+		#else
+			let attachment = XCTAttachment(screenshot: screenshot)
+		#endif
+
 		attachment.name = name
 		attachment.lifetime = .keepAlways
 		add(attachment)
 	}
+
+	#if canImport(UIKit)
+		private func normalizedScreenshotImage(from image: UIImage) -> UIImage {
+			let renderer = UIGraphicsImageRenderer(size: image.size)
+			return renderer.image { _ in
+				image.draw(in: CGRect(origin: .zero, size: image.size))
+			}
+		}
+	#endif
 }

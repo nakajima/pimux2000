@@ -165,6 +165,36 @@ for path in generated:
     print(path)
 PY
 
+	if [[ "$DEVICE_NAME" == iPad* ]]; then
+		DEVICE_OUTPUT_DIR="$DEVICE_OUTPUT_DIR" swift - <<'SWIFT'
+import AppKit
+import Foundation
+
+let deviceOutputDir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DEVICE_OUTPUT_DIR"]!)
+let fileManager = FileManager.default
+let imageURLs = try fileManager.contentsOfDirectory(at: deviceOutputDir, includingPropertiesForKeys: nil)
+	.filter { $0.pathExtension.lowercased() == "png" }
+
+for imageURL in imageURLs {
+	guard let image = NSImage(contentsOf: imageURL),
+	      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+	else {
+		continue
+	}
+
+	guard cgImage.height > cgImage.width else { continue }
+	let targetHeight = Int(round(Double(cgImage.width) * 3.0 / 4.0))
+	guard targetHeight < cgImage.height else { continue }
+	let cropRect = CGRect(x: 0, y: 0, width: cgImage.width, height: targetHeight)
+	guard let croppedImage = cgImage.cropping(to: cropRect) else { continue }
+
+	let bitmap = NSBitmapImageRep(cgImage: croppedImage)
+	guard let pngData = bitmap.representation(using: .png, properties: [:]) else { continue }
+	try pngData.write(to: imageURL)
+}
+SWIFT
+	fi
+
 	if [[ "$STATUS_BAR_ENABLED" != "0" ]]; then
 		xcrun simctl status_bar "$DEVICE_UDID" clear >/dev/null 2>&1 || true
 	fi
