@@ -10,6 +10,7 @@ struct pimux2000App: App {
 	init() {
 		PimuxImageLoading.configureSharedPipeline()
 		let processInfo = ProcessInfo.processInfo
+		let screenshotScenario = ScreenshotScenario.current(from: processInfo)
 
 		if Self.isRunningForPreviews {
 			self.appDatabase = AppDatabase.preview()
@@ -32,7 +33,9 @@ struct pimux2000App: App {
 			dbQueue: DatabaseQueue(path: databaseURL.path())
 		)
 
-		if processInfo.arguments.contains("--uitesting-use-fixtures") {
+		if let screenshotScenario {
+			try! UITestFixtures.installScreenshotScenario(screenshotScenario, in: appDatabase)
+		} else if processInfo.arguments.contains("--uitesting-use-fixtures") {
 			try! UITestFixtures.install(in: appDatabase)
 		}
 	}
