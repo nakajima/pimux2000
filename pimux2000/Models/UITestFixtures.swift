@@ -100,196 +100,325 @@ enum UITestFixtures {
 
 	private static func installOverviewScreenshotFixtures(in db: Database) throws {
 		let now = referenceDate
-		let localHostID = try insertHost(in: db, location: "demo@fixture-mac", at: now)
-		let remoteHostID = try insertHost(in: db, location: "ci@fixture-linux", at: now)
+		let hostID = try insertHost(in: db, location: "nakajima@local", at: now)
 
-		let primarySessionID = try insertSession(
+		let sshPromptSessionID = try insertSession(
 			in: db,
-			hostID: localHostID,
-			summary: "Ship screenshot workflow",
-			sessionID: "screenshot-overview-primary",
-			cwd: "/Users/demo/apps/pimux2000",
-			lastUserMessageAt: now.addingTimeInterval(-45),
-			lastMessage: "Stable fixtures and a screenshot script are ready.",
+			hostID: hostID,
+			summary: "SSH password authentication prompt implementation",
+			sessionID: "overview-ssh-password",
+			cwd: "/Users/nakajima/apps/Termsy",
+			lastUserMessageAt: now.addingTimeInterval(-150),
+			lastMessage: "Auth failures now short-circuit cleanly and the password prompt appears.",
 			lastMessageAt: now,
 			lastMessageRole: "assistant",
-			lastReadMessageAt: now.addingTimeInterval(-300),
+			lastReadMessageAt: now,
 			isCliActive: true,
-			startedAt: now.addingTimeInterval(-1800),
-			lastSeenAt: now,
-			supportsImages: true
+			startedAt: now.addingTimeInterval(-4200),
+			lastSeenAt: now
 		)
 
 		try insertMessage(
 			in: db,
-			sessionID: primarySessionID,
+			sessionID: sshPromptSessionID,
 			role: .user,
 			position: 0,
-			createdAt: now.addingTimeInterval(-90),
+			createdAt: now.addingTimeInterval(-360),
 			blocks: [
-				(type: "text", text: "Can you make screenshot generation boring and repeatable?", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "text", text: "can we add the ability to prompt for a password if no auth doesn't work?", toolCallName: nil, mimeType: nil, attachmentID: nil),
 			]
 		)
 
 		try insertMessage(
 			in: db,
-			sessionID: primarySessionID,
+			sessionID: sshPromptSessionID,
 			role: .assistant,
 			position: 1,
-			createdAt: now.addingTimeInterval(-30),
+			createdAt: now.addingTimeInterval(-300),
 			blocks: [
-				(type: "text", text: "Stable fixtures and a screenshot script are ready.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "text", text: "Now I understand the flow. `TerminalTab.connect()` always passes `password: nil`, `SSHConnection` falls through to `authenticationFailed`, and the cleanest fix is a `needsPassword` retry path.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: "Termsy/Views/ViewCoordinator.swift\nTermsy/SSH/SSHConnection.swift", toolCallName: "edit", mimeType: nil, attachmentID: nil),
 			]
 		)
 
-		_ = try insertSession(
+		try insertMessage(
 			in: db,
-			hostID: localHostID,
-			summary: "Trim transcript spacing",
-			sessionID: "screenshot-overview-secondary",
-			cwd: "/Users/demo/apps/pimux2000",
-			lastUserMessageAt: now.addingTimeInterval(-300),
-			lastMessage: "Spacing tweak shipped.",
-			lastMessageAt: now.addingTimeInterval(-240),
-			lastMessageRole: "assistant",
-			lastReadMessageAt: now.addingTimeInterval(-240),
-			isCliActive: true,
-			startedAt: now.addingTimeInterval(-2400),
-			lastSeenAt: now.addingTimeInterval(-240)
+			sessionID: sshPromptSessionID,
+			role: .toolResult,
+			toolName: "edit",
+			position: 2,
+			createdAt: now.addingTimeInterval(-240),
+			blocks: [
+				(type: "text", text: "Added `needsPassword` to `TerminalTab`, a reconnect-with-password path, and UI that asks for a password instead of surfacing a generic connection error.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+			]
 		)
 
-		_ = try insertSession(
+		try insertMessage(
 			in: db,
-			hostID: remoteHostID,
-			summary: "Check relay logs",
-			sessionID: "screenshot-overview-remote",
-			cwd: "/Users/demo/apps/pimux2000",
-			lastUserMessageAt: now.addingTimeInterval(-480),
-			lastMessage: "Relay stream stayed attached through the run.",
+			sessionID: sshPromptSessionID,
+			role: .user,
+			position: 3,
+			createdAt: now.addingTimeInterval(-120),
+			blocks: [
+				(type: "text", text: "it's just hanging here: `[SSH] trying none auth` finishes, but `startShell()` never returns.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+			]
+		)
+
+		try insertMessage(
+			in: db,
+			sessionID: sshPromptSessionID,
+			role: .assistant,
+			position: 4,
+			createdAt: now,
+			blocks: [
+				(type: "text", text: "Auth failures now short-circuit cleanly and the password prompt appears.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+			]
+		)
+
+		let slashMenuSessionID = try insertSession(
+			in: db,
+			hostID: hostID,
+			summary: "iOS app slash command menu feature",
+			sessionID: "overview-slash-menu",
+			cwd: "/Users/nakajima/apps/pimux2000",
+			lastUserMessageAt: now.addingTimeInterval(-540),
+			lastMessage: "Built-in and live session commands now autocomplete in the composer.",
 			lastMessageAt: now.addingTimeInterval(-420),
 			lastMessageRole: "assistant",
 			lastReadMessageAt: now.addingTimeInterval(-420),
 			isCliActive: true,
-			startedAt: now.addingTimeInterval(-3600),
+			startedAt: now.addingTimeInterval(-5400),
 			lastSeenAt: now.addingTimeInterval(-420)
 		)
 
-		_ = try insertSession(
+		try insertMessage(
 			in: db,
-			hostID: localHostID,
-			summary: "Background indexing",
-			sessionID: "screenshot-overview-background",
-			cwd: "/Users/demo/apps/pimux-server",
-			lastUserMessageAt: now.addingTimeInterval(-1200),
-			lastMessage: "Index finished cleanly.",
-			lastMessageAt: now.addingTimeInterval(-1080),
+			sessionID: slashMenuSessionID,
+			role: .user,
+			position: 0,
+			createdAt: now.addingTimeInterval(-600),
+			blocks: [
+				(type: "text", text: "can we provide a menu of available when the user types / in the ios app, same as the tui", toolCallName: nil, mimeType: nil, attachmentID: nil),
+			]
+		)
+
+		try insertMessage(
+			in: db,
+			sessionID: slashMenuSessionID,
+			role: .assistant,
+			position: 1,
+			createdAt: now.addingTimeInterval(-420),
+			blocks: [
+				(type: "text", text: "The composer now shows a filterable slash menu, and the live session path can merge built-in commands with dynamic commands from `get_commands`.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+			]
+		)
+
+		let typestateSessionID = try insertSession(
+			in: db,
+			hostID: hostID,
+			summary: "Typestate refactor for record lifecycle",
+			sessionID: "overview-typestate",
+			cwd: "/Users/nakajima/apps/seekwel",
+			lastUserMessageAt: now.addingTimeInterval(-900),
+			lastMessage: "Person<S> models new vs persisted records without splitting the type.",
+			lastMessageAt: now.addingTimeInterval(-780),
 			lastMessageRole: "assistant",
-			lastReadMessageAt: now.addingTimeInterval(-1080),
+			lastReadMessageAt: now.addingTimeInterval(-780),
 			isCliActive: false,
-			startedAt: now.addingTimeInterval(-5400),
-			lastSeenAt: now.addingTimeInterval(-1080)
+			startedAt: now.addingTimeInterval(-7200),
+			lastSeenAt: now.addingTimeInterval(-780)
+		)
+
+		try insertMessage(
+			in: db,
+			sessionID: typestateSessionID,
+			role: .user,
+			position: 0,
+			createdAt: now.addingTimeInterval(-960),
+			blocks: [
+				(type: "text", text: "let's brainstorm. can we rework the model a bit? I was thinking we'd have Person have a typestate of either NewRecord or Persisted.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+			]
+		)
+
+		try insertMessage(
+			in: db,
+			sessionID: typestateSessionID,
+			role: .assistant,
+			position: 1,
+			createdAt: now.addingTimeInterval(-780),
+			blocks: [
+				(type: "text", text: "Person<S> is the sweet spot here: keep `id` as data, use typestate for lifecycle, and let `save()` move `NewRecord` into `Persisted`.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+			]
 		)
 	}
 
 	private static func installTranscriptScreenshotFixtures(in db: Database) throws {
 		let now = referenceDate
-		let hostID = try insertHost(in: db, location: "demo@fixture", at: now)
+		let hostID = try insertHost(in: db, location: "nakajima@local", at: now)
 
-		let sessionID = try insertSession(
+		let slashMenuSessionID = try insertSession(
 			in: db,
 			hostID: hostID,
-			summary: "Programmatic screenshot workflow",
-			sessionID: "screenshot-transcript-session",
-			cwd: "/Users/demo/apps/pimux2000",
-			lastUserMessageAt: now.addingTimeInterval(-300),
-			lastMessage: "Done — added screenshot scenarios and an export script so the app can generate repeatable screenshots.",
+			summary: "iOS app slash command menu feature",
+			sessionID: "transcript-slash-menu",
+			cwd: "/Users/nakajima/apps/pimux2000",
+			lastUserMessageAt: now.addingTimeInterval(-240),
+			lastMessage: "Done — the composer now shows built-in and live session commands in a slash menu.",
 			lastMessageAt: now,
 			lastMessageRole: "assistant",
 			lastReadMessageAt: now,
 			isCliActive: true,
-			startedAt: now.addingTimeInterval(-2400),
+			startedAt: now.addingTimeInterval(-5400),
 			lastSeenAt: now,
 			supportsImages: true
 		)
 
 		try insertMessage(
 			in: db,
-			sessionID: sessionID,
+			sessionID: slashMenuSessionID,
 			role: .user,
 			position: 0,
-			createdAt: now.addingTimeInterval(-360),
+			createdAt: now.addingTimeInterval(-540),
 			blocks: [
-				(type: "text", text: "Can you wire up a repeatable screenshot workflow for the iOS app?", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "text", text: "can we provide a menu of available when the user types / in the ios app, same as the tui", toolCallName: nil, mimeType: nil, attachmentID: nil),
 			]
 		)
 
 		try insertMessage(
 			in: db,
-			sessionID: sessionID,
+			sessionID: slashMenuSessionID,
 			role: .assistant,
 			position: 1,
-			createdAt: now.addingTimeInterval(-300),
+			createdAt: now.addingTimeInterval(-480),
 			blocks: [
-				(type: "thinking", text: "Planning a deterministic path: add launch-time screenshot scenarios, feed stable database fixtures, then export screenshot attachments from an xcresult bundle.", toolCallName: nil, mimeType: nil, attachmentID: nil),
-				(type: "toolCall", text: "pimux2000/Models/UITestFixtures.swift\npimux2000UITests/ScreenshotTests.swift", toolCallName: "read", mimeType: nil, attachmentID: nil),
+				(type: "thinking", text: "Slash commands are already sent as normal text like `/compact`, so the iOS side mainly needs a filterable menu and a source of command metadata.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: "pimux2000/Views/MessageComposerView.swift\npimux2000/Views/PiSessionView.swift", toolCallName: "read", mimeType: nil, attachmentID: nil),
 			]
 		)
 
 		try insertMessage(
 			in: db,
-			sessionID: sessionID,
+			sessionID: slashMenuSessionID,
 			role: .toolResult,
 			toolName: "read",
 			position: 2,
-			createdAt: now.addingTimeInterval(-240),
+			createdAt: now.addingTimeInterval(-420),
 			blocks: [
-				(type: "text", text: "The app already seeds UI test fixtures and the UI tests already know how to save screenshot attachments — this just needs a dedicated scenario path and an export script.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "text", text: "Found the composer and transcript view. The first pass can ship the built-in list locally, then the live session path can expose `get_commands` for extension, skill, and prompt-template commands.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 			]
 		)
 
 		try insertMessage(
 			in: db,
-			sessionID: sessionID,
+			sessionID: slashMenuSessionID,
 			role: .assistant,
 			position: 3,
-			createdAt: now.addingTimeInterval(-180),
+			createdAt: now.addingTimeInterval(-360),
 			blocks: [
-				(type: "toolCall", text: "scripts/generate-screenshots.sh\npimux2000/pimux2000App.swift", toolCallName: "edit", mimeType: nil, attachmentID: nil),
+				(type: "text", text: "The first pass can ship the built-in menu locally, then we can plumb `get_commands` through the live session path for custom commands.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: "pimux2000/Models/SlashCommand.swift\npimux2000/Views/MessageComposerView.swift", toolCallName: "edit", mimeType: nil, attachmentID: nil),
 			]
 		)
 
 		try insertMessage(
 			in: db,
-			sessionID: sessionID,
+			sessionID: slashMenuSessionID,
 			role: .toolResult,
 			toolName: "edit",
 			position: 4,
-			createdAt: now.addingTimeInterval(-120),
+			createdAt: now.addingTimeInterval(-300),
 			blocks: [
-				(type: "text", text: "Added screenshot scenarios, created dedicated UI screenshot tests, and wrote a script that runs the tests, exports attachments, and renames them into a stable screenshots directory.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "text", text: "Added `SlashCommand.swift`, a filtered menu in `MessageComposerView`, and a preview that renders the slash state.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 			]
 		)
 
 		try insertMessage(
 			in: db,
-			sessionID: sessionID,
-			role: .bashExecution,
+			sessionID: slashMenuSessionID,
+			role: .user,
 			position: 5,
-			createdAt: now.addingTimeInterval(-60),
+			createdAt: now.addingTimeInterval(-240),
 			blocks: [
-				(type: "text", text: "$ ./scripts/generate-screenshots.sh\n==> Booting iPhone 16 Pro\n==> Running ScreenshotTests\n==> Exported screenshots to build/screenshots", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "text", text: "will this work with commands that are added by extensions", toolCallName: nil, mimeType: nil, attachmentID: nil),
 			]
 		)
 
 		try insertMessage(
 			in: db,
-			sessionID: sessionID,
+			sessionID: slashMenuSessionID,
 			role: .assistant,
 			position: 6,
+			createdAt: now.addingTimeInterval(-180),
+			blocks: [
+				(type: "text", text: "Not yet — extension, skill, and prompt-template commands come from `get_commands`, so the server needs to expose them and the iOS client needs to merge the results.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "toolCall", text: "pimux-server/src/agent/live.rs\npimux2000/Views/PiSessionView.swift", toolCallName: "edit", mimeType: nil, attachmentID: nil),
+			]
+		)
+
+		try insertMessage(
+			in: db,
+			sessionID: slashMenuSessionID,
+			role: .toolResult,
+			toolName: "edit",
+			position: 7,
+			createdAt: now.addingTimeInterval(-120),
+			blocks: [
+				(type: "text", text: "Plumbed `GetCommands` through the live session store and updated the composer to merge built-in commands with dynamic session commands.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+			]
+		)
+
+		try insertMessage(
+			in: db,
+			sessionID: slashMenuSessionID,
+			role: .bashExecution,
+			position: 8,
+			createdAt: now.addingTimeInterval(-60),
+			blocks: [
+				(type: "text", text: "$ xcodebuild test -scheme pimux2000 -only-testing:pimux2000UITests/pimux2000UITests/testSlashCommandMenuAppears\n** TEST SUCCEEDED **\nExported screenshot to /tmp/slash_menu_filtered.png", toolCallName: nil, mimeType: nil, attachmentID: nil),
+			]
+		)
+
+		try insertMessage(
+			in: db,
+			sessionID: slashMenuSessionID,
+			role: .assistant,
+			position: 9,
 			createdAt: now,
 			blocks: [
-				(type: "text", text: "Done — added screenshot scenarios and an export script so the app can generate repeatable screenshots.", toolCallName: nil, mimeType: nil, attachmentID: nil),
+				(type: "text", text: "Done — the composer now shows built-in and live session commands in a slash menu.", toolCallName: nil, mimeType: nil, attachmentID: nil),
 			]
+		)
+
+		_ = try insertSession(
+			in: db,
+			hostID: hostID,
+			summary: "SSH password authentication prompt implementation",
+			sessionID: "transcript-ssh-password",
+			cwd: "/Users/nakajima/apps/Termsy",
+			lastUserMessageAt: now.addingTimeInterval(-420),
+			lastMessage: "Auth failures now short-circuit cleanly and the password prompt appears.",
+			lastMessageAt: now.addingTimeInterval(-300),
+			lastMessageRole: "assistant",
+			lastReadMessageAt: now.addingTimeInterval(-300),
+			isCliActive: true,
+			startedAt: now.addingTimeInterval(-4200),
+			lastSeenAt: now.addingTimeInterval(-300)
+		)
+
+		_ = try insertSession(
+			in: db,
+			hostID: hostID,
+			summary: "Typestate refactor for record lifecycle",
+			sessionID: "transcript-typestate",
+			cwd: "/Users/nakajima/apps/seekwel",
+			lastUserMessageAt: now.addingTimeInterval(-720),
+			lastMessage: "Person<S> models new vs persisted records without splitting the type.",
+			lastMessageAt: now.addingTimeInterval(-600),
+			lastMessageRole: "assistant",
+			lastReadMessageAt: now.addingTimeInterval(-600),
+			isCliActive: false,
+			startedAt: now.addingTimeInterval(-7200),
+			lastSeenAt: now.addingTimeInterval(-600)
 		)
 	}
 

@@ -272,7 +272,7 @@ struct PiSessionView: View {
 	}
 
 	private var isAgentWorking: Bool {
-		isAwaitingAgentActivity || transcriptActivity?.active == true || currentWorkingMessage != nil
+		isAwaitingAgentActivity || transcriptActivity?.active == true
 	}
 
 	private var composerWorkingMessage: String? {

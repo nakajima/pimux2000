@@ -11,13 +11,34 @@ struct SidebarView: View {
 	@State private var isShowingServerSheet = false
 	@State private var isShowingSettings = false
 	@State private var collapsedGroupIDs: Set<String> = []
+	@State private var showsUnconnectedSessions = false
 
 	private var groupedSessions: [SidebarSessionGroup] {
 		sidebarSessionGroups(from: sessions)
 	}
 
+	private var connectedGroups: [SidebarSessionGroup] {
+		groupedSessions.compactMap { group in
+			let connected = group.sessions.filter(\.session.isCliActive)
+			guard !connected.isEmpty else { return nil }
+			return SidebarSessionGroup(hostLocation: group.hostLocation, cwd: group.cwd, sessions: connected)
+		}
+	}
+
+	private var unconnectedGroups: [SidebarSessionGroup] {
+		groupedSessions.compactMap { group in
+			let unconnected = group.sessions.filter { !$0.session.isCliActive }
+			guard !unconnected.isEmpty else { return nil }
+			return SidebarSessionGroup(hostLocation: group.hostLocation, cwd: group.cwd, sessions: unconnected)
+		}
+	}
+
 	private var groupIDsShowingHostCaption: Set<String> {
 		sidebarGroupIDsShowingHostCaption(groupedSessions)
+	}
+
+	private var unconnectedSessionCount: Int {
+		unconnectedGroups.reduce(0) { $0 + $1.sessions.count }
 	}
 
 	var body: some View {
@@ -26,39 +47,28 @@ struct SidebarView: View {
 				Text("No recent sessions")
 					.foregroundStyle(.secondary)
 			} else {
-				ForEach(groupedSessions) { group in
-					DisclosureGroup(isExpanded: isExpandedBinding(for: group.id)) {
-						ForEach(group.sessions, id: \.session.sessionID) { sessionInfo in
-							HStack(alignment: .top, spacing: 12) {
-								VStack(alignment: .leading, spacing: 4) {
-									Text(verbatim: sessionInfo.session.summary)
-									HStack {
-										if let lastMessageAt = sessionInfo.session.lastMessageAt {
-											Text(verbatim: lastMessageAt.formatted(.dateTime))
-										}
+				sessionGroupsContent(connectedGroups)
 
-										Spacer()
-
-										if sessionInfo.session.isUnread && selectedSessionID != sessionInfo.session.sessionID {
-											UnreadSessionBadge()
-										}
-									}
-									.font(.caption)
-									.foregroundStyle(.secondary)
-								}
+				if !unconnectedGroups.isEmpty {
+					Section {
+						if showsUnconnectedSessions {
+							sessionGroupsContent(unconnectedGroups)
+						}
+					} header: {
+						Button {
+							withAnimation {
+								showsUnconnectedSessions.toggle()
 							}
-							.tag(sessionInfo.session.sessionID)
-							.contentShape(Rectangle())
-							.onTapGesture {
-								selectedSessionID = sessionInfo.session.sessionID
+						} label: {
+							HStack(spacing: 6) {
+								Text(showsUnconnectedSessions ? "Unconnected" : "View \(unconnectedSessionCount) unconnected")
+								Spacer()
+								Image(systemName: "chevron.right")
+									.rotationEffect(showsUnconnectedSessions ? .degrees(90) : .zero)
+									.animation(.easeInOut(duration: 0.2), value: showsUnconnectedSessions)
 							}
 						}
-					} label: {
-						SidebarGroupHeaderLabel(
-							cwdTitle: sidebarGroupTitle(for: group.cwd),
-							hostLocation: group.hostLocation,
-							showsHostCaption: groupIDsShowingHostCaption.contains(group.id)
-						)
+						.buttonStyle(.plain)
 					}
 				}
 			}
@@ -105,18 +115,45 @@ struct SidebarView: View {
 		}
 	}
 
-	private func isExpandedBinding(for groupID: String) -> Binding<Bool> {
-		Binding(
-			get: { !collapsedGroupIDs.contains(groupID) },
-			set: { isExpanded in
-				if isExpanded {
-					collapsedGroupIDs.remove(groupID)
-				} else {
-					collapsedGroupIDs.insert(groupID)
+	@ViewBuilder
+	private func sessionGroupsContent(_ groups: [SidebarSessionGroup]) -> some View {
+		ForEach(groups) { group in
+			Section {
+				if !collapsedGroupIDs.contains(group.id) {
+					ForEach(group.sessions, id: \.session.sessionID) { sessionInfo in
+						SidebarSessionRow(
+							sessionInfo: sessionInfo,
+							isSelected: selectedSessionID == sessionInfo.session.sessionID
+						)
+						.tag(sessionInfo.session.sessionID)
+						.contentShape(Rectangle())
+						.onTapGesture {
+							selectedSessionID = sessionInfo.session.sessionID
+						}
+					}
 				}
+			} header: {
+				Button {
+					withAnimation {
+						if collapsedGroupIDs.contains(group.id) {
+							collapsedGroupIDs.remove(group.id)
+						} else {
+							collapsedGroupIDs.insert(group.id)
+						}
+					}
+				} label: {
+					SidebarGroupHeaderLabel(
+						cwdTitle: sidebarGroupTitle(for: group.cwd),
+						hostLocation: group.hostLocation,
+						showsHostCaption: groupIDsShowingHostCaption.contains(group.id),
+						isCollapsed: collapsedGroupIDs.contains(group.id)
+					)
+				}
+				.buttonStyle(.plain)
 			}
-		)
+		}
 	}
+
 }
 
 struct SidebarSessionGroup: Identifiable, Equatable {
@@ -186,28 +223,63 @@ func sidebarGroupIDsShowingHostCaption(_ groups: [SidebarSessionGroup]) -> Set<S
 	)
 }
 
+private struct SidebarSessionRow: View {
+	let sessionInfo: SessionInfo
+	let isSelected: Bool
+
+	var body: some View {
+		HStack(alignment: .top, spacing: 12) {
+			VStack(alignment: .leading, spacing: 4) {
+				Text(verbatim: sessionInfo.session.summary)
+				HStack {
+					if let lastMessageAt = sessionInfo.session.lastMessageAt {
+						Text(verbatim: lastMessageAt.formatted(.dateTime))
+					}
+
+					Spacer()
+
+					if sessionInfo.session.isUnread && !isSelected {
+						UnreadSessionBadge()
+					}
+				}
+				.font(.caption)
+				.foregroundStyle(.secondary)
+			}
+		}
+	}
+}
+
 private struct SidebarGroupHeaderLabel: View {
 	let cwdTitle: String
 	let hostLocation: String
 	let showsHostCaption: Bool
+	var isCollapsed: Bool = false
 
 	var body: some View {
-		VStack(alignment: .leading, spacing: showsHostCaption ? 1 : 0) {
-			Text(verbatim: cwdTitle)
-				.font(.subheadline.weight(.semibold))
-				.foregroundStyle(.primary)
-				.lineLimit(1)
-				.truncationMode(.middle)
-
-			if showsHostCaption {
-				Text(verbatim: hostLocation)
-					.font(.caption2)
-					.foregroundStyle(.secondary)
+		HStack(spacing: 6) {
+			VStack(alignment: .leading, spacing: showsHostCaption ? 1 : 0) {
+				Text(verbatim: cwdTitle)
+					.font(.subheadline.weight(.semibold))
+					.foregroundStyle(.primary)
 					.lineLimit(1)
 					.truncationMode(.middle)
+
+				if showsHostCaption {
+					Text(verbatim: hostLocation)
+						.font(.caption2)
+						.foregroundStyle(.secondary)
+						.lineLimit(1)
+						.truncationMode(.middle)
+				}
 			}
+			.frame(maxWidth: .infinity, alignment: .leading)
+
+			Image(systemName: "chevron.right")
+				.font(.caption2.weight(.semibold))
+				.foregroundStyle(.secondary)
+				.rotationEffect(isCollapsed ? .zero : .degrees(90))
+				.animation(.easeInOut(duration: 0.2), value: isCollapsed)
 		}
-		.frame(maxWidth: .infinity, alignment: .leading)
 		.padding(.vertical, showsHostCaption ? 2 : 3)
 	}
 }
@@ -309,6 +381,25 @@ private struct UnreadSessionBadge: View {
 				lastSeenAt: now.addingTimeInterval(-3600)
 			)
 			try inactiveSession.insert(dbConn)
+
+			var inactiveSession2 = PiSession(
+				id: nil,
+				hostID: linuxHost.id!,
+				summary: "Stale deploy check",
+				sessionID: "sidebar-preview-session-inactive-2",
+				sessionFile: nil,
+				model: "anthropic/claude-sonnet",
+				cwd: "/home/nakajima/apps/ThatApp",
+				lastMessage: nil,
+				lastUserMessageAt: now.addingTimeInterval(-8400),
+				lastMessageAt: now.addingTimeInterval(-7200),
+				lastMessageRole: "assistant",
+				lastReadMessageAt: now.addingTimeInterval(-7200),
+				isCliActive: false,
+				startedAt: now.addingTimeInterval(-14400),
+				lastSeenAt: now.addingTimeInterval(-7200)
+			)
+			try inactiveSession2.insert(dbConn)
 		}
 
 		return NavigationStack {

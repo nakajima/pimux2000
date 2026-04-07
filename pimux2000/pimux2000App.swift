@@ -8,6 +8,9 @@ import SwiftUI
 
 @main
 struct pimux2000App: App {
+	#if canImport(UIKit)
+		@UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+	#endif
 	let appDatabase: AppDatabase
 
 	init() {
@@ -57,6 +60,24 @@ struct pimux2000App: App {
 		URL.documentsDirectory.appending(path: "db.sqlite")
 	}
 }
+
+#if canImport(UIKit)
+	private final class AppDelegate: NSObject, UIApplicationDelegate {
+		func application(
+			_ application: UIApplication,
+			supportedInterfaceOrientationsFor window: UIWindow?
+		) -> UIInterfaceOrientationMask {
+			let arguments = ProcessInfo.processInfo.arguments
+			guard arguments.contains("--uitesting-force-landscape") else {
+				return .all
+			}
+			guard UIDevice.current.userInterfaceIdiom == .pad else {
+				return .allButUpsideDown
+			}
+			return .landscape
+		}
+	}
+#endif
 
 private struct AppRootView: View {
 	let appDatabase: AppDatabase

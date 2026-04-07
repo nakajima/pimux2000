@@ -12,9 +12,9 @@ final class ScreenshotTests: XCTestCase {
 	@MainActor
 	func testAppOverviewScreenshot() throws {
 		let app = launchApp(for: "overview")
-		openSession(named: "Ship screenshot workflow", in: app)
+		openSession(named: "SSH password authentication prompt implementation", in: app)
 
-		let readyText = app.staticTexts["Stable fixtures and a screenshot script are ready."]
+		let readyText = app.staticTexts["Auth failures now short-circuit cleanly and the password prompt appears."]
 		XCTAssertTrue(readyText.waitForExistence(timeout: 5))
 
 		captureScreenshot(named: "app-overview", in: app)
@@ -23,9 +23,9 @@ final class ScreenshotTests: XCTestCase {
 	@MainActor
 	func testTranscriptScreenshot() throws {
 		let app = launchApp(for: "transcript")
-		openSession(named: "Programmatic screenshot workflow", in: app)
+		openSession(named: "iOS app slash command menu feature", in: app)
 
-		let readyText = app.staticTexts["Done — added screenshot scenarios and an export script so the app can generate repeatable screenshots."]
+		let readyText = app.staticTexts["Done — the composer now shows built-in and live session commands in a slash menu."]
 		XCTAssertTrue(readyText.waitForExistence(timeout: 5))
 
 		captureScreenshot(named: "transcript", in: app)
@@ -34,7 +34,7 @@ final class ScreenshotTests: XCTestCase {
 	@MainActor
 	func testSlashCommandsScreenshot() throws {
 		let app = launchApp(for: "slash-commands")
-		openSession(named: "Programmatic screenshot workflow", in: app)
+		openSession(named: "iOS app slash command menu feature", in: app)
 		hideSidebarIfNeeded(in: app)
 
 		let composer = app.textFields["Send a message"]
@@ -59,15 +59,14 @@ final class ScreenshotTests: XCTestCase {
 			"-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryM",
 		]
 		app.launchEnvironment["TZ"] = "UTC"
-		app.launchArguments += ["--uitesting-force-dark-mode"]
-		if isPadDevice {
-			app.launchArguments += ["--uitesting-force-landscape"]
-		}
+		app.launchArguments += [
+			"--uitesting-force-dark-mode",
+			"--uitesting-force-landscape",
+		]
 
-		configureDeviceOrientation()
 		app.launch()
 		XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5))
-		configureDeviceOrientation()
+		configureDeviceOrientation(in: app)
 
 		return app
 	}
@@ -80,8 +79,10 @@ final class ScreenshotTests: XCTestCase {
 		sessionCell.tap()
 	}
 
-	private func configureDeviceOrientation() {
-		XCUIDevice.shared.orientation = isPadDevice ? .landscapeLeft : .portrait
+	private func configureDeviceOrientation(in app: XCUIApplication) {
+		let targetOrientation: UIDeviceOrientation = isPadLayout(in: app) ? .landscapeLeft : .portrait
+		XCUIDevice.shared.orientation = targetOrientation
+		waitForWindowOrientation(in: app, targetOrientation: targetOrientation)
 	}
 
 	private func showSidebarIfNeeded(in app: XCUIApplication) {
@@ -91,22 +92,36 @@ final class ScreenshotTests: XCTestCase {
 	}
 
 	private func hideSidebarIfNeeded(in app: XCUIApplication) {
-		guard isPadDevice else { return }
+		guard isPadLayout(in: app) else { return }
 		let toggleSidebarButton = app.buttons["Toggle Sidebar"]
 		guard toggleSidebarButton.waitForExistence(timeout: 1) else { return }
 		toggleSidebarButton.tap()
 		_ = app.buttons["Show Sidebar"].waitForExistence(timeout: 2)
 	}
 
-	private var isPadDevice: Bool {
-		#if canImport(UIKit)
-			UIDevice.current.userInterfaceIdiom == .pad
-		#else
-			false
-		#endif
+	private func isPadLayout(in app: XCUIApplication) -> Bool {
+		let frame = app.windows.element(boundBy: 0).frame
+		return max(frame.width, frame.height) >= 1000
+	}
+
+	private func waitForWindowOrientation(in app: XCUIApplication, targetOrientation: UIDeviceOrientation) {
+		let deadline = Date().addingTimeInterval(5)
+		while Date() < deadline {
+			let frame = app.windows.element(boundBy: 0).frame
+			if targetOrientation.isLandscape {
+				if frame.width > frame.height { return }
+			} else if frame.height > frame.width {
+				return
+			}
+			RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+		}
 	}
 
 	private func captureScreenshot(named name: String, in app: XCUIApplication) {
+		if signalExternalCaptureIfRequested(named: name) {
+			return
+		}
+
 		let screenshot = app.screenshot()
 
 		#if canImport(UIKit)
@@ -119,6 +134,39 @@ final class ScreenshotTests: XCTestCase {
 		attachment.name = name
 		attachment.lifetime = .keepAlways
 		add(attachment)
+	}
+
+	private func signalExternalCaptureIfRequested(named name: String) -> Bool {
+		let configURL = URL(fileURLWithPath: "/tmp/pimux2000-screenshot-signal-dir.txt")
+		guard let signalDirectoryPath = try? String(contentsOf: configURL)
+			.trimmingCharacters(in: .whitespacesAndNewlines),
+			!signalDirectoryPath.isEmpty
+		else {
+			return false
+		}
+
+		let signalDirectoryURL = URL(fileURLWithPath: signalDirectoryPath, isDirectory: true)
+		let readyURL = signalDirectoryURL.appending(path: "\(name).ready")
+		let capturedURL = signalDirectoryURL.appending(path: "\(name).captured")
+
+		do {
+			try FileManager.default.createDirectory(at: signalDirectoryURL, withIntermediateDirectories: true)
+			try Data().write(to: readyURL)
+		} catch {
+			XCTFail("Failed to signal external capture readiness for \(name): \(error)")
+			return true
+		}
+
+		let deadline = Date().addingTimeInterval(30)
+		while Date() < deadline {
+			if FileManager.default.fileExists(atPath: capturedURL.path()) {
+				return true
+			}
+			RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+		}
+
+		XCTFail("Timed out waiting for external screenshot capture of \(name)")
+		return true
 	}
 
 	#if canImport(UIKit)

@@ -10,8 +10,11 @@ DERIVED_DATA_PATH="${PIMUX_SCREENSHOT_DERIVED_DATA_PATH:-/tmp/pimux2000-screensh
 DEVICE_NAMES_CSV="${PIMUX_SCREENSHOT_DEVICES:-iPhone 16 Pro,iPad Pro 13-inch (M4)}"
 STATUS_BAR_ENABLED="${PIMUX_SCREENSHOT_STATUS_BAR:-1}"
 APPEARANCE="${PIMUX_SCREENSHOT_APPEARANCE:-dark}"
+SIGNAL_CONFIG_PATH="/tmp/pimux2000-screenshot-signal-dir.txt"
 
 mkdir -p "$OUTPUT_DIR" "$RESULT_DIR" "$DERIVED_DATA_PATH"
+rm -f "$SIGNAL_CONFIG_PATH"
+trap 'rm -f "$SIGNAL_CONFIG_PATH"' EXIT
 
 SIMCTL_JSON="$(mktemp)"
 xcrun simctl list devices available -j > "$SIMCTL_JSON"
@@ -81,6 +84,114 @@ slugify() {
 	printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
 }
 
+normalize_image_to_landscape_if_needed() {
+	local image_path="$1"
+	local dimensions
+	dimensions="$(sips -g pixelWidth -g pixelHeight "$image_path" 2>/dev/null)"
+	local width
+	local height
+	width="$(awk '/pixelWidth:/ { print $2 }' <<< "$dimensions")"
+	height="$(awk '/pixelHeight:/ { print $2 }' <<< "$dimensions")"
+
+	if [[ -n "$width" && -n "$height" && "$height" -gt "$width" ]]; then
+		local rotated_path="${image_path}.rotated.png"
+		sips -r 270 "$image_path" --out "$rotated_path" >/dev/null
+		mv "$rotated_path" "$image_path"
+	fi
+}
+
+assert_images_are_landscape() {
+	local device_output_dir="$1"
+	DEVICE_OUTPUT_DIR="$device_output_dir" swift - <<'SWIFT'
+import AppKit
+import Foundation
+
+let deviceOutputDir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DEVICE_OUTPUT_DIR"]!)
+let fileManager = FileManager.default
+let imageURLs = try fileManager.contentsOfDirectory(at: deviceOutputDir, includingPropertiesForKeys: nil)
+	.filter { ["png", "jpg", "jpeg", "heic", "heif", "webp"].contains($0.pathExtension.lowercased()) }
+
+var portraitImages: [String] = []
+for imageURL in imageURLs {
+	guard let image = NSImage(contentsOf: imageURL),
+	      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+	else {
+		continue
+	}
+
+	if cgImage.height > cgImage.width {
+		portraitImages.append(imageURL.lastPathComponent)
+	}
+}
+
+if !portraitImages.isEmpty {
+	fputs("iPad screenshots are still portrait: \(portraitImages.joined(separator: ", "))\n", stderr)
+	exit(1)
+}
+SWIFT
+}
+
+run_external_capture_test() {
+	local device_name="$1"
+	local device_udid="$2"
+	local device_slug="$3"
+	local device_output_dir="$4"
+	local screenshot_name="$5"
+	local test_identifier="$6"
+	local signal_dir="$RESULT_DIR/${device_slug}-${screenshot_name}-signals"
+	local result_bundle_path="$RESULT_DIR/${device_slug}-${screenshot_name}.xcresult"
+	local log_path="$RESULT_DIR/${device_slug}-${screenshot_name}.log"
+	local ready_file="$signal_dir/${screenshot_name}.ready"
+	local captured_file="$signal_dir/${screenshot_name}.captured"
+	local output_path="$device_output_dir/${screenshot_name}.png"
+
+	rm -rf "$signal_dir" "$result_bundle_path"
+	mkdir -p "$signal_dir"
+
+	printf '%s\n' "$signal_dir" > "$SIGNAL_CONFIG_PATH"
+
+	echo "==> Running $test_identifier on $device_name"
+	xcodebuild test \
+		-project "$ROOT_DIR/pimux2000.xcodeproj" \
+		-scheme pimux2000 \
+		-destination "id=$device_udid" \
+		-parallel-testing-enabled NO \
+		-derivedDataPath "$DERIVED_DATA_PATH" \
+		-only-testing:"$test_identifier" \
+		-resultBundlePath "$result_bundle_path" \
+		>"$log_path" 2>&1 &
+	local xcodebuild_pid=$!
+
+	for _ in {1..120}; do
+		if [[ -f "$ready_file" ]]; then
+			break
+		fi
+		if ! kill -0 "$xcodebuild_pid" >/dev/null 2>&1; then
+			wait "$xcodebuild_pid"
+			rm -f "$SIGNAL_CONFIG_PATH"
+			cat "$log_path" >&2
+			return 1
+		fi
+		sleep 1
+	done
+
+	if [[ ! -f "$ready_file" ]]; then
+		kill "$xcodebuild_pid" >/dev/null 2>&1 || true
+		wait "$xcodebuild_pid" >/dev/null 2>&1 || true
+		rm -f "$SIGNAL_CONFIG_PATH"
+		echo "Timed out waiting for $screenshot_name to become ready for external capture." >&2
+		cat "$log_path" >&2
+		return 1
+	fi
+
+	xcrun simctl io "$device_udid" screenshot "$output_path" >/dev/null
+	normalize_image_to_landscape_if_needed "$output_path"
+	touch "$captured_file"
+	wait "$xcodebuild_pid"
+	rm -f "$SIGNAL_CONFIG_PATH"
+	echo "$output_path"
+}
+
 for resolved_device in "${RESOLVED_DEVICES[@]}"; do
 	IFS=$'\t' read -r DEVICE_NAME DEVICE_UDID DEVICE_RUNTIME <<< "$resolved_device"
 	DEVICE_SLUG="$(slugify "$DEVICE_NAME")"
@@ -112,21 +223,46 @@ for resolved_device in "${RESOLVED_DEVICES[@]}"; do
 		xcrun simctl ui "$DEVICE_UDID" appearance "$APPEARANCE" >/dev/null
 	fi
 
-	echo "==> Running ScreenshotTests on $DEVICE_NAME"
-	xcodebuild test \
-		-project "$ROOT_DIR/pimux2000.xcodeproj" \
-		-scheme pimux2000 \
-		-destination "id=$DEVICE_UDID" \
-		-derivedDataPath "$DERIVED_DATA_PATH" \
-		-only-testing:pimux2000UITests/ScreenshotTests \
-		-resultBundlePath "$RESULT_BUNDLE_PATH"
+	if [[ "$DEVICE_NAME" == iPad* ]]; then
+		run_external_capture_test \
+			"$DEVICE_NAME" \
+			"$DEVICE_UDID" \
+			"$DEVICE_SLUG" \
+			"$DEVICE_OUTPUT_DIR" \
+			"app-overview" \
+			"pimux2000UITests/ScreenshotTests/testAppOverviewScreenshot"
+		run_external_capture_test \
+			"$DEVICE_NAME" \
+			"$DEVICE_UDID" \
+			"$DEVICE_SLUG" \
+			"$DEVICE_OUTPUT_DIR" \
+			"transcript" \
+			"pimux2000UITests/ScreenshotTests/testTranscriptScreenshot"
+		run_external_capture_test \
+			"$DEVICE_NAME" \
+			"$DEVICE_UDID" \
+			"$DEVICE_SLUG" \
+			"$DEVICE_OUTPUT_DIR" \
+			"slash-commands" \
+			"pimux2000UITests/ScreenshotTests/testSlashCommandsScreenshot"
+		assert_images_are_landscape "$DEVICE_OUTPUT_DIR"
+	else
+		echo "==> Running ScreenshotTests on $DEVICE_NAME"
+		xcodebuild test \
+			-project "$ROOT_DIR/pimux2000.xcodeproj" \
+			-scheme pimux2000 \
+			-destination "id=$DEVICE_UDID" \
+			-parallel-testing-enabled NO \
+			-derivedDataPath "$DERIVED_DATA_PATH" \
+			-only-testing:pimux2000UITests/ScreenshotTests \
+			-resultBundlePath "$RESULT_BUNDLE_PATH"
 
-	echo "==> Exporting attachments from $RESULT_BUNDLE_PATH"
-	xcrun xcresulttool export attachments \
-		--path "$RESULT_BUNDLE_PATH" \
-		--output-path "$EXPORT_PATH"
+		echo "==> Exporting attachments from $RESULT_BUNDLE_PATH"
+		xcrun xcresulttool export attachments \
+			--path "$RESULT_BUNDLE_PATH" \
+			--output-path "$EXPORT_PATH"
 
-	EXPORT_PATH="$EXPORT_PATH" DEVICE_OUTPUT_DIR="$DEVICE_OUTPUT_DIR" python3 - <<'PY'
+		EXPORT_PATH="$EXPORT_PATH" DEVICE_OUTPUT_DIR="$DEVICE_OUTPUT_DIR" python3 - <<'PY'
 import json
 import os
 import re
@@ -170,44 +306,6 @@ if not generated:
 for path in generated:
     print(path)
 PY
-
-	if [[ "$DEVICE_NAME" == iPad* ]]; then
-		DEVICE_OUTPUT_DIR="$DEVICE_OUTPUT_DIR" swift - <<'SWIFT'
-import AppKit
-import Foundation
-
-let deviceOutputDir = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DEVICE_OUTPUT_DIR"]!)
-let fileManager = FileManager.default
-let imageURLs = try fileManager.contentsOfDirectory(at: deviceOutputDir, includingPropertiesForKeys: nil)
-	.filter { $0.pathExtension.lowercased() == "png" }
-
-for imageURL in imageURLs {
-	guard let image = NSImage(contentsOf: imageURL),
-	      let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
-	else {
-		continue
-	}
-
-	guard cgImage.height > cgImage.width else { continue }
-	let targetHeight = Int(round(Double(cgImage.width) * 3.0 / 4.0))
-	guard targetHeight < cgImage.height else { continue }
-
-	let stem = imageURL.deletingPathExtension().lastPathComponent
-	let originY: Int
-	if stem == "slash-commands" {
-		originY = cgImage.height - targetHeight
-	} else {
-		originY = 0
-	}
-
-	let cropRect = CGRect(x: 0, y: originY, width: cgImage.width, height: targetHeight)
-	guard let croppedImage = cgImage.cropping(to: cropRect) else { continue }
-
-	let bitmap = NSBitmapImageRep(cgImage: croppedImage)
-	guard let pngData = bitmap.representation(using: .png, properties: [:]) else { continue }
-	try pngData.write(to: imageURL)
-}
-SWIFT
 	fi
 
 	if [[ "$STATUS_BAR_ENABLED" != "0" ]]; then
