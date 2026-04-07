@@ -17,7 +17,7 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const GITHUB_REPO: &str = "nakajima/pimux2000";
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
-const RELEASE_BINARY_NAME: &str = env!("CARGO_PKG_NAME");
+const RELEASE_BINARY_NAME: &str = "pimux";
 
 pub struct Options {
     pub check: bool,
@@ -197,7 +197,7 @@ fn github_client() -> Result<Client, BoxError> {
     Ok(Client::builder()
         .user_agent(format!(
             "{}/{}",
-            env!("CARGO_PKG_NAME"),
+            RELEASE_BINARY_NAME,
             env!("CARGO_PKG_VERSION")
         ))
         .build()?)
@@ -485,17 +485,17 @@ mod tests {
     fn selects_matching_release_asset() {
         let assets = vec![
             GithubReleaseAsset {
-                name: "pimux-server-0.1.0-x86_64-apple-darwin.tar.gz".to_string(),
+                name: "pimux-0.1.0-x86_64-apple-darwin.tar.gz".to_string(),
                 browser_download_url: "https://example.com/macos-x86_64".to_string(),
             },
             GithubReleaseAsset {
-                name: "pimux-server-0.1.0-aarch64-apple-darwin.tar.gz".to_string(),
+                name: "pimux-0.1.0-aarch64-apple-darwin.tar.gz".to_string(),
                 browser_download_url: "https://example.com/macos-aarch64".to_string(),
             },
         ];
 
-        let selected =
-            select_asset(&assets, "pimux-server", "0.1.0", "aarch64-apple-darwin").unwrap();
+        let selected = select_asset(&assets, "pimux", "0.1.0", "aarch64-apple-darwin")
+            .unwrap();
         assert_eq!(
             selected.browser_download_url,
             "https://example.com/macos-aarch64"
@@ -507,7 +507,7 @@ mod tests {
         let archive = test_archive();
         let destination = unique_test_path("extracts-binary");
 
-        extract_binary_from_archive(&archive, "pimux-server", &destination).unwrap();
+        extract_binary_from_archive(&archive, "pimux", &destination).unwrap();
 
         let contents = fs::read_to_string(&destination).unwrap();
         assert_eq!(contents, "hello from pimux");
@@ -520,7 +520,7 @@ mod tests {
         let mut builder = Builder::new(encoder);
 
         append_file(&mut builder, "README.txt", b"ignore me");
-        append_file(&mut builder, "pimux-server", b"hello from pimux");
+        append_file(&mut builder, "pimux", b"hello from pimux");
 
         let encoder = builder.into_inner().unwrap();
         encoder.finish().unwrap()

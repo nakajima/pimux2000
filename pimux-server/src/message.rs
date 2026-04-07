@@ -256,6 +256,36 @@ impl From<&MessageContentBlock> for ApiMessageContentBlock {
     }
 }
 
+impl From<&ApiMessageContentBlock> for MessageContentBlock {
+    fn from(block: &ApiMessageContentBlock) -> Self {
+        Self {
+            kind: block.kind,
+            text: block.text.clone(),
+            tool_call_name: block.tool_call_name.clone(),
+            mime_type: block.mime_type.clone(),
+            data: None,
+            attachment_id: block.attachment_id.clone(),
+        }
+    }
+}
+
+impl From<&ApiMessage> for Message {
+    fn from(message: &ApiMessage) -> Self {
+        Self {
+            created_at: message.created_at,
+            role: message.role,
+            body: message.body.clone(),
+            tool_name: message.tool_name.clone(),
+            blocks: message
+                .blocks
+                .iter()
+                .map(MessageContentBlock::from)
+                .collect(),
+            message_id: message.message_id.clone(),
+        }
+    }
+}
+
 pub fn normalized_display_text(text: &str) -> Option<String> {
     let normalized = normalize_line_endings(text);
     let trimmed = normalized.trim_matches('\n');

@@ -402,12 +402,12 @@ mod tests {
     #[test]
     fn renders_systemd_unit_with_port() {
         let unit = render_systemd_unit(
-            Path::new("/tmp/pimux-server"),
+            Path::new("/tmp/pimux"),
             Some("/usr/bin:/opt/bin"),
             Some(4123),
         );
 
-        assert!(unit.contains("ExecStart=\"/tmp/pimux-server\" \"server\""));
+        assert!(unit.contains("ExecStart=\"/tmp/pimux\" \"server\""));
         assert!(unit.contains("Environment=PATH=\"/usr/bin:/opt/bin\""));
         assert!(unit.contains("Environment=PORT=\"4123\""));
         assert!(unit.contains("WantedBy=default.target"));
@@ -416,7 +416,7 @@ mod tests {
     #[test]
     fn renders_launch_agent_plist_with_port() {
         let plist = render_launch_agent_plist(
-            Path::new("/tmp/pimux-server"),
+            Path::new("/tmp/pimux"),
             Some("/usr/bin:/opt/bin"),
             Some(4123),
             Path::new("/tmp/out.log"),
@@ -424,7 +424,7 @@ mod tests {
         );
 
         assert!(plist.contains("<string>dev.pimux.server</string>"));
-        assert!(plist.contains("<string>/tmp/pimux-server</string>"));
+        assert!(plist.contains("<string>/tmp/pimux</string>"));
         assert!(plist.contains("<string>server</string>"));
         assert!(plist.contains("<key>PATH</key>"));
         assert!(plist.contains("<string>/usr/bin:/opt/bin</string>"));

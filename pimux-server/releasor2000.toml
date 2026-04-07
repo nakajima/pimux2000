@@ -1,8 +1,8 @@
 [project]
-name = "pimux-server"
+name = "pimux"
 auto-tag = true  # detect Cargo.toml version, create/push git tag v<version> before releasing to git
-# binary = "pimux-server"  # defaults to project name
-# binaries = ["pimux-server", "pimux-server-cli"]  # optional extra release assets
+binary = "pimux"
+# binaries = ["pimux", "pimux-cli"]  # optional extra release assets
 repo = "nakajima/pimux2000"
 # version-command = "git describe --tags --abbrev=0"
 
@@ -27,7 +27,7 @@ enabled = true
 
 # [channels.homebrew]
 # tap = "owner/homebrew-tap"
-# formula-name = "pimux-server"
+# formula-name = "pimux"
 
 # [channels.cargo]
 # crate-name = "pimux-server"

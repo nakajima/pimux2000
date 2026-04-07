@@ -379,8 +379,11 @@ Notes:
 
 Returns the best transcript snapshot the server currently has for a session.
 
+Query params:
+- `hostLocation=...` — optional exact host selector; when provided, the server resolves the transcript only for that host/session pair
+
 Current behavior:
-1. if the server already has a cached snapshot, it returns it immediately
+1. if the server already has a cached snapshot for the requested session (and host, when `hostLocation` is provided), it returns it immediately
 2. otherwise it asks the owning host agent to fetch the transcript over the persistent agent WebSocket
 3. it waits up to about **5 seconds** for that host response
 4. if the host cannot provide a transcript in time, the request fails
@@ -594,6 +597,14 @@ Default host-registry path:
 - Linux: `${XDG_STATE_HOME:-~/.local/state}/pimux/expected-hosts.json`
 - override with `PIMUX_SERVER_STATE_PATH`
 
+Optional Postgres backup:
+- set `PIMUX_BACKUP_POSTGRES_URL` to enable it
+- when enabled, the server creates `sessions` and `messages` tables automatically
+- `sessions` stores best-effort session metadata the server learns from host snapshots and transcript updates
+- `messages` stores one row per transcript message, upserted from transcript snapshots the server receives from agents
+- if the initial Postgres connection or schema setup fails, server startup fails fast
+- if Postgres disconnects after startup, the server keeps retrying and resumes writes when it reconnects
+
 ### `pimux server install`
 
 Installs the server as a **per-user** background service using the current binary path and current `PATH`, then starts it.
@@ -617,6 +628,7 @@ pimux server
 
 Notes:
 - reinstalling updates the service definition and reloads/restarts it
+- if `PIMUX_BACKUP_POSTGRES_URL` is set in your environment when you run `pimux server install`, that value is persisted into the installed service definition too
 - on Linux, a `systemd --user` service may require user-session/linger setup depending on how that host is managed; this first implementation is per-user only
 
 ### `pimux server uninstall`
@@ -626,6 +638,21 @@ Stops and removes the per-user service definition.
 ```sh
 pimux server uninstall
 ```
+
+### `pimux server backfill`
+
+Backfills the configured Postgres `sessions` / `messages` tables from a running server.
+
+```sh
+PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux server backfill
+PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux server backfill http://localhost:3000
+```
+
+Notes:
+- this is a one-shot CLI command; it does not keep running
+- it reads hosts and transcripts from the running server over HTTP
+- it upserts all discovered session rows first, then transcript messages
+- transcript fetches use `GET /sessions/{id}/messages?hostLocation=...` so duplicate session ids across hosts are handled deterministically
 
 ### `pimux restart`
 

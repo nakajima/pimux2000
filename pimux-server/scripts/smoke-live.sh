@@ -33,12 +33,12 @@ echo "[smoke] building pimux"
 cargo build >/dev/null
 
 echo "[smoke] starting server on :$PORT"
-PORT="$PORT" ./target/debug/pimux-server server >"$SERVER_LOG" 2>&1 &
+PORT="$PORT" ./target/debug/pimux server >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 sleep 1
 
 echo "[smoke] starting agent"
-PATH=/usr/bin:/bin ./target/debug/pimux-server agent run "http://127.0.0.1:$PORT" \
+PATH=/usr/bin:/bin ./target/debug/pimux agent run "http://127.0.0.1:$PORT" \
   --pi-agent-dir "$TMPDIR_ROOT" \
   --summary-model dummy >"$AGENT_LOG" 2>&1 &
 AGENT_PID=$!

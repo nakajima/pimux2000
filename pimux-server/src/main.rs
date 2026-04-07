@@ -68,6 +68,8 @@ enum ServerCommand {
     Install(ServerInstallArgs),
     /// Uninstall the per-user background service
     Uninstall,
+    /// Backfill the configured Postgres backup from a running server
+    Backfill(ServerBackfillArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -89,6 +91,13 @@ struct ServerInstallArgs {
     /// Port for the installed server service. Defaults to 3000 unless PORT is already set.
     #[arg(long, env = "PORT")]
     port: Option<u16>,
+}
+
+#[derive(Debug, Args)]
+struct ServerBackfillArgs {
+    /// Base URL of the running pimux server, for example http://localhost:3000. If the scheme is omitted, http:// is assumed.
+    #[arg(default_value = "http://127.0.0.1:3000")]
+    server_url: String,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -261,6 +270,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         result.path.display()
                     );
                 }
+            }
+            Some(ServerCommand::Backfill(args)) => {
+                server::backfill(&args.server_url).await?;
             }
         },
         Commands::Agent { command } => match command {

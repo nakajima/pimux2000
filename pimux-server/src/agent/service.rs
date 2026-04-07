@@ -691,13 +691,13 @@ mod tests {
     fn renders_systemd_unit() {
         let args = agent_run_args(&sample_config());
         let unit = render_systemd_unit(
-            Path::new("/tmp/pimux-server"),
+            Path::new("/tmp/pimux"),
             &args,
             Some("/usr/bin:/opt/bin"),
         );
 
         assert!(unit.contains(
-            "ExecStart=\"/tmp/pimux-server\" \"agent\" \"run\" \"http://127.0.0.1:3000\""
+            "ExecStart=\"/tmp/pimux\" \"agent\" \"run\" \"http://127.0.0.1:3000\""
         ));
         assert!(unit.contains("Environment=PATH=\"/usr/bin:/opt/bin\""));
         assert!(unit.contains("WantedBy=default.target"));
@@ -707,7 +707,7 @@ mod tests {
     fn renders_launch_agent_plist() {
         let args = agent_run_args(&sample_config());
         let plist = render_launch_agent_plist(
-            Path::new("/tmp/pimux-server"),
+            Path::new("/tmp/pimux"),
             &args,
             Some("/usr/bin:/opt/bin"),
             Path::new("/tmp/out.log"),
@@ -715,7 +715,7 @@ mod tests {
         );
 
         assert!(plist.contains("<string>dev.pimux.agent</string>"));
-        assert!(plist.contains("<string>/tmp/pimux-server</string>"));
+        assert!(plist.contains("<string>/tmp/pimux</string>"));
         assert!(plist.contains("<string>agent</string>"));
         assert!(plist.contains("<key>EnvironmentVariables</key>"));
         assert!(plist.contains("<string>/tmp/out.log</string>"));

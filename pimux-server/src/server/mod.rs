@@ -1,3 +1,5 @@
+mod postgres_backup;
+
 use std::{
     collections::HashMap,
     env, fs,
@@ -121,6 +123,7 @@ struct AppState {
     next_subscriber_id: Arc<AtomicU64>,
     host_registry_path: Option<PathBuf>,
     host_persist_lock: Arc<Mutex<()>>,
+    postgres_backup: Option<postgres_backup::PostgresBackupHandle>,
 }
 
 impl AppState {
@@ -146,7 +149,16 @@ impl AppState {
             next_subscriber_id: Arc::new(AtomicU64::new(1)),
             host_registry_path,
             host_persist_lock: Arc::new(Mutex::new(())),
+            postgres_backup: None,
         }
+    }
+
+    fn with_postgres_backup(
+        mut self,
+        postgres_backup: Option<postgres_backup::PostgresBackupHandle>,
+    ) -> Self {
+        self.postgres_backup = postgres_backup;
+        self
     }
 
     fn with_persistent_hosts() -> Result<Self, BoxError> {
@@ -194,6 +206,7 @@ struct PersistedHostRecord {
 
 #[derive(Clone)]
 struct CachedTranscript {
+    host_location: String,
     response: SessionMessagesResponse,
 }
 
@@ -283,6 +296,12 @@ struct SessionsQuery {
     before_id: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionMessagesQuery {
+    host_location: Option<String>,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct SendMessageRequest {
     #[serde(default)]
@@ -294,7 +313,8 @@ struct SendMessageRequest {
 pub async fn start() -> Result<(), BoxError> {
     crate::self_update::spawn_auto_update_task();
 
-    let app = app(AppState::with_persistent_hosts()?);
+    let postgres_backup = postgres_backup::start_from_env().await?;
+    let app = app(AppState::with_persistent_hosts()?.with_postgres_backup(postgres_backup));
     let port = port_from_env()?;
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
@@ -382,6 +402,191 @@ fn port_from_env() -> Result<u16, BoxError> {
         Err(std::env::VarError::NotPresent) => Ok(3000),
         Err(err) => Err(Box::new(err)),
     }
+}
+
+#[derive(Debug)]
+struct BackfillFailure {
+    host_location: String,
+    session_id: String,
+    error: String,
+}
+
+pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
+    let normalized = crate::agent::normalize_server_url(server_url)?;
+    if normalized.inferred_http {
+        eprintln!(
+            "assuming http:// for server URL `{}` -> {}",
+            server_url, normalized.url
+        );
+    }
+
+    let mut store = postgres_backup::connect_from_env_required().await?;
+    let client = reqwest::Client::new();
+    let hosts_url = build_server_url(&normalized.url, "/hosts")?;
+    let response = client
+        .get(hosts_url.clone())
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch {hosts_url}: {error}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("server responded to {hosts_url} with {status}: {body}").into());
+    }
+
+    let hosts: Vec<HostSessions> = response.json().await?;
+    let total_hosts = hosts.len();
+    let total_sessions = hosts.iter().map(|host| host.sessions.len()).sum::<usize>();
+
+    eprintln!(
+        "backfilling postgres from {} host(s) and {} session(s) via {}",
+        total_hosts, total_sessions, normalized.url
+    );
+
+    let mut sessions_upserted = 0usize;
+    let mut messages_upserted = 0usize;
+    let mut failures = Vec::new();
+
+    for host in hosts {
+        let host_identity = HostIdentity {
+            location: host.location.clone(),
+            auth: host.auth,
+        };
+
+        for session in host.sessions {
+            store
+                .upsert_active_session(&host_identity, &session, Utc::now())
+                .await?;
+            sessions_upserted += 1;
+
+            let mut session_url = build_server_url(
+                &normalized.url,
+                &format!("/sessions/{}/messages", session.id),
+            )?;
+            session_url
+                .query_pairs_mut()
+                .append_pair("hostLocation", &host_identity.location);
+            let response = match client.get(session_url.clone()).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    failures.push(BackfillFailure {
+                        host_location: host_identity.location.clone(),
+                        session_id: session.id.clone(),
+                        error: format!("failed to fetch {session_url}: {error}"),
+                    });
+                    continue;
+                }
+            };
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                failures.push(BackfillFailure {
+                    host_location: host_identity.location.clone(),
+                    session_id: session.id.clone(),
+                    error: format!("server responded with {status}: {body}"),
+                });
+                continue;
+            }
+
+            let snapshot = match response.json::<ApiSessionMessagesResponse>().await {
+                Ok(snapshot) => SessionMessagesResponse::from(snapshot),
+                Err(error) => {
+                    failures.push(BackfillFailure {
+                        host_location: host_identity.location.clone(),
+                        session_id: session.id.clone(),
+                        error: format!("invalid transcript response: {error}"),
+                    });
+                    continue;
+                }
+            };
+
+            messages_upserted += store
+                .upsert_transcript(&host_identity, Some(&session), &snapshot, Utc::now())
+                .await?;
+        }
+    }
+
+    println!(
+        "backfilled {} session row(s) and {} message row(s)",
+        sessions_upserted, messages_upserted
+    );
+
+    if !failures.is_empty() {
+        eprintln!("failed to backfill {} session(s):", failures.len());
+        for failure in &failures {
+            eprintln!(
+                "- {} on {}: {}",
+                failure.session_id, failure.host_location, failure.error
+            );
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "backfill finished with {} failed session(s)",
+            failures.len()
+        )
+        .into())
+    }
+}
+
+async fn record_postgres_sessions_snapshot(
+    state: &AppState,
+    host: &HostIdentity,
+    sessions: &[ActiveSession],
+) {
+    let Some(postgres_backup) = state.postgres_backup.clone() else {
+        return;
+    };
+
+    if postgres_backup
+        .record_sessions_snapshot(host, sessions)
+        .await
+        .is_err()
+    {
+        warn!(host_location = %host.location, "failed to enqueue postgres sessions snapshot backup");
+    }
+}
+
+async fn record_postgres_transcript(
+    state: &AppState,
+    host: &HostIdentity,
+    active_session: Option<&ActiveSession>,
+    transcript: &SessionMessagesResponse,
+) {
+    let Some(postgres_backup) = state.postgres_backup.clone() else {
+        return;
+    };
+
+    if postgres_backup
+        .record_transcript(host, active_session, transcript)
+        .await
+        .is_err()
+    {
+        warn!(
+            host_location = %host.location,
+            session_id = %transcript.session_id,
+            "failed to enqueue postgres transcript backup"
+        );
+    }
+}
+
+fn build_server_url(server_url: &str, path: &str) -> Result<reqwest::Url, BoxError> {
+    let mut url = reqwest::Url::parse(server_url)?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("server URL must not contain a query string or fragment".into());
+    }
+
+    let suffix = path.trim_start_matches('/');
+    let joined_path = match url.path().trim_end_matches('/') {
+        "" | "/" => format!("/{suffix}"),
+        base_path => format!("{base_path}/{suffix}"),
+    };
+    url.set_path(&joined_path);
+    Ok(url)
 }
 
 fn start_mdns_advertisement(port: u16) -> Result<Option<MdnsAdvertisement>, BoxError> {
@@ -547,8 +752,10 @@ async fn sessions(
 async fn session_messages(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
+    Query(query): Query<SessionMessagesQuery>,
 ) -> Result<Json<ApiSessionMessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let snapshot = resolve_session_snapshot(&state, &session_id).await?;
+    let snapshot =
+        resolve_session_snapshot(&state, &session_id, query.host_location.as_deref()).await?;
     Ok(Json(ApiSessionMessagesResponse::from(&snapshot)))
 }
 
@@ -924,7 +1131,7 @@ async fn session_attachment(
     State(state): State<AppState>,
     Path((session_id, attachment_id)): Path<(String, String)>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    let snapshot = resolve_session_snapshot(&state, &session_id).await?;
+    let snapshot = resolve_session_snapshot(&state, &session_id, None).await?;
     let (mime_type, base64_data) = match attachment_payload(&snapshot.messages, &attachment_id) {
         Some(payload) => payload,
         None => fetch_attachment_from_host(&state, &session_id, &attachment_id).await?,
@@ -953,7 +1160,7 @@ async fn session_stream(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    let snapshot = resolve_session_snapshot(&state, &session_id).await?;
+    let snapshot = resolve_session_snapshot(&state, &session_id, None).await?;
     let initial_state = current_session_subscription_state(&state, &session_id).await;
     let initial_ui_state = cached_ui_state(&state, &session_id).await;
     let initial_ui_dialog_state = cached_ui_dialog_state(&state, &session_id).await;
@@ -1306,6 +1513,8 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             warn!("received live session update before hello");
                             continue;
                         };
+                        record_postgres_transcript(&state, host, active_session.as_ref(), &session)
+                            .await;
                         let changed = {
                             let mut transcripts = state.transcripts.write().await;
                             upsert_cached_transcript(
@@ -1393,8 +1602,7 @@ async fn handle_agent_socket(state: AppState, socket: WebSocket) {
                             warn!("received transcript result before hello");
                             continue;
                         };
-                        fulfill_fetch_result(&state, &host.location, &request_id, session, error)
-                            .await;
+                        fulfill_fetch_result(&state, host, &request_id, session, error).await;
                     }
                     AgentToServerMessage::FetchAttachmentResult {
                         request_id,
@@ -1592,14 +1800,15 @@ async fn update_host_snapshot(state: &AppState, host: HostIdentity, sessions: Ve
         hosts.insert(
             host.location.clone(),
             HostRecord {
-                host,
-                sessions,
+                host: host.clone(),
+                sessions: sessions.clone(),
                 connected: true,
                 last_seen_at: Some(now),
             },
         );
     }
 
+    record_postgres_sessions_snapshot(state, &host, &sessions).await;
     persist_hosts(state).await;
     for session_id in session_ids {
         broadcast_session_state(state, &session_id, true, false, Some(now)).await;
@@ -1757,15 +1966,22 @@ async fn is_current_agent_connection(
 async fn resolve_session_snapshot(
     state: &AppState,
     session_id: &str,
+    host_location: Option<&str>,
 ) -> Result<SessionMessagesResponse, (StatusCode, Json<ErrorResponse>)> {
-    if let Some(cached) = cached_transcript(state, session_id).await {
+    if let Some(cached) = cached_transcript(state, session_id, host_location).await {
         return Ok(cached.response);
     }
 
-    let Some(host_location) = host_for_session(state, session_id).await else {
-        return Err(not_found(format!(
-            "session {session_id} is not known to the server"
-        )));
+    let Some(host_location) = resolved_host_for_session(state, session_id, host_location).await
+    else {
+        return match host_location {
+            Some(host_location) => Err(not_found(format!(
+                "session {session_id} is not known on host {host_location}"
+            ))),
+            None => Err(not_found(format!(
+                "session {session_id} is not known to the server"
+            ))),
+        };
     };
 
     let request_id = next_request_id(state, "fetch");
@@ -2070,11 +2286,12 @@ fn send_stream_event(sender: &mpsc::Sender<Bytes>, event: SessionStreamEvent) ->
 
 async fn fulfill_fetch_result(
     state: &AppState,
-    host_location: &str,
+    host: &HostIdentity,
     request_id: &str,
     session: Option<SessionMessagesResponse>,
     error: Option<String>,
 ) {
+    let host_location = host.location.as_str();
     let inflight = {
         let mut inflight_fetches = state.inflight_fetches.lock().await;
         take_matching_inflight(
@@ -2090,6 +2307,7 @@ async fn fulfill_fetch_result(
     };
 
     if let Some(session) = session.clone() {
+        record_postgres_transcript(state, host, None, &session).await;
         let changed = {
             let mut transcripts = state.transcripts.write().await;
             upsert_cached_transcript(&mut transcripts, host_location.to_string(), session)
@@ -2487,8 +2705,16 @@ fn should_prefer_listed_session(candidate: &ListedSession, existing: &ListedSess
     candidate.host_location < existing.host_location
 }
 
-async fn cached_transcript(state: &AppState, session_id: &str) -> Option<CachedTranscript> {
-    state.transcripts.read().await.get(session_id).cloned()
+async fn cached_transcript(
+    state: &AppState,
+    session_id: &str,
+    host_location: Option<&str>,
+) -> Option<CachedTranscript> {
+    let cached = state.transcripts.read().await.get(session_id).cloned()?;
+    match host_location {
+        Some(host_location) if cached.host_location != host_location => None,
+        _ => Some(cached),
+    }
 }
 
 async fn cached_ui_state(state: &AppState, session_id: &str) -> Option<SessionUiState> {
@@ -2514,9 +2740,28 @@ async fn cached_terminal_only_ui_state(
         .cloned()
 }
 
-async fn host_for_session(state: &AppState, session_id: &str) -> Option<String> {
+async fn resolved_host_for_session(
+    state: &AppState,
+    session_id: &str,
+    host_location: Option<&str>,
+) -> Option<String> {
     let hosts = state.hosts.read().await;
-    preferred_listed_session(&hosts, session_id).map(|session| session.host_location)
+    match host_location {
+        Some(host_location) => hosts
+            .get(host_location)
+            .filter(|record| {
+                record
+                    .sessions
+                    .iter()
+                    .any(|session| session.id == session_id)
+            })
+            .map(|record| record.host.location.clone()),
+        None => preferred_listed_session(&hosts, session_id).map(|session| session.host_location),
+    }
+}
+
+async fn host_for_session(state: &AppState, session_id: &str) -> Option<String> {
+    resolved_host_for_session(state, session_id, None).await
 }
 
 async fn cancel_fetch(state: &AppState, request_id: &str) {
@@ -2674,15 +2919,26 @@ fn next_request_id(state: &AppState, prefix: &str) -> String {
 
 fn upsert_cached_transcript(
     transcripts: &mut HashMap<String, CachedTranscript>,
-    _host_location: String,
+    host_location: String,
     response: SessionMessagesResponse,
 ) -> Option<SessionMessagesResponse> {
     let session_id = response.session_id.clone();
 
     match transcripts.get_mut(&session_id) {
-        Some(existing) if !should_replace_cached_transcript(existing, &response) => None,
+        Some(existing) if existing.host_location == host_location => {
+            if !should_replace_cached_transcript(existing, &response) {
+                None
+            } else {
+                *existing = CachedTranscript {
+                    host_location,
+                    response: response.clone(),
+                };
+                Some(response)
+            }
+        }
         Some(existing) => {
             *existing = CachedTranscript {
+                host_location,
                 response: response.clone(),
             };
             Some(response)
@@ -2691,6 +2947,7 @@ fn upsert_cached_transcript(
             transcripts.insert(
                 session_id,
                 CachedTranscript {
+                    host_location,
                     response: response.clone(),
                 },
             );
@@ -2863,7 +3120,8 @@ fn restart_systemd_user_service() -> Result<Option<&'static str>, BoxError> {
 fn install_systemd_user_service(port: Option<u16>) -> Result<InstallResult, BoxError> {
     let unit_path = systemd_unit_path()?;
     let executable = env::current_exe()?;
-    let unit = render_systemd_unit(&executable, port);
+    let backup_postgres_url = env_var_if_set(postgres_backup::POSTGRES_BACKUP_URL_ENV);
+    let unit = render_systemd_unit(&executable, port, backup_postgres_url.as_deref());
 
     write_file(&unit_path, &unit)?;
     run_command("systemctl", &["--user", "daemon-reload"])?;
@@ -2914,7 +3172,14 @@ fn install_launch_agent(port: Option<u16>) -> Result<InstallResult, BoxError> {
     let executable = env::current_exe()?;
     let stdout_log = launch_agent_log_path("out")?;
     let stderr_log = launch_agent_log_path("err")?;
-    let plist = render_launch_agent_plist(&executable, port, &stdout_log, &stderr_log);
+    let backup_postgres_url = env_var_if_set(postgres_backup::POSTGRES_BACKUP_URL_ENV);
+    let plist = render_launch_agent_plist(
+        &executable,
+        port,
+        backup_postgres_url.as_deref(),
+        &stdout_log,
+        &stderr_log,
+    );
 
     touch_file(&stdout_log)?;
     touch_file(&stderr_log)?;
@@ -2956,20 +3221,37 @@ fn uninstall_launch_agent() -> Result<UninstallResult, BoxError> {
     })
 }
 
-fn render_systemd_unit(executable: &FsPath, port: Option<u16>) -> String {
+fn render_systemd_unit(
+    executable: &FsPath,
+    port: Option<u16>,
+    backup_postgres_url: Option<&str>,
+) -> String {
     let mut lines = vec![
         "[Unit]".to_string(),
         "Description=pimux server".to_string(),
         String::new(),
         "[Service]".to_string(),
         "Type=simple".to_string(),
-        format!("ExecStart=\"{}\" \"server\"", executable.display()),
+        format!(
+            "ExecStart={} \"server\"",
+            quote_systemd_arg(&executable.display().to_string())
+        ),
         "Restart=always".to_string(),
         "RestartSec=2".to_string(),
     ];
 
     if let Some(port) = port {
-        lines.push(format!("Environment=PORT=\"{port}\""));
+        lines.push(format!(
+            "Environment=PORT={}",
+            quote_systemd_env_value(&port.to_string())
+        ));
+    }
+    if let Some(backup_postgres_url) = backup_postgres_url {
+        lines.push(format!(
+            "Environment={}={}",
+            postgres_backup::POSTGRES_BACKUP_URL_ENV,
+            quote_systemd_env_value(backup_postgres_url)
+        ));
     }
 
     lines.push(String::new());
@@ -2982,14 +3264,35 @@ fn render_systemd_unit(executable: &FsPath, port: Option<u16>) -> String {
 fn render_launch_agent_plist(
     executable: &FsPath,
     port: Option<u16>,
+    backup_postgres_url: Option<&str>,
     stdout_log: &FsPath,
     stderr_log: &FsPath,
 ) -> String {
-    let environment = match port {
-        Some(port) => format!(
-            "\n\t<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PORT</key>\n\t\t<string>{port}</string>\n\t</dict>"
-        ),
-        None => String::new(),
+    let mut environment_entries = Vec::new();
+    if let Some(port) = port {
+        environment_entries.push(("PORT", port.to_string()));
+    }
+    if let Some(backup_postgres_url) = backup_postgres_url {
+        environment_entries.push((
+            postgres_backup::POSTGRES_BACKUP_URL_ENV,
+            backup_postgres_url.to_string(),
+        ));
+    }
+
+    let environment = if environment_entries.is_empty() {
+        String::new()
+    } else {
+        let entries = environment_entries
+            .into_iter()
+            .map(|(key, value)| {
+                format!(
+                    "\n\t\t<key>{}</key>\n\t\t{}",
+                    xml_escape(key),
+                    plist_string(&value)
+                )
+            })
+            .collect::<String>();
+        format!("\n\t<key>EnvironmentVariables</key>\n\t<dict>{entries}\n\t</dict>")
     };
 
     format!(
@@ -3016,12 +3319,43 @@ fn render_launch_agent_plist(
             "</dict>\n",
             "</plist>\n"
         ),
-        label = LAUNCH_AGENT_LABEL,
-        exe = executable.display(),
+        label = xml_escape(LAUNCH_AGENT_LABEL),
+        exe = xml_escape(&executable.display().to_string()),
         environment = environment,
-        stdout = stdout_log.display(),
-        stderr = stderr_log.display(),
+        stdout = xml_escape(&stdout_log.display().to_string()),
+        stderr = xml_escape(&stderr_log.display().to_string()),
     )
+}
+
+fn env_var_if_set(name: &str) -> Option<String> {
+    env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+
+fn quote_systemd_arg(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('%', "%%")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+    )
+}
+
+fn quote_systemd_env_value(value: &str) -> String {
+    quote_systemd_arg(value)
+}
+
+fn plist_string(value: &str) -> String {
+    format!("\t\t<string>{}</string>", xml_escape(value))
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn systemd_unit_path() -> Result<PathBuf, BoxError> {
@@ -3111,6 +3445,7 @@ fn run_command(command: &str, args: &[&str]) -> Result<String, BoxError> {
 mod tests {
     use axum::{
         body::{Body, to_bytes},
+        extract::Query,
         http::{Method, Request, header},
     };
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
@@ -3530,7 +3865,12 @@ mod tests {
         };
         update_host_snapshot(&state, host, vec![sample_active_session("session-1")]).await;
 
-        let result = session_messages(State(state.clone()), Path("session-1".to_string())).await;
+        let result = session_messages(
+            State(state.clone()),
+            Path("session-1".to_string()),
+            Query(SessionMessagesQuery::default()),
+        )
+        .await;
         let (status, _) = result.err().expect("request should fail");
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
@@ -3571,10 +3911,14 @@ mod tests {
         let waiter = tokio::spawn({
             let state = state.clone();
             async move {
-                session_messages(State(state), Path("session-1".to_string()))
-                    .await
-                    .unwrap()
-                    .0
+                session_messages(
+                    State(state),
+                    Path("session-1".to_string()),
+                    Query(SessionMessagesQuery::default()),
+                )
+                .await
+                .unwrap()
+                .0
             }
         });
 
@@ -3592,7 +3936,7 @@ mod tests {
 
         fulfill_fetch_result(
             &state,
-            &host.location,
+            &host,
             &request_id,
             Some(sample_transcript(
                 "session-1",
@@ -3630,10 +3974,14 @@ mod tests {
         let waiter = tokio::spawn({
             let state = state.clone();
             async move {
-                session_messages(State(state), Path("session-1".to_string()))
-                    .await
-                    .unwrap()
-                    .0
+                session_messages(
+                    State(state),
+                    Path("session-1".to_string()),
+                    Query(SessionMessagesQuery::default()),
+                )
+                .await
+                .unwrap()
+                .0
             }
         });
 
@@ -3649,9 +3997,14 @@ mod tests {
             other => panic!("unexpected message: {other:?}"),
         };
 
+        let other_host = HostIdentity {
+            location: "other@host".to_string(),
+            auth: HostAuth::None,
+        };
+
         fulfill_fetch_result(
             &state,
-            "other@host",
+            &other_host,
             &request_id,
             Some(sample_transcript(
                 "session-1",
@@ -3677,7 +4030,7 @@ mod tests {
 
         fulfill_fetch_result(
             &state,
-            &host.location,
+            &host,
             &request_id,
             Some(sample_transcript(
                 "session-1",
@@ -3695,6 +4048,99 @@ mod tests {
         let returned = waiter.await.unwrap();
         assert_eq!(returned.session_id, "session-1");
         assert_eq!(returned.messages[0].body, "fetched transcript");
+    }
+
+    #[tokio::test]
+    async fn host_scoped_session_messages_fetch_from_requested_host() {
+        let state = AppState::default();
+        let host_a = HostIdentity {
+            location: "a@host".to_string(),
+            auth: HostAuth::None,
+        };
+        let host_b = HostIdentity {
+            location: "b@host".to_string(),
+            auth: HostAuth::None,
+        };
+
+        update_host_snapshot(
+            &state,
+            host_a.clone(),
+            vec![sample_active_session("session-1")],
+        )
+        .await;
+        update_host_snapshot(
+            &state,
+            host_b.clone(),
+            vec![sample_active_session("session-1")],
+        )
+        .await;
+
+        {
+            let mut transcripts = state.transcripts.write().await;
+            upsert_cached_transcript(
+                &mut transcripts,
+                host_a.location.clone(),
+                sample_transcript(
+                    "session-1",
+                    "host a transcript",
+                    TranscriptFreshnessState::Live,
+                    TranscriptSource::Extension,
+                    true,
+                    true,
+                    3_000,
+                ),
+            );
+        }
+
+        let mut receiver = register_test_agent(&state, host_b.clone()).await;
+        let waiter = tokio::spawn({
+            let state = state.clone();
+            let host_location = host_b.location.clone();
+            async move {
+                session_messages(
+                    State(state),
+                    Path("session-1".to_string()),
+                    Query(SessionMessagesQuery {
+                        host_location: Some(host_location),
+                    }),
+                )
+                .await
+                .unwrap()
+                .0
+            }
+        });
+
+        let message = receiver.recv().await.unwrap();
+        let request_id = match message {
+            ServerToAgentMessage::FetchTranscript {
+                request_id,
+                session_id,
+            } => {
+                assert_eq!(session_id, "session-1");
+                request_id
+            }
+            other => panic!("unexpected message: {other:?}"),
+        };
+
+        fulfill_fetch_result(
+            &state,
+            &host_b,
+            &request_id,
+            Some(sample_transcript(
+                "session-1",
+                "host b transcript",
+                TranscriptFreshnessState::Live,
+                TranscriptSource::Extension,
+                true,
+                true,
+                4_000,
+            )),
+            None,
+        )
+        .await;
+
+        let returned = waiter.await.unwrap();
+        assert_eq!(returned.messages[0].body, "host b transcript");
     }
 
     #[tokio::test]
@@ -3756,10 +4202,14 @@ mod tests {
             upsert_cached_transcript(&mut transcripts, "dev@mac".to_string(), response);
         }
 
-        let response = session_messages(State(state), Path("session-1".to_string()))
-            .await
-            .unwrap()
-            .0;
+        let response = session_messages(
+            State(state),
+            Path("session-1".to_string()),
+            Query(SessionMessagesQuery::default()),
+        )
+        .await
+        .unwrap()
+        .0;
         let payload = serde_json::to_value(&response).unwrap();
         let block = &payload["messages"][0]["blocks"][0];
 
@@ -4068,7 +4518,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir()
-            .join(format!("pimux-server-test-{}-{nanos}", std::process::id()))
+            .join(format!("pimux-test-{}-{nanos}", std::process::id()))
             .join(name)
     }
 

@@ -43,6 +43,24 @@ impl From<SessionMessagesResponse> for ApiSessionMessagesResponse {
     }
 }
 
+impl From<&ApiSessionMessagesResponse> for SessionMessagesResponse {
+    fn from(response: &ApiSessionMessagesResponse) -> Self {
+        Self {
+            session_id: response.session_id.clone(),
+            messages: response.messages.iter().map(Message::from).collect(),
+            freshness: response.freshness.clone(),
+            activity: response.activity.clone(),
+            warnings: response.warnings.clone(),
+        }
+    }
+}
+
+impl From<ApiSessionMessagesResponse> for SessionMessagesResponse {
+    fn from(response: ApiSessionMessagesResponse) -> Self {
+        Self::from(&response)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptFreshness {
