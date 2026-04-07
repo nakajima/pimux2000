@@ -37,7 +37,7 @@ private final class AttributedStringCacheKey: NSObject {
 enum MarkdownAttributedStringBuilder {
 	private static let cache: NSCache<AttributedStringCacheKey, NSAttributedString> = {
 		let c = NSCache<AttributedStringCacheKey, NSAttributedString>()
-		c.countLimit = 256
+		c.countLimit = 1024
 		return c
 	}()
 

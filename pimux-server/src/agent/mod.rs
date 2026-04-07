@@ -1,6 +1,7 @@
 mod connection;
 mod discovery;
 mod extension;
+mod helper;
 mod live;
 mod send;
 mod service;
@@ -223,6 +224,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
         live::DEFAULT_DETACHED_CAPACITY,
         live::DEFAULT_DETACHED_TTL,
     );
+    let helper_store = helper::SessionHelperManagerHandle::new();
     let live_socket_path = live::socket_path(&pi_agent_dir);
 
     match extension::ensure_current(&pi_agent_dir) {
@@ -306,6 +308,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 info!("agent shutting down");
+                helper_store.shutdown().await;
                 break;
             }
             connection_event = connection_events_rx.recv() => {
@@ -341,6 +344,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                             &summary_config,
                             &host,
                             &live_store,
+                            &helper_store,
                             &live_updates_tx,
                             &channel_tx,
                         ).await {
@@ -563,6 +567,7 @@ async fn handle_server_message(
     summary_config: &summarizer::Config,
     host: &HostIdentity,
     live_store: &live::LiveSessionStoreHandle,
+    helper_store: &helper::SessionHelperManagerHandle,
     live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
     channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
 ) -> Result<(), BoxError> {
@@ -721,6 +726,17 @@ async fn handle_server_message(
                 response,
                 error,
             });
+        }
+        ServerToAgentMessage::RetainSessionHelper { session_id } => {
+            let discovered_session = find_discovered_session(pi_agent_dir, &session_id)
+                .map_err(std::io::Error::other)?;
+            helper_store
+                .retain_session(&discovered_session, pi_agent_dir, live_store)
+                .await
+                .map_err(std::io::Error::other)?;
+        }
+        ServerToAgentMessage::ReleaseSessionHelper { session_id } => {
+            helper_store.release_session(&session_id).await;
         }
         ServerToAgentMessage::InterruptSession { session_id } => {
             if let Err(error) = live_store.interrupt_session(&session_id).await {

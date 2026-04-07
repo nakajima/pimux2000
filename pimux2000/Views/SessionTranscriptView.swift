@@ -93,6 +93,13 @@ enum TranscriptEmptyState: Equatable {
 			private var needsDeferredApply: Bool = false
 			private weak var deferredTableView: UITableView?
 
+			/// Background task that pre-warms markdown caches for incoming messages.
+			private var prewarmTask: Task<Void, Never>?
+
+			/// Caches measured cell heights so the table can estimate off-screen row
+			/// sizes without triggering full layout passes.
+			private var measuredHeights: [String: CGFloat] = [:]
+
 			init(parent: SessionTranscriptView) {
 				self.parent = parent
 				super.init()
@@ -129,6 +136,19 @@ enum TranscriptEmptyState: Equatable {
 				// when cells scroll into view or are recycled.
 				let oldFingerprints = messagesByID.mapValues(\.fingerprint)
 				messagesByID = Dictionary(uniqueKeysWithValues: newMessages.map { ($0.id, $0) })
+
+				// Pre-warm markdown caches for new or changed messages so cells
+				// don't parse markdown on the main thread during scroll.
+				let messagesToWarm = newMessages.filter { msg in
+					guard let oldFP = oldFingerprints[msg.id] else { return true }
+					return oldFP != msg.fingerprint
+				}
+				if !messagesToWarm.isEmpty {
+					prewarmTask?.cancel()
+					prewarmTask = Task {
+						await TranscriptMarkdownPrewarmer.prewarm(messagesToWarm)
+					}
+				}
 
 				let newItemIDs = newMessages.map(\.id)
 				let structureChanged = dataSource.snapshot().itemIdentifiers != newItemIDs
@@ -268,6 +288,21 @@ enum TranscriptEmptyState: Equatable {
 				applyDeferredUpdateIfNeeded()
 			}
 
+			func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+				guard let messageID = dataSource.itemIdentifier(for: indexPath) else { return }
+				measuredHeights[messageID] = cell.bounds.height
+			}
+
+			func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {
+				guard let messageID = dataSource.itemIdentifier(for: indexPath),
+				      let cached = measuredHeights[messageID]
+				else {
+					// Rough estimate: header + a few lines of text.
+					return 88
+				}
+				return cached
+			}
+
 			// MARK: Empty state
 
 			private func updateEmptyState(on tableView: UITableView) {
@@ -385,6 +420,68 @@ enum TranscriptEmptyState: Equatable {
 		@available(*, unavailable)
 		required init?(coder _: NSCoder) {
 			fatalError("init(coder:) has not been implemented")
+		}
+	}
+
+	// MARK: - Markdown pre-warming
+
+	enum TranscriptMarkdownPrewarmer {
+		/// Pre-warms the block parse cache and attributed string cache for the given
+		/// messages. Runs on the main actor in cooperative chunks so scroll events
+		/// are not blocked. Yields between messages to keep the run loop responsive.
+		static func prewarm(_ messages: [TranscriptMessage]) async {
+			let font = chatUIFont()
+			let captionFont = chatUIFont(style: .caption)
+
+			for message in messages {
+				guard !Task.isCancelled else { return }
+				guard case let .confirmed(info) = message else { continue }
+				let role = info.message.role
+
+				for block in info.contentBlocks {
+					guard block.type == "text", let text = block.text, !text.isEmpty else { continue }
+
+					if MessageMarkdownRenderer.shouldCollapsePreview(for: text, role: role) {
+						continue
+					}
+
+					let blockFont = (role == .toolResult || role == .bashExecution) ? captionFont : font
+
+					if MessageMarkdownRenderer.usesInlineMarkdown(for: text, role: role) {
+						_ = MarkdownAttributedStringBuilder.attributedString(for: text, role: role, font: blockFont)
+					} else if role != .toolResult && role != .bashExecution {
+						let blocks = MarkdownBlockParser.parse(text)
+						for mdBlock in blocks {
+							switch mdBlock {
+							case let .paragraph(t):
+								_ = MarkdownAttributedStringBuilder.inlineAttributedString(for: t, font: blockFont)
+							case let .heading(level, t):
+								let scale: CGFloat = switch level {
+								case 1: 1.4; case 2: 1.25; case 3: 1.12; default: 1.05
+								}
+								let headingFont = UIFont.systemFont(ofSize: blockFont.pointSize * scale, weight: .semibold)
+								_ = MarkdownAttributedStringBuilder.inlineAttributedString(for: t, font: headingFont)
+							case let .blockQuote(t):
+								_ = MarkdownAttributedStringBuilder.inlineAttributedString(for: t, font: blockFont, textColor: .secondaryLabel)
+							case let .unorderedList(items):
+								for item in items {
+									_ = MarkdownAttributedStringBuilder.inlineAttributedString(for: item, font: blockFont)
+								}
+							case let .orderedList(items):
+								for item in items {
+									_ = MarkdownAttributedStringBuilder.inlineAttributedString(for: item.text, font: blockFont)
+								}
+							case .codeBlock, .thematicBreak:
+								break
+							}
+						}
+					}
+				}
+
+				// Yield between messages so the main run loop can process scroll
+				// events, touch handling, and cell layout without blocking.
+				await Task.yield()
+			}
 		}
 	}
 

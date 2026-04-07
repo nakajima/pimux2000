@@ -16,7 +16,18 @@ enum MarkdownBlock: Equatable {
 }
 
 enum MarkdownBlockParser {
+	private static let cache = MarkdownBlockCache()
+
 	static func parse(_ markdown: String) -> [MarkdownBlock] {
+		if let cached = cache.get(markdown) {
+			return cached
+		}
+		let result = parseUncached(markdown)
+		cache.set(result, for: markdown)
+		return result
+	}
+
+	private static func parseUncached(_ markdown: String) -> [MarkdownBlock] {
 		let lines = markdown.components(separatedBy: .newlines)
 		var blocks: [MarkdownBlock] = []
 		var i = 0
@@ -234,5 +245,45 @@ enum MarkdownBlockParser {
 			|| line == "---" || line == "***" || line == "___"
 			|| isUnorderedListMarker(line)
 			|| parseOrderedListItem(line) != nil
+	}
+}
+
+// MARK: - Block parse cache
+
+private final class MarkdownBlockCacheKey: NSObject {
+	let text: String
+
+	init(_ text: String) {
+		self.text = text
+		super.init()
+	}
+
+	override var hash: Int {
+		text.hashValue
+	}
+
+	override func isEqual(_ object: Any?) -> Bool {
+		(object as? MarkdownBlockCacheKey)?.text == text
+	}
+}
+
+private final class MarkdownBlockCacheValue {
+	let blocks: [MarkdownBlock]
+	init(_ blocks: [MarkdownBlock]) { self.blocks = blocks }
+}
+
+private final class MarkdownBlockCache: @unchecked Sendable {
+	private let cache: NSCache<MarkdownBlockCacheKey, MarkdownBlockCacheValue> = {
+		let c = NSCache<MarkdownBlockCacheKey, MarkdownBlockCacheValue>()
+		c.countLimit = 512
+		return c
+	}()
+
+	func get(_ text: String) -> [MarkdownBlock]? {
+		cache.object(forKey: MarkdownBlockCacheKey(text))?.blocks
+	}
+
+	func set(_ blocks: [MarkdownBlock], for text: String) {
+		cache.setObject(MarkdownBlockCacheValue(blocks), forKey: MarkdownBlockCacheKey(text))
 	}
 }

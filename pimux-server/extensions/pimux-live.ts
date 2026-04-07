@@ -21,6 +21,7 @@ const SOCKET_RECONNECT_DELAY_MS = 500;
 const RESUMMARIZE_EDGE_ENTRY_COUNT = 5;
 const RESUMMARIZE_ENTRY_MAX_CHARS = 400;
 const RESUMMARIZE_TITLE_MAX_CHARS = 80;
+const HELPER_MODE = process.env.PIMUX_LIVE_HELPER === "1";
 
 type PimuxRole =
 	| "user"
@@ -793,6 +794,33 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	function presentMirroredHelperDialog<Result>(
+		dialog: RuntimeUiDialog,
+		opts?: UiDialogOptions
+	): Promise<Result> {
+		return new Promise((resolve) => {
+			let timeoutId: ReturnType<typeof setTimeout> | undefined;
+			const onAbort = () => {
+				cancelUiDialog(dialog);
+			};
+			const cleanup = () => {
+				if (timeoutId) clearTimeout(timeoutId);
+				opts?.signal?.removeEventListener("abort", onAbort);
+				cleanupMirroredUiDialog(dialog);
+			};
+
+			(dialog as RuntimeUiDialog & { done?: (result: Result) => void }).done = ((result: Result) => {
+				cleanup();
+				resolve(result);
+			}) as any;
+			if (opts?.timeout) {
+				timeoutId = setTimeout(onAbort, opts.timeout);
+			}
+			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+			activateMirroredUiDialog(dialog);
+		});
+	}
+
 	function configureMirroredTuiComponent(
 		tui: MirroredDialogTui,
 		keybindings: Parameters<typeof setKeybindings>[0]
@@ -1137,6 +1165,31 @@ export default function (pi: ExtensionAPI) {
 
 		ui.select = (async (title: string, options: string[], opts?: UiDialogOptions) => {
 			const sessionId = state.currentSessionId;
+			if (HELPER_MODE) {
+				if (!sessionId || state.currentUiDialog || options.length === 0) {
+					return undefined;
+				}
+				if (opts?.signal?.aborted) {
+					return undefined;
+				}
+
+				const dialog: RuntimeSelectDialog = {
+					sessionId,
+					state: {
+						id: `select-${state.nextDialogId++}`,
+						kind: "select",
+						title,
+						message: "",
+						options: [...options],
+						selectedIndex: 0,
+					},
+					selector: undefined,
+					done: undefined,
+					finished: false,
+					result: undefined,
+				};
+				return await presentMirroredHelperDialog<string | undefined>(dialog, opts);
+			}
 			if (!sessionId || state.currentUiDialog || options.length === 0) {
 				return originalSelect(title, options, opts);
 			}
@@ -1199,6 +1252,34 @@ export default function (pi: ExtensionAPI) {
 
 		ui.input = (async (title: string, placeholder?: string, opts?: UiDialogOptions) => {
 			const sessionId = state.currentSessionId;
+			if (HELPER_MODE) {
+				if (!sessionId || state.currentUiDialog) {
+					return undefined;
+				}
+				if (opts?.signal?.aborted) {
+					return undefined;
+				}
+
+				const dialog: RuntimeInputDialog = {
+					sessionId,
+					state: {
+						id: `input-${state.nextDialogId++}`,
+						kind: "input",
+						title,
+						message: "",
+						options: [],
+						selectedIndex: 0,
+						placeholder,
+						value: "",
+					},
+					input: undefined,
+					requestRender: undefined,
+					done: undefined,
+					finished: false,
+					result: undefined,
+				};
+				return await presentMirroredHelperDialog<string | undefined>(dialog, opts);
+			}
 			if (!sessionId || state.currentUiDialog) {
 				return originalInput(title, placeholder, opts);
 			}
@@ -1261,6 +1342,30 @@ export default function (pi: ExtensionAPI) {
 
 		ui.editor = (async (title: string, prefill?: string) => {
 			const sessionId = state.currentSessionId;
+			if (HELPER_MODE) {
+				if (!sessionId || state.currentUiDialog) {
+					return undefined;
+				}
+
+				const dialog: RuntimeEditorDialog = {
+					sessionId,
+					state: {
+						id: `editor-${state.nextDialogId++}`,
+						kind: "editor",
+						title,
+						message: "",
+						options: [],
+						selectedIndex: 0,
+						value: prefill ?? "",
+					},
+					editor: undefined,
+					requestRender: undefined,
+					done: undefined,
+					finished: false,
+					result: undefined,
+				};
+				return await presentMirroredHelperDialog<string | undefined>(dialog);
+			}
 			if (!sessionId || state.currentUiDialog) {
 				return originalEditor(title, prefill);
 			}
@@ -1314,6 +1419,31 @@ export default function (pi: ExtensionAPI) {
 
 		ui.confirm = (async (title: string, message: string, opts?: UiDialogOptions) => {
 			const sessionId = state.currentSessionId;
+			if (HELPER_MODE) {
+				if (!sessionId || state.currentUiDialog) {
+					return false;
+				}
+				if (opts?.signal?.aborted) {
+					return false;
+				}
+
+				const dialog: RuntimeConfirmDialog = {
+					sessionId,
+					state: {
+						id: `confirm-${state.nextDialogId++}`,
+						kind: "confirm",
+						title,
+						message,
+						options: ["Yes", "No"],
+						selectedIndex: 0,
+					},
+					selector: undefined,
+					done: undefined,
+					finished: false,
+					result: false,
+				};
+				return await presentMirroredHelperDialog<boolean>(dialog, opts);
+			}
 			if (!sessionId || state.currentUiDialog) {
 				return originalConfirm(title, message, opts);
 			}

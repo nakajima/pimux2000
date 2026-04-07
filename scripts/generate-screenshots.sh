@@ -243,8 +243,29 @@ for resolved_device in "${RESOLVED_DEVICES[@]}"; do
 			"$DEVICE_UDID" \
 			"$DEVICE_SLUG" \
 			"$DEVICE_OUTPUT_DIR" \
+			"typestate-transcript" \
+			"pimux2000UITests/ScreenshotTests/testTypestateTranscriptScreenshot"
+		run_external_capture_test \
+			"$DEVICE_NAME" \
+			"$DEVICE_UDID" \
+			"$DEVICE_SLUG" \
+			"$DEVICE_OUTPUT_DIR" \
+			"image-message-transcript" \
+			"pimux2000UITests/ScreenshotTests/testImageMessageTranscriptScreenshot"
+		run_external_capture_test \
+			"$DEVICE_NAME" \
+			"$DEVICE_UDID" \
+			"$DEVICE_SLUG" \
+			"$DEVICE_OUTPUT_DIR" \
 			"slash-commands" \
 			"pimux2000UITests/ScreenshotTests/testSlashCommandsScreenshot"
+		run_external_capture_test \
+			"$DEVICE_NAME" \
+			"$DEVICE_UDID" \
+			"$DEVICE_SLUG" \
+			"$DEVICE_OUTPUT_DIR" \
+			"slash-commands-filtered" \
+			"pimux2000UITests/ScreenshotTests/testFilteredSlashCommandsScreenshot"
 		assert_images_are_landscape "$DEVICE_OUTPUT_DIR"
 	else
 		echo "==> Running ScreenshotTests on $DEVICE_NAME"

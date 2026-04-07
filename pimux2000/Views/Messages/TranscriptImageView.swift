@@ -4,6 +4,8 @@ import QuickLook
 import SwiftUI
 
 struct TranscriptImageView: View {
+	private static let accessibilityIdentifier = "transcript-image"
+
 	let url: URL
 	let sessionID: String
 	let mimeType: String?
@@ -56,6 +58,8 @@ struct TranscriptImageView: View {
 						.background(.thinMaterial, in: Circle())
 				}
 			}
+			.accessibilityLabel("Transcript image")
+			.accessibilityIdentifier(Self.accessibilityIdentifier)
 			.onTapGesture {
 				Task { await openQuickLook() }
 			}
@@ -111,6 +115,8 @@ struct TranscriptImageView: View {
 		.padding(.vertical, 8)
 		.padding(.horizontal, 10)
 		.background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10))
+		.accessibilityLabel("Transcript image")
+		.accessibilityIdentifier(Self.accessibilityIdentifier)
 	}
 }
 

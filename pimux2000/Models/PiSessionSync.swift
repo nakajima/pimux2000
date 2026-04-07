@@ -59,8 +59,10 @@ struct PiSessionSync {
 			let fallbackUpdatedAt = existingHostsByLocation[location]?.updatedAt ?? now
 			let updatedAt = latestHostUpdates[location] ?? fallbackUpdatedAt
 			if var host = existingHostsByLocation.removeValue(forKey: location) {
-				host.updatedAt = updatedAt
-				try host.update(db)
+				if host.updatedAt != updatedAt {
+					host.updatedAt = updatedAt
+					try host.update(db)
+				}
 				if let id = host.id {
 					hostIDByLocation[location] = id
 				}
@@ -98,6 +100,7 @@ struct PiSessionSync {
 				: "user"
 
 			if var session = existingSessionsByID.removeValue(forKey: remoteSession.id) {
+				let original = session
 				session.hostID = hostID
 				session.summary = remoteSession.summary
 				session.sessionFile = nil
@@ -113,7 +116,9 @@ struct PiSessionSync {
 				session.supportsImages = remoteSession.supportsImages
 				session.startedAt = remoteSession.createdAt
 				session.lastSeenAt = remoteSession.updatedAt
-				try session.update(db)
+				if session != original {
+					try session.update(db)
+				}
 			} else {
 				var session = PiSession(
 					id: nil,

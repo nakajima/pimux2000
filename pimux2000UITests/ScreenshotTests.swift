@@ -32,6 +32,29 @@ final class ScreenshotTests: XCTestCase {
 	}
 
 	@MainActor
+	func testTypestateTranscriptScreenshot() throws {
+		let app = launchApp(for: "transcript")
+		openSession(named: "Typestate refactor for record lifecycle", in: app)
+
+		let readyText = app.staticTexts["Updated README to match the current typestate API and removed the stale migrate section."]
+		XCTAssertTrue(readyText.waitForExistence(timeout: 5))
+
+		captureScreenshot(named: "typestate-transcript", in: app)
+	}
+
+	@MainActor
+	func testImageMessageTranscriptScreenshot() throws {
+		let app = launchApp(for: "transcript")
+		openSession(named: "iOS app preview tool calls and messages", in: app)
+
+		let readyText = app.staticTexts["The updated preview screenshot renders inline below."]
+		XCTAssertTrue(readyText.waitForExistence(timeout: 5))
+		XCTAssertTrue(waitForElement(identifier: "transcript-image", in: app, timeout: 5))
+
+		captureScreenshot(named: "image-message-transcript", in: app)
+	}
+
+	@MainActor
 	func testSlashCommandsScreenshot() throws {
 		let app = launchApp(for: "slash-commands")
 		openSession(named: "iOS app slash command menu feature", in: app)
@@ -46,6 +69,23 @@ final class ScreenshotTests: XCTestCase {
 		XCTAssertTrue(compactCommand.waitForExistence(timeout: 3))
 
 		captureScreenshot(named: "slash-commands", in: app)
+	}
+
+	@MainActor
+	func testFilteredSlashCommandsScreenshot() throws {
+		let app = launchApp(for: "slash-commands")
+		openSession(named: "iOS app slash command menu feature", in: app)
+		hideSidebarIfNeeded(in: app)
+
+		let composer = app.textFields["Send a message"]
+		XCTAssertTrue(composer.waitForExistence(timeout: 5))
+		composer.tap()
+		composer.typeText("/co")
+
+		let compactCommand = app.staticTexts["/compact"]
+		XCTAssertTrue(compactCommand.waitForExistence(timeout: 3))
+
+		captureScreenshot(named: "slash-commands-filtered", in: app)
 	}
 
 	private func launchApp(for scenario: String) -> XCUIApplication {
@@ -75,8 +115,41 @@ final class ScreenshotTests: XCTestCase {
 		showSidebarIfNeeded(in: app)
 
 		let sessionCell = app.staticTexts[summary]
-		XCTAssertTrue(sessionCell.waitForExistence(timeout: 5))
+		if sessionCell.waitForExistence(timeout: 2), sessionCell.isHittable {
+			sessionCell.tap()
+			return
+		}
+
+		let sidebar = sidebarScrollable(in: app)
+		for _ in 0 ..< 6 {
+			if sessionCell.exists, sessionCell.isHittable {
+				sessionCell.tap()
+				return
+			}
+			sidebar.swipeUp()
+		}
+
+		XCTAssertTrue(sessionCell.waitForExistence(timeout: 2))
+		XCTAssertTrue(sessionCell.isHittable)
 		sessionCell.tap()
+	}
+
+	private func sidebarScrollable(in app: XCUIApplication) -> XCUIElement {
+		if app.tables.firstMatch.exists {
+			return app.tables.firstMatch
+		}
+		if app.collectionViews.firstMatch.exists {
+			return app.collectionViews.firstMatch
+		}
+		if app.scrollViews.firstMatch.exists {
+			return app.scrollViews.firstMatch
+		}
+		return app.windows.element(boundBy: 0)
+	}
+
+	private func waitForElement(identifier: String, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+		let element = app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+		return element.waitForExistence(timeout: timeout)
 	}
 
 	private func configureDeviceOrientation(in app: XCUIApplication) {

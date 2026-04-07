@@ -1294,10 +1294,22 @@ async fn session_stream(
     let (subscription_tx, mut subscription_rx) =
         mpsc::channel(SESSION_SUBSCRIPTION_BUFFER_CAPACITY);
     let subscription_id = subscribe_session(&state, &session_id, subscription_tx).await;
+    let helper_host_location = host_for_session(&state, &session_id).await;
+    if let Some(host_location) = helper_host_location.as_deref()
+        && let Err((_, Json(error))) = retain_session_helper(&state, host_location, &session_id).await
+    {
+        warn!(
+            session_id = %session_id,
+            host_location,
+            error = %error.error,
+            "failed to retain detached pimux helper for session stream"
+        );
+    }
 
     let (body_tx, body_rx) = mpsc::channel::<Bytes>(STREAM_BODY_BUFFER_CAPACITY);
     let stream_state = state.clone();
     let stream_session_id = session_id.clone();
+    let stream_helper_host_location = helper_host_location.clone();
     tokio::spawn(async move {
         let mut sequence = 1_u64;
         if send_stream_event(
@@ -1309,7 +1321,13 @@ async fn session_stream(
         )
         .is_err()
         {
-            unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
+            cleanup_session_subscription(
+                &stream_state,
+                &stream_session_id,
+                subscription_id,
+                stream_helper_host_location.as_deref(),
+            )
+            .await;
             return;
         }
         sequence += 1;
@@ -1321,7 +1339,13 @@ async fn session_stream(
             )
             .is_err()
             {
-                unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
+                cleanup_session_subscription(
+                    &stream_state,
+                    &stream_session_id,
+                    subscription_id,
+                    stream_helper_host_location.as_deref(),
+                )
+                .await;
                 return;
             }
             sequence += 1;
@@ -1337,7 +1361,13 @@ async fn session_stream(
             )
             .is_err()
             {
-                unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
+                cleanup_session_subscription(
+                    &stream_state,
+                    &stream_session_id,
+                    subscription_id,
+                    stream_helper_host_location.as_deref(),
+                )
+                .await;
                 return;
             }
             sequence += 1;
@@ -1353,7 +1383,13 @@ async fn session_stream(
             )
             .is_err()
             {
-                unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
+                cleanup_session_subscription(
+                    &stream_state,
+                    &stream_session_id,
+                    subscription_id,
+                    stream_helper_host_location.as_deref(),
+                )
+                .await;
                 return;
             }
             sequence += 1;
@@ -1368,7 +1404,13 @@ async fn session_stream(
         )
         .is_err()
         {
-            unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
+            cleanup_session_subscription(
+                &stream_state,
+                &stream_session_id,
+                subscription_id,
+                stream_helper_host_location.as_deref(),
+            )
+            .await;
             return;
         }
         sequence += 1;
@@ -1403,7 +1445,13 @@ async fn session_stream(
             }
         }
 
-        unsubscribe_session(&stream_state, &stream_session_id, subscription_id).await;
+        cleanup_session_subscription(
+            &stream_state,
+            &stream_session_id,
+            subscription_id,
+            stream_helper_host_location.as_deref(),
+        )
+        .await;
     });
 
     let stream = ReceiverStream::new(body_rx).map(Ok::<Bytes, std::convert::Infallible>);
@@ -2076,6 +2124,36 @@ async fn send_to_agent(
     })
 }
 
+async fn retain_session_helper(
+    state: &AppState,
+    host_location: &str,
+    session_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    send_to_agent(
+        state,
+        host_location,
+        ServerToAgentMessage::RetainSessionHelper {
+            session_id: session_id.to_string(),
+        },
+    )
+    .await
+}
+
+async fn release_session_helper(
+    state: &AppState,
+    host_location: &str,
+    session_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    send_to_agent(
+        state,
+        host_location,
+        ServerToAgentMessage::ReleaseSessionHelper {
+            session_id: session_id.to_string(),
+        },
+    )
+    .await
+}
+
 async fn is_current_agent_connection(
     state: &AppState,
     host_location: &str,
@@ -2245,6 +2323,25 @@ async fn unsubscribe_session(state: &AppState, session_id: &str, subscriber_id: 
 
     if remove_entry {
         subscribers.remove(session_id);
+    }
+}
+
+async fn cleanup_session_subscription(
+    state: &AppState,
+    session_id: &str,
+    subscriber_id: u64,
+    helper_host_location: Option<&str>,
+) {
+    unsubscribe_session(state, session_id, subscriber_id).await;
+    if let Some(host_location) = helper_host_location
+        && let Err((_, Json(error))) = release_session_helper(state, host_location, session_id).await
+    {
+        warn!(
+            session_id = %session_id,
+            host_location,
+            error = %error.error,
+            "failed to release detached pimux helper for session stream"
+        );
     }
 }
 

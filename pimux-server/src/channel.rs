@@ -126,6 +126,12 @@ pub enum ServerToAgentMessage {
         session_id: String,
         action: SessionBuiltinCommandRequest,
     },
+    RetainSessionHelper {
+        session_id: String,
+    },
+    ReleaseSessionHelper {
+        session_id: String,
+    },
     InterruptSession {
         session_id: String,
     },

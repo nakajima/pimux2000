@@ -186,6 +186,71 @@ struct PiSessionSyncTests {
 		#expect(messages[1].message.position == 1)
 	}
 
+	@Test
+	func storeSkipsWriteWhenSessionDataIsUnchanged() throws {
+		let database = AppDatabase.preview()
+		let base = Date(timeIntervalSince1970: 10000)
+
+		let remoteSession = PimuxListedSession(
+			hostLocation: "nakajima@macstudio",
+			hostConnected: true,
+			id: "session-1",
+			summary: "My session",
+			createdAt: base,
+			updatedAt: base.addingTimeInterval(60),
+			lastUserMessageAt: base.addingTimeInterval(30),
+			lastAssistantMessageAt: base.addingTimeInterval(45),
+			cwd: "/tmp/project",
+			model: "anthropic/claude-sonnet"
+		)
+
+		let remoteHosts = [
+			PimuxHostSessions(
+				location: "nakajima@macstudio",
+				connected: true,
+				missing: false,
+				lastSeenAt: base.addingTimeInterval(60),
+				sessions: [
+					PimuxActiveSession(
+						id: "session-1",
+						summary: "My session",
+						createdAt: base,
+						updatedAt: base.addingTimeInterval(60),
+						lastUserMessageAt: base.addingTimeInterval(30),
+						lastAssistantMessageAt: base.addingTimeInterval(45),
+						cwd: "/tmp/project",
+						model: "anthropic/claude-sonnet"
+					),
+				]
+			),
+		]
+
+		// First sync: inserts the session
+		try database.dbQueue.write { db in
+			try PiSessionSync.store(remoteHosts: remoteHosts, remoteSessions: [remoteSession], in: db)
+		}
+
+		let sessionAfterFirstSync = try database.dbQueue.read { db in
+			try PiSession.fetchAll(db)
+		}
+		#expect(sessionAfterFirstSync.count == 1)
+		let firstSession = try #require(sessionAfterFirstSync.first)
+
+		// Second sync with identical data: should not modify the row
+		try database.dbQueue.write { db in
+			try PiSessionSync.store(remoteHosts: remoteHosts, remoteSessions: [remoteSession], in: db)
+		}
+
+		let sessionAfterSecondSync = try database.dbQueue.read { db in
+			try PiSession.fetchAll(db)
+		}
+		#expect(sessionAfterSecondSync.count == 1)
+		let secondSession = try #require(sessionAfterSecondSync.first)
+
+		// The row should be completely identical — no spurious writes
+		#expect(firstSession == secondSession)
+	}
+
 	private func decodeHosts(from json: String) throws -> [PimuxHostSessions] {
 		let decoder = JSONDecoder()
 		decoder.dateDecodingStrategy = .iso8601

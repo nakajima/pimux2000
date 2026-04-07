@@ -158,7 +158,7 @@ struct SlashCommand: Identifiable, Equatable, Sendable {
 		case let .commandName(prefix):
 			guard !prefix.isEmpty else { return nil }
 			guard let command = command(named: prefix, from: commands) else {
-				return "Unknown slash command: /\(prefix)"
+				return matching(query: "/\(prefix)", from: commands).isEmpty ? "Unknown slash command: /\(prefix)" : nil
 			}
 			return command.validationMessage(argumentText: nil)
 		case let .arguments(commandName, argumentText):

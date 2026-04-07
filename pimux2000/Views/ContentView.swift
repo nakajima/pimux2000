@@ -57,19 +57,12 @@ struct ContentView: View {
 				await syncer.sync()
 			}
 		}
-		.onChange(of: sessions.map(\.session.sessionID)) {
-			guard !sessions.isEmpty else {
-				selectedSessionID = nil
-				return
-			}
-
+		.onChange(of: Set(sessions.map(\.session.sessionID))) {
 			if let selectedSessionID,
-			   sessions.contains(where: { $0.session.sessionID == selectedSessionID })
+			   !sessions.contains(where: { $0.session.sessionID == selectedSessionID })
 			{
-				return
+				self.selectedSessionID = nil
 			}
-
-			self.selectedSessionID = sessions.first?.session.sessionID
 		}
 	}
 

@@ -73,6 +73,7 @@ struct SidebarView: View {
 				}
 			}
 		}
+		.animation(.default, value: sessions)
 		.refreshable {
 			guard let pimuxServerClient else { return }
 			let syncer = PiSessionSync(dbContext: dbContext, pimuxServerClient: pimuxServerClient)
@@ -126,10 +127,6 @@ struct SidebarView: View {
 							isSelected: selectedSessionID == sessionInfo.session.sessionID
 						)
 						.tag(sessionInfo.session.sessionID)
-						.contentShape(Rectangle())
-						.onTapGesture {
-							selectedSessionID = sessionInfo.session.sessionID
-						}
 					}
 				}
 			} header: {
@@ -227,10 +224,21 @@ private struct SidebarSessionRow: View {
 	let sessionInfo: SessionInfo
 	let isSelected: Bool
 
+	private var displaySummary: String {
+		let summary = sessionInfo.session.summary
+		if summary.isEmpty || summary.looksLikeUUID {
+			if let cwd = sessionInfo.session.cwd {
+				return URL(fileURLWithPath: cwd).lastPathComponent
+			}
+			return "New session"
+		}
+		return summary
+	}
+
 	var body: some View {
 		HStack(alignment: .top, spacing: 12) {
 			VStack(alignment: .leading, spacing: 4) {
-				Text(verbatim: sessionInfo.session.summary)
+				Text(verbatim: displaySummary)
 				HStack {
 					if let lastMessageAt = sessionInfo.session.lastMessageAt {
 						Text(verbatim: lastMessageAt.formatted(.dateTime))
@@ -290,6 +298,14 @@ private struct UnreadSessionBadge: View {
 			.fill(.tint)
 			.frame(width: 10, height: 10)
 			.accessibilityLabel("Unread messages")
+	}
+}
+
+private let uuidPattern = try! Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+extension String {
+	var looksLikeUUID: Bool {
+		self.wholeMatch(of: uuidPattern) != nil
 	}
 }
 

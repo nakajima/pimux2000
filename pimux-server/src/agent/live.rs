@@ -923,9 +923,14 @@ async fn start_listener_impl(
                                     let snapshot = {
                                         let mut guard = store.inner.lock().await;
                                         guard.purge_expired();
-                                        guard.apply_event(LiveSessionEvent::SessionDetached {
-                                            session_id,
-                                        })
+                                        if guard.has_bound_command_connection_for_session(&session_id)
+                                        {
+                                            None
+                                        } else {
+                                            guard.apply_event(LiveSessionEvent::SessionDetached {
+                                                session_id,
+                                            })
+                                        }
                                     };
 
                                     if let Some(snapshot) = snapshot {
@@ -1612,6 +1617,12 @@ impl LiveSessionStore {
         Some(connection.sender.clone())
     }
 
+    fn has_bound_command_connection_for_session(&self, session_id: &str) -> bool {
+        self.command_connections
+            .values()
+            .any(|connection| connection.current_session_id.as_deref() == Some(session_id))
+    }
+
     fn upsert_session_metadata(&mut self, session_id: &str, metadata: LiveSessionMetadata) {
         if let Some(state) = self.active_sessions.get_mut(session_id) {
             state.last_update_at = metadata.created_at;
@@ -2112,7 +2123,11 @@ impl LiveSessionStore {
             self.command_session_connections.remove(&session_id);
         }
 
-        self.apply_event(LiveSessionEvent::SessionDetached { session_id })
+        if self.has_bound_command_connection_for_session(&session_id) {
+            None
+        } else {
+            self.apply_event(LiveSessionEvent::SessionDetached { session_id })
+        }
     }
 
     fn fail_inflight_send_user_messages_for_connection(

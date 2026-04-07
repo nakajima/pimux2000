@@ -115,6 +115,25 @@ struct SidebarSessionGroupingTests {
 		#expect(sidebarGroupTitle(for: groups[1].cwd) == "~/apps/ThatApp")
 	}
 
+	@Test
+	func sidebarRowFallsBackToCwdBasenameForUUIDSummary() {
+		let base = Date(timeIntervalSince1970: 10_000)
+		let host = Host(id: 1, location: "nakajima@macstudio", createdAt: base, updatedAt: base)
+
+		let uuidSummary = makeSessionInfo(
+			host: host,
+			sessionID: "uuid-session",
+			summary: "01234567-89ab-cdef-0123-456789abcdef",
+			cwd: "/Users/nakajima/apps/MyApp",
+			at: base
+		)
+
+		#expect(uuidSummary.session.summary.looksLikeUUID)
+		#expect(!"Fix the sidebar layout".looksLikeUUID)
+		#expect(!"".looksLikeUUID)
+		#expect(!"abc-def".looksLikeUUID)
+	}
+
 	private func makeSessionInfo(
 		host: Host,
 		sessionID: String,
