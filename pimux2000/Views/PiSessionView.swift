@@ -434,44 +434,8 @@ struct PiSessionView: View {
 
 	private var transcriptMessagesScrollSignature: String {
 		guard let lastMessage = transcriptMessages.last else { return "empty" }
-
-		switch lastMessage {
-		case let .confirmed(messageInfo):
-			return confirmedScrollSignature(for: messageInfo)
-		case let .pending(pendingMessage):
-			return pendingScrollSignature(for: pendingMessage)
-		}
-	}
-
-	private func confirmedScrollSignature(for messageInfo: MessageInfo) -> String {
-		let count = String(transcriptMessages.count)
-		let messageID = messageInfo.id
-		let lastBlock = messageInfo.contentBlocks.last
-		let blockType = lastBlock?.type ?? "none"
-		let blockText = lastBlock?.text ?? ""
-		let toolCallName = lastBlock?.toolCallName ?? ""
-		let mimeType = lastBlock?.mimeType ?? ""
-		let attachmentID = lastBlock?.attachmentID ?? ""
-		let components: [String] = [
-			count,
-			messageID,
-			blockType,
-			blockText,
-			toolCallName,
-			mimeType,
-			attachmentID,
-		]
-		return components.joined(separator: "|")
-	}
-
-	private func pendingScrollSignature(for pendingMessage: PendingLocalMessage) -> String {
-		let components: [String] = [
-			String(transcriptMessages.count),
-			"pending",
-			pendingMessage.id.uuidString,
-			pendingMessage.normalizedBody,
-		]
-		return components.joined(separator: "|")
+		let count = transcriptMessages.count
+		return "\(count)|\(lastMessage.id)|\(lastMessage.fingerprint)"
 	}
 
 	private func liveMessagesLoop() async {

@@ -35,11 +35,20 @@ struct PiSessionsRequest: ValueObservationQueryable {
 	}
 }
 
+struct SessionIDsRequest: ValueObservationQueryable {
+	static var defaultValue: [String] { [] }
+
+	func fetch(_ db: Database) throws -> [String] {
+		try PiSession.select(Column("sessionID")).asRequest(of: String.self).fetchAll(db)
+	}
+}
+
 struct ContentView: View {
 	@Environment(\.databaseContext) private var dbContext
 	@Environment(\.pimuxServerClient) private var pimuxServerClient
-	@Query(PiSessionsRequest()) private var sessions: [SessionInfo]
+	@Query(SessionIDsRequest()) private var sessionIDs: [String]
 	@State private var selectedSessionID: String?
+	@State private var selectedSession: PiSession?
 	@State private var columnVisibility: NavigationSplitViewVisibility = .automatic
 
 	var body: some View {
@@ -57,11 +66,13 @@ struct ContentView: View {
 				await syncer.sync()
 			}
 		}
-		.onChange(of: Set(sessions.map(\.session.sessionID))) {
-			if let selectedSessionID,
-			   !sessions.contains(where: { $0.session.sessionID == selectedSessionID })
-			{
+		.onChange(of: selectedSessionID) {
+			resolveSelectedSession()
+		}
+		.onChange(of: Set(sessionIDs)) {
+			if let selectedSessionID, !sessionIDs.contains(selectedSessionID) {
 				self.selectedSessionID = nil
+				self.selectedSession = nil
 			}
 		}
 	}
@@ -83,7 +94,7 @@ struct ContentView: View {
 				} else if let selectedSession {
 					PiSessionView(session: selectedSession, columnVisibility: $columnVisibility)
 						.id(selectedSession.sessionID)
-				} else if sessions.isEmpty {
+				} else if sessionIDs.isEmpty {
 					ContentUnavailableView(
 						"No Recent Sessions",
 						systemImage: "bubble.left.and.bubble.right"
@@ -99,8 +110,20 @@ struct ContentView: View {
 		}
 	}
 
-	private var selectedSession: PiSession? {
-		sessions.first { $0.session.sessionID == selectedSessionID }?.session
+	private func resolveSelectedSession() {
+		guard let selectedSessionID else {
+			selectedSession = nil
+			return
+		}
+		// Only re-resolve if the selection actually changed to a different session.
+		guard selectedSession?.sessionID != selectedSessionID else { return }
+		do {
+			selectedSession = try dbContext.reader.read { db in
+				try PiSession.filter(Column("sessionID") == selectedSessionID).fetchOne(db)
+			}
+		} catch {
+			selectedSession = nil
+		}
 	}
 
 	@ViewBuilder

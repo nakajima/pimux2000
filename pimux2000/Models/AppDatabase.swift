@@ -200,7 +200,7 @@ struct AppDatabase {
 			let isLive = active && attached
 			guard session.isCliActive != isLive else { return }
 			session.isCliActive = isLive
-			try session.update(db)
+			try session.update(db, columns: ["isCliActive"])
 		}
 	}
 
@@ -212,7 +212,7 @@ struct AppDatabase {
 
 			guard session.lastReadMessageAt.map({ $0 < lastReadMessageAt }) ?? true else { return }
 			session.lastReadMessageAt = lastReadMessageAt
-			try session.update(db)
+			try session.update(db, columns: ["lastReadMessageAt"])
 		}
 	}
 
