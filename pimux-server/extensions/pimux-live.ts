@@ -274,7 +274,7 @@ function isTextValueDialog(dialog: RuntimeUiDialog): dialog is RuntimeTextValueD
 }
 
 type BridgeToAgentMessage =
-	| { type: "hello"; protocolVersion: number }
+	| { type: "hello"; protocolVersion: number; helperMode?: boolean }
 	| { type: "sessionAttached"; sessionId: string; metadata: PimuxSessionMetadata }
 	| { type: "sessionSnapshot"; sessionId: string; messages: PimuxMessage[]; metadata: PimuxSessionMetadata }
 	| { type: "sessionAppend"; sessionId: string; messages: PimuxMessage[]; metadata: PimuxSessionMetadata }
@@ -425,7 +425,11 @@ class LiveBridgeClient {
 			this.connecting = false;
 			this.connected = true;
 			this.incomingBuffer = "";
-			this.writeNow({ type: "hello", protocolVersion: LIVE_PROTOCOL_VERSION });
+			this.writeNow({
+				type: "hello",
+				protocolVersion: LIVE_PROTOCOL_VERSION,
+				helperMode: HELPER_MODE,
+			});
 			this.resyncCurrentSession();
 		});
 

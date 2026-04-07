@@ -161,6 +161,7 @@ impl LiveSessionStoreHandle {
             connection_id,
             sender,
             LIVE_PROTOCOL_VERSION,
+            LiveSessionTransport::Extension,
         )
         .await;
     }
@@ -170,9 +171,10 @@ impl LiveSessionStoreHandle {
         connection_id: u64,
         sender: UnboundedSender<LiveAgentCommand>,
         protocol_version: u32,
+        transport: LiveSessionTransport,
     ) {
         let mut store = self.inner.lock().await;
-        store.register_command_connection(connection_id, sender, protocol_version);
+        store.register_command_connection(connection_id, sender, protocol_version, transport);
     }
 
     async fn bind_command_connection_to_session(
@@ -640,7 +642,10 @@ async fn start_listener_impl(
                             };
 
                             match message {
-                                LiveSessionIpcMessage::Hello { protocol_version } => {
+                                LiveSessionIpcMessage::Hello {
+                                    protocol_version,
+                                    helper_mode,
+                                } => {
                                     if !(MIN_COMMAND_PROTOCOL_VERSION..=LIVE_PROTOCOL_VERSION)
                                         .contains(&protocol_version)
                                     {
@@ -656,6 +661,11 @@ async fn start_listener_impl(
                                             connection_id,
                                             command_tx.clone(),
                                             protocol_version,
+                                            if helper_mode {
+                                                LiveSessionTransport::Helper
+                                            } else {
+                                                LiveSessionTransport::Extension
+                                            },
                                         )
                                         .await;
                                 }
@@ -1128,6 +1138,8 @@ impl std::fmt::Display for BuiltinCommandError {
 enum LiveSessionIpcMessage {
     Hello {
         protocol_version: u32,
+        #[serde(default)]
+        helper_mode: bool,
     },
     SessionAttached {
         session_id: String,
@@ -1338,8 +1350,8 @@ impl LiveSessionStore {
             } => {
                 self.warned_legacy_sessions.remove(&session_id);
                 self.warned_missing_metadata_sessions.remove(&session_id);
-                if self.active_sessions.contains_key(&session_id) {
-                    return None;
+                if let Some(state) = self.active_sessions.get_mut(&session_id) {
+                    return state.upgrade_transport(transport).then(|| state.active_response());
                 }
 
                 let state =
@@ -1617,6 +1629,26 @@ impl LiveSessionStore {
         Some(connection.sender.clone())
     }
 
+    fn preferred_command_connection_id_for_session(&self, session_id: &str) -> Option<u64> {
+        self.command_connections
+            .iter()
+            .filter_map(|(connection_id, connection)| {
+                (connection.current_session_id.as_deref() == Some(session_id))
+                    .then_some((*connection_id, command_connection_priority(connection)))
+            })
+            .max_by_key(|(connection_id, priority)| (*priority, *connection_id))
+            .map(|(connection_id, _)| connection_id)
+    }
+
+    fn refresh_preferred_command_connection(&mut self, session_id: &str) {
+        if let Some(connection_id) = self.preferred_command_connection_id_for_session(session_id) {
+            self.command_session_connections
+                .insert(session_id.to_string(), connection_id);
+        } else {
+            self.command_session_connections.remove(session_id);
+        }
+    }
+
     fn has_bound_command_connection_for_session(&self, session_id: &str) -> bool {
         self.command_connections
             .values()
@@ -1646,6 +1678,7 @@ impl LiveSessionStore {
         connection_id: u64,
         sender: UnboundedSender<LiveAgentCommand>,
         protocol_version: u32,
+        transport: LiveSessionTransport,
     ) {
         self.command_connections.insert(
             connection_id,
@@ -1653,6 +1686,7 @@ impl LiveSessionStore {
                 sender,
                 current_session_id: None,
                 protocol_version,
+                transport,
             },
         );
     }
@@ -1667,20 +1701,14 @@ impl LiveSessionStore {
         };
 
         let previous_session_id = connection.current_session_id.replace(session_id.clone());
-        self.command_session_connections
-            .insert(session_id.clone(), connection_id);
+        self.refresh_preferred_command_connection(&session_id);
 
         if let Some(previous_session_id) = previous_session_id
             && previous_session_id != session_id
         {
-            if self
-                .command_session_connections
-                .get(&previous_session_id)
-                .copied()
-                == Some(connection_id)
-            {
-                self.command_session_connections
-                    .remove(&previous_session_id);
+            self.refresh_preferred_command_connection(&previous_session_id);
+            if self.has_bound_command_connection_for_session(&previous_session_id) {
+                return None;
             }
             return self.apply_event(LiveSessionEvent::SessionDetached {
                 session_id: previous_session_id,
@@ -1699,9 +1727,7 @@ impl LiveSessionStore {
             connection.current_session_id = None;
         }
 
-        if self.command_session_connections.get(session_id).copied() == Some(connection_id) {
-            self.command_session_connections.remove(session_id);
-        }
+        self.refresh_preferred_command_connection(session_id);
     }
 
     fn prepare_send_user_message(
@@ -2119,9 +2145,7 @@ impl LiveSessionStore {
         );
 
         let session_id = connection.current_session_id?;
-        if self.command_session_connections.get(&session_id).copied() == Some(connection_id) {
-            self.command_session_connections.remove(&session_id);
-        }
+        self.refresh_preferred_command_connection(&session_id);
 
         if self.has_bound_command_connection_for_session(&session_id) {
             None
@@ -2318,6 +2342,17 @@ struct LiveSessionState {
     transport: LiveSessionTransport,
 }
 
+fn transport_priority(transport: LiveSessionTransport) -> u8 {
+    match transport {
+        LiveSessionTransport::Helper => 0,
+        LiveSessionTransport::Extension => 1,
+    }
+}
+
+fn command_connection_priority(connection: &LiveCommandConnection) -> u8 {
+    transport_priority(connection.transport)
+}
+
 impl LiveSessionState {
     fn new(session_id: String) -> Self {
         Self::new_with_transport(session_id, LiveSessionTransport::Extension)
@@ -2413,6 +2448,14 @@ impl LiveSessionState {
 
     fn active_response(&self) -> SessionMessagesResponse {
         self.response_with_activity(true, self.transport == LiveSessionTransport::Extension)
+    }
+
+    fn upgrade_transport(&mut self, transport: LiveSessionTransport) -> bool {
+        if transport_priority(transport) <= transport_priority(self.transport) {
+            return false;
+        }
+        self.transport = transport;
+        true
     }
 
     fn detached_response(&self) -> SessionMessagesResponse {
@@ -2519,6 +2562,7 @@ struct LiveCommandConnection {
     sender: UnboundedSender<LiveAgentCommand>,
     current_session_id: Option<String>,
     protocol_version: u32,
+    transport: LiveSessionTransport,
 }
 
 struct InflightSendUserMessage {
@@ -2890,6 +2934,82 @@ mod tests {
             TranscriptFreshnessState::LiveUnknown
         );
         assert_eq!(detached.freshness.source, TranscriptSource::Helper);
+    }
+
+    #[tokio::test]
+    async fn extension_command_connection_is_preferred_over_helper() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+        let (helper_tx, mut helper_rx) = mpsc::unbounded_channel();
+        let (extension_tx, mut extension_rx) = mpsc::unbounded_channel();
+
+        handle
+            .register_command_connection_with_protocol(
+                1,
+                helper_tx,
+                LIVE_PROTOCOL_VERSION,
+                LiveSessionTransport::Helper,
+            )
+            .await;
+        handle
+            .bind_command_connection_to_session(1, "session-1".to_string())
+            .await;
+        handle
+            .register_command_connection_with_protocol(
+                2,
+                extension_tx,
+                LIVE_PROTOCOL_VERSION,
+                LiveSessionTransport::Extension,
+            )
+            .await;
+        handle
+            .bind_command_connection_to_session(2, "session-1".to_string())
+            .await;
+
+        let sender_handle = handle.clone();
+        let send_task = tokio::spawn(async move {
+            sender_handle
+                .send_user_message("session-1", "/bump patch", Vec::new())
+                .await
+        });
+
+        let command = extension_rx.recv().await.unwrap();
+        let LiveAgentCommand::SendUserMessage { request_id, .. } = command else {
+            panic!("expected SendUserMessage command");
+        };
+        assert!(helper_rx.try_recv().is_err());
+
+        handle.fulfill_send_user_message(2, &request_id, None).await;
+        assert_eq!(send_task.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn extension_attach_upgrades_helper_session_transport() {
+        let handle = LiveSessionStoreHandle::new(3, Duration::from_secs(60));
+
+        handle
+            .apply_event(LiveSessionEvent::SessionAttached {
+                session_id: "session-1".to_string(),
+                transport: LiveSessionTransport::Helper,
+            })
+            .await;
+        handle
+            .apply_event(LiveSessionEvent::SessionSnapshot {
+                session_id: "session-1".to_string(),
+                messages: vec![sample_message(Role::User, "hello from helper")],
+            })
+            .await;
+
+        let upgraded = handle
+            .apply_event(LiveSessionEvent::SessionAttached {
+                session_id: "session-1".to_string(),
+                transport: LiveSessionTransport::Extension,
+            })
+            .await
+            .unwrap();
+        assert!(upgraded.activity.active);
+        assert!(upgraded.activity.attached);
+        assert_eq!(upgraded.freshness.source, TranscriptSource::Extension);
+        assert_eq!(upgraded.freshness.state, TranscriptFreshnessState::Live);
     }
 
     #[test]
