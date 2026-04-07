@@ -28,6 +28,13 @@ To remove it later:
 pimux server uninstall
 ```
 
+To inspect a running server and see which agents are connected:
+
+```sh
+pimux server status
+pimux server status https://pimux.example.com
+```
+
 For ad-hoc foreground use on a host that has `pi` sessions:
 
 ```sh
@@ -604,6 +611,23 @@ Optional Postgres backup:
 - `messages` stores one row per transcript message, upserted from transcript snapshots the server receives from agents
 - if the initial Postgres connection or schema setup fails, server startup fails fast
 - if Postgres disconnects after startup, the server keeps retrying and resumes writes when it reconnects
+
+### `pimux server status`
+
+Shows a small human-readable status summary for a running server.
+
+```sh
+pimux server status
+pimux server status http://localhost:3000
+pimux server status https://pimux.example.com
+```
+
+Behavior:
+- defaults to `http://127.0.0.1:3000` when no URL is provided
+- accepts URLs with or without an explicit scheme
+- checks `/health`, `/version`, and `/hosts`
+- reports server version, tracked agent/session counts, and which agents are currently connected
+- also lists any expected hosts that are currently missing
 
 ### `pimux server install`
 

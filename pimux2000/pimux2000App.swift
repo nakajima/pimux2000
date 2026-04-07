@@ -65,12 +65,14 @@ private struct AppRootView: View {
 	@State private var pimuxServerClient: PimuxServerClient?
 	@State private var configuredServerURL: String?
 	@State private var hasRequestedScreenshotLandscape = false
+	private let forceDarkMode = ProcessInfo.processInfo.arguments.contains("--uitesting-force-dark-mode")
 
 	var body: some View {
 		ContentView()
 			.environment(\.appDatabase, appDatabase)
 			.environment(\.pimuxServerClient, pimuxServerClient)
 			.databaseContext(.readWrite { appDatabase.dbQueue })
+			.preferredColorScheme(forceDarkMode ? .dark : nil)
 			.onAppear {
 				updatePimuxServerClient(for: serverURL)
 			}

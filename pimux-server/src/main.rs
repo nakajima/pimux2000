@@ -64,6 +64,8 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum ServerCommand {
+    /// Show status from a running pimux server, including connected agents
+    Status(ServerStatusArgs),
     /// Install the server as a per-user background service and start it
     Install(ServerInstallArgs),
     /// Uninstall the per-user background service
@@ -91,6 +93,13 @@ struct ServerInstallArgs {
     /// Port for the installed server service. Defaults to 3000 unless PORT is already set.
     #[arg(long, env = "PORT")]
     port: Option<u16>,
+}
+
+#[derive(Debug, Args)]
+struct ServerStatusArgs {
+    /// Base URL of the running pimux server, for example http://localhost:3000. If the scheme is omitted, http:// is assumed.
+    #[arg(default_value = "http://127.0.0.1:3000")]
+    server_url: String,
 }
 
 #[derive(Debug, Args)]
@@ -123,7 +132,7 @@ struct AgentInstallArgs {
     #[command(flatten)]
     agent: AgentRunArgs,
     /// Overwrite an existing bundled pimux live extension if its contents differ
-    #[arg(long)]
+    #[arg(long, alias = "force")]
     force_extension: bool,
 }
 
@@ -247,6 +256,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match cli.command {
         Commands::Server { command } => match command {
             None => server::start().await?,
+            Some(ServerCommand::Status(args)) => {
+                print!("{}", server::status(&args.server_url).await?);
+            }
             Some(ServerCommand::Install(args)) => {
                 let result = server::install_service(server::ServiceConfig { port: args.port })?;
                 println!(

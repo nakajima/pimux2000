@@ -35,6 +35,7 @@ final class ScreenshotTests: XCTestCase {
 	func testSlashCommandsScreenshot() throws {
 		let app = launchApp(for: "slash-commands")
 		openSession(named: "Programmatic screenshot workflow", in: app)
+		hideSidebarIfNeeded(in: app)
 
 		let composer = app.textFields["Send a message"]
 		XCTAssertTrue(composer.waitForExistence(timeout: 5))
@@ -58,6 +59,7 @@ final class ScreenshotTests: XCTestCase {
 			"-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryM",
 		]
 		app.launchEnvironment["TZ"] = "UTC"
+		app.launchArguments += ["--uitesting-force-dark-mode"]
 		if isPadDevice {
 			app.launchArguments += ["--uitesting-force-landscape"]
 		}
@@ -86,6 +88,14 @@ final class ScreenshotTests: XCTestCase {
 		let showSidebarButton = app.buttons["Show Sidebar"]
 		guard showSidebarButton.waitForExistence(timeout: 1) else { return }
 		showSidebarButton.tap()
+	}
+
+	private func hideSidebarIfNeeded(in app: XCUIApplication) {
+		guard isPadDevice else { return }
+		let toggleSidebarButton = app.buttons["Toggle Sidebar"]
+		guard toggleSidebarButton.waitForExistence(timeout: 1) else { return }
+		toggleSidebarButton.tap()
+		_ = app.buttons["Show Sidebar"].waitForExistence(timeout: 2)
 	}
 
 	private var isPadDevice: Bool {

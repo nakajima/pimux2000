@@ -2,7 +2,9 @@ mod postgres_backup;
 
 use std::{
     collections::HashMap,
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     path::{Path as FsPath, PathBuf},
     process::Command,
     sync::{
@@ -30,7 +32,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::{sink::SinkExt, stream::StreamExt};
 use mdns_sd::{DaemonEvent, ServiceDaemon, ServiceInfo};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
     sync::{Mutex, RwLock, mpsc, oneshot},
     time::interval,
@@ -39,7 +41,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
     channel::{AgentToServerMessage, ServerToAgentMessage},
-    host::{HostIdentity, HostSessions},
+    host::{HostAuth, HostIdentity, HostSessions},
     message::{ImageContent, attachment_payload, normalize_mime_type},
     report::VersionResponse,
     session::{
@@ -411,6 +413,32 @@ struct BackfillFailure {
     error: String,
 }
 
+pub async fn status(server_url: &str) -> Result<String, BoxError> {
+    let normalized = crate::agent::normalize_server_url(server_url)?;
+    if normalized.inferred_http {
+        eprintln!(
+            "assuming http:// for server URL `{}` -> {}",
+            server_url, normalized.url
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let health_url = build_server_url(&normalized.url, "/health")?;
+    let version_url = build_server_url(&normalized.url, "/version")?;
+    let hosts_url = build_server_url(&normalized.url, "/hosts")?;
+
+    let health = fetch_status_text(&client, health_url).await?;
+    let version: VersionResponse = fetch_status_json(&client, version_url).await?;
+    let hosts: Vec<HostSessions> = fetch_status_json(&client, hosts_url).await?;
+
+    Ok(render_server_status(
+        &normalized.url,
+        health.trim(),
+        &version.version,
+        &hosts,
+    ))
+}
+
 pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
     let normalized = crate::agent::normalize_server_url(server_url)?;
     if normalized.inferred_http {
@@ -571,6 +599,103 @@ async fn record_postgres_transcript(
             session_id = %transcript.session_id,
             "failed to enqueue postgres transcript backup"
         );
+    }
+}
+
+async fn fetch_status_text(client: &reqwest::Client, url: reqwest::Url) -> Result<String, BoxError> {
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch {url}: {error}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("server responded to {url} with {status}: {body}").into());
+    }
+
+    Ok(response.text().await?)
+}
+
+async fn fetch_status_json<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+) -> Result<T, BoxError> {
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch {url}: {error}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("server responded to {url} with {status}: {body}").into());
+    }
+
+    Ok(response.json::<T>().await.map_err(|error| {
+        format!("server returned an invalid response from {url}: {error}")
+    })?)
+}
+
+fn render_server_status(
+    server_url: &str,
+    health: &str,
+    version: &str,
+    hosts: &[HostSessions],
+) -> String {
+    let connected_hosts = hosts.iter().filter(|host| host.connected).collect::<Vec<_>>();
+    let missing_hosts = hosts.iter().filter(|host| !host.connected).collect::<Vec<_>>();
+    let tracked_sessions = hosts.iter().map(|host| host.sessions.len()).sum::<usize>();
+
+    let mut output = String::new();
+    let health = if health.is_empty() { "OK" } else { health };
+
+    writeln!(output, "server URL: {server_url}").unwrap();
+    writeln!(output, "health: {health}").unwrap();
+    writeln!(output, "server version: {version}").unwrap();
+    writeln!(output, "tracked agents: {}", hosts.len()).unwrap();
+    writeln!(output, "connected agents: {}", connected_hosts.len()).unwrap();
+    writeln!(output, "missing agents: {}", missing_hosts.len()).unwrap();
+    writeln!(output, "tracked sessions: {tracked_sessions}").unwrap();
+    writeln!(output).unwrap();
+    writeln!(output, "connected agent details:").unwrap();
+
+    if connected_hosts.is_empty() {
+        writeln!(output, "- none").unwrap();
+    } else {
+        for host in connected_hosts {
+            writeln!(output, "- {}", format_host_status_line(host)).unwrap();
+        }
+    }
+
+    if !missing_hosts.is_empty() {
+        writeln!(output).unwrap();
+        writeln!(output, "missing agent details:").unwrap();
+        for host in missing_hosts {
+            writeln!(output, "- {}", format_host_status_line(host)).unwrap();
+        }
+    }
+
+    output
+}
+
+fn format_host_status_line(host: &HostSessions) -> String {
+    format!(
+        "{} (auth: {}, sessions: {}, last seen: {})",
+        host.location,
+        host_auth_label(host.auth),
+        host.sessions.len(),
+        host.last_seen_at
+            .as_ref()
+            .map(|timestamp| timestamp.to_rfc3339())
+            .unwrap_or_else(|| "never".to_string())
+    )
+}
+
+fn host_auth_label(auth: HostAuth) -> &'static str {
+    match auth {
+        HostAuth::None => "none",
+        HostAuth::Pk => "pk",
     }
 }
 
@@ -3463,6 +3588,39 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn renders_server_status_summary() {
+        let hosts = vec![
+            HostSessions {
+                location: "dev@mac".to_string(),
+                auth: HostAuth::None,
+                connected: true,
+                missing: false,
+                last_seen_at: Some(timestamp(0)),
+                sessions: vec![sample_active_session("session-1")],
+            },
+            HostSessions {
+                location: "old@host".to_string(),
+                auth: HostAuth::Pk,
+                connected: false,
+                missing: true,
+                last_seen_at: None,
+                sessions: Vec::new(),
+            },
+        ];
+
+        let output = render_server_status("https://example.com", "OK", "0.2.31", &hosts);
+        assert!(output.contains("server URL: https://example.com"));
+        assert!(output.contains("health: OK"));
+        assert!(output.contains("server version: 0.2.31"));
+        assert!(output.contains("tracked agents: 2"));
+        assert!(output.contains("connected agents: 1"));
+        assert!(output.contains("missing agents: 1"));
+        assert!(output.contains("tracked sessions: 1"));
+        assert!(output.contains("dev@mac (auth: none, sessions: 1, last seen: 1970-01-01T00:00:00+00:00)"));
+        assert!(output.contains("old@host (auth: pk, sessions: 0, last seen: never)"));
+    }
 
     #[tokio::test]
     async fn reports_hosts_and_sessions() {

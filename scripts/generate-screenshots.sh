@@ -9,6 +9,7 @@ RESULT_DIR="${PIMUX_SCREENSHOT_RESULT_DIR:-/tmp/pimux2000-screenshot-results}"
 DERIVED_DATA_PATH="${PIMUX_SCREENSHOT_DERIVED_DATA_PATH:-/tmp/pimux2000-screenshot-derived-data}"
 DEVICE_NAMES_CSV="${PIMUX_SCREENSHOT_DEVICES:-iPhone 16 Pro,iPad Pro 13-inch (M4)}"
 STATUS_BAR_ENABLED="${PIMUX_SCREENSHOT_STATUS_BAR:-1}"
+APPEARANCE="${PIMUX_SCREENSHOT_APPEARANCE:-dark}"
 
 mkdir -p "$OUTPUT_DIR" "$RESULT_DIR" "$DERIVED_DATA_PATH"
 
@@ -106,6 +107,11 @@ for resolved_device in "${RESOLVED_DEVICES[@]}"; do
 			--batteryLevel 100 >/dev/null || true
 	fi
 
+	ORIGINAL_APPEARANCE="$(xcrun simctl ui "$DEVICE_UDID" appearance 2>/dev/null || echo unknown)"
+	if [[ "$APPEARANCE" == "light" || "$APPEARANCE" == "dark" ]]; then
+		xcrun simctl ui "$DEVICE_UDID" appearance "$APPEARANCE" >/dev/null
+	fi
+
 	echo "==> Running ScreenshotTests on $DEVICE_NAME"
 	xcodebuild test \
 		-project "$ROOT_DIR/pimux2000.xcodeproj" \
@@ -185,7 +191,16 @@ for imageURL in imageURLs {
 	guard cgImage.height > cgImage.width else { continue }
 	let targetHeight = Int(round(Double(cgImage.width) * 3.0 / 4.0))
 	guard targetHeight < cgImage.height else { continue }
-	let cropRect = CGRect(x: 0, y: 0, width: cgImage.width, height: targetHeight)
+
+	let stem = imageURL.deletingPathExtension().lastPathComponent
+	let originY: Int
+	if stem == "slash-commands" {
+		originY = cgImage.height - targetHeight
+	} else {
+		originY = 0
+	}
+
+	let cropRect = CGRect(x: 0, y: originY, width: cgImage.width, height: targetHeight)
 	guard let croppedImage = cgImage.cropping(to: cropRect) else { continue }
 
 	let bitmap = NSBitmapImageRep(cgImage: croppedImage)
@@ -197,6 +212,9 @@ SWIFT
 
 	if [[ "$STATUS_BAR_ENABLED" != "0" ]]; then
 		xcrun simctl status_bar "$DEVICE_UDID" clear >/dev/null 2>&1 || true
+	fi
+	if [[ "$ORIGINAL_APPEARANCE" == "light" || "$ORIGINAL_APPEARANCE" == "dark" ]]; then
+		xcrun simctl ui "$DEVICE_UDID" appearance "$ORIGINAL_APPEARANCE" >/dev/null 2>&1 || true
 	fi
 
 done
