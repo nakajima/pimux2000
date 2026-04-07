@@ -73,7 +73,7 @@ struct SidebarView: View {
 				}
 			}
 		}
-		.animation(.default, value: sessions)
+		.animation(.default, value: sessions.map(\.session.sessionID))
 		.refreshable {
 			guard let pimuxServerClient else { return }
 			let syncer = PiSessionSync(dbContext: dbContext, pimuxServerClient: pimuxServerClient)
