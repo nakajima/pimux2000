@@ -195,6 +195,7 @@ Response shape:
 Notes:
 - Hosts are currently sorted by `location`.
 - Treat session ordering as non-contractual; sort explicitly in the app if you care.
+- Host locations are canonicalized so a trailing `.local` hostname suffix is stripped, for example `nakajima@macstudio.local` becomes `nakajima@macstudio`.
 - Hosts are now persisted as an expected-host registry, so a host can still appear here as `missing: true` even when it is currently offline.
 - When a host is missing, `sessions` is its last known snapshot from the most recent successful host report.
 
@@ -717,6 +718,7 @@ Supported options:
 
 Behavior:
 - auto-normalizes `localhost:3000` to `http://localhost:3000`
+- canonicalizes the reported host location by stripping a trailing `.local` hostname suffix
 - verifies `GET /health` and `GET /version` before starting
 - opens a persistent outbound WebSocket to `/agent/connect`
 

@@ -25,7 +25,7 @@ use tokio::{
 
 use crate::{
     channel::{AgentToServerMessage, ServerToAgentMessage},
-    host::{HostAuth, HostIdentity},
+    host::{HostAuth, HostIdentity, normalize_host_location},
     message::{ImageContent, attachment_payload, strip_inline_image_data},
     report::{ReportPayload, VersionResponse},
     session::{
@@ -202,10 +202,10 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
         pi_agent_dir: pi_agent_dir.clone(),
     };
     let host = HostIdentity {
-        location: match config.location {
+        location: normalize_host_location(&match config.location {
             Some(location) => location,
             None => detect_host_location()?,
-        },
+        }),
         auth: config.auth,
     };
     let health_url = build_server_url(&config.server_url, "/health")?;
@@ -1306,7 +1306,7 @@ fn detect_host_location() -> Result<String, BoxError> {
         .into_string()
         .map_err(|_| "hostname contains invalid UTF-8")?;
 
-    Ok(format!("{user}@{hostname}"))
+    Ok(normalize_host_location(&format!("{user}@{hostname}")))
 }
 
 fn create_watcher(

@@ -41,7 +41,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
     channel::{AgentToServerMessage, ServerToAgentMessage},
-    host::{HostAuth, HostIdentity, HostSessions},
+    host::{HostAuth, HostIdentity, HostSessions, normalize_host_location},
     message::{ImageContent, attachment_payload, normalize_mime_type},
     report::VersionResponse,
     session::{
@@ -979,8 +979,9 @@ async fn session_messages(
     Path(session_id): Path<String>,
     Query(query): Query<SessionMessagesQuery>,
 ) -> Result<Json<ApiSessionMessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let normalized_host_location = query.host_location.as_deref().map(normalize_host_location);
     let snapshot =
-        resolve_session_snapshot(&state, &session_id, query.host_location.as_deref()).await?;
+        resolve_session_snapshot(&state, &session_id, normalized_host_location.as_deref()).await?;
     Ok(Json(ApiSessionMessagesResponse::from(&snapshot)))
 }
 
@@ -2010,6 +2011,8 @@ async fn register_agent_connection(
     sender: mpsc::UnboundedSender<ServerToAgentMessage>,
     close_sender: mpsc::UnboundedSender<()>,
 ) -> bool {
+    let host = host.normalized();
+
     let previous_connection = {
         let mut connections = state.agent_connections.write().await;
         connections.insert(
@@ -2064,6 +2067,7 @@ async fn register_agent_connection(
 }
 
 async fn update_host_snapshot(state: &AppState, host: HostIdentity, sessions: Vec<ActiveSession>) {
+    let host = host.normalized();
     let now = Utc::now();
     let session_ids = sessions
         .iter()
@@ -3167,23 +3171,54 @@ fn load_host_registry(path: &FsPath) -> Result<HashMap<String, HostRecord>, BoxE
     }
 
     let persisted: PersistedHostRegistry = serde_json::from_str(&contents)?;
-    let hosts = persisted
-        .hosts
-        .into_iter()
-        .map(|record| {
-            (
-                record.host.location.clone(),
-                HostRecord {
-                    host: record.host,
-                    sessions: record.sessions,
-                    connected: false,
-                    last_seen_at: record.last_seen_at,
-                },
-            )
-        })
-        .collect();
+    let mut hosts = HashMap::new();
+
+    for record in persisted.hosts {
+        let normalized_host = record.host.normalized();
+        let incoming = HostRecord {
+            host: normalized_host.clone(),
+            sessions: record.sessions,
+            connected: false,
+            last_seen_at: record.last_seen_at,
+        };
+
+        match hosts.get_mut(&normalized_host.location) {
+            Some(existing) => merge_host_record(existing, incoming),
+            None => {
+                hosts.insert(normalized_host.location.clone(), incoming);
+            }
+        }
+    }
 
     Ok(hosts)
+}
+
+fn merge_host_record(existing: &mut HostRecord, incoming: HostRecord) {
+    existing.host = incoming.host;
+    existing.connected |= incoming.connected;
+    existing.last_seen_at = existing.last_seen_at.max(incoming.last_seen_at);
+    existing.sessions = merge_session_snapshots(existing.sessions.clone(), incoming.sessions);
+}
+
+fn merge_session_snapshots(
+    existing: Vec<ActiveSession>,
+    incoming: Vec<ActiveSession>,
+) -> Vec<ActiveSession> {
+    let mut sessions_by_id = existing
+        .into_iter()
+        .map(|session| (session.id.clone(), session))
+        .collect::<HashMap<_, _>>();
+
+    for session in incoming {
+        match sessions_by_id.get(&session.id) {
+            Some(current) if current.updated_at >= session.updated_at => {}
+            _ => {
+                sessions_by_id.insert(session.id.clone(), session);
+            }
+        }
+    }
+
+    sessions_by_id.into_values().collect()
 }
 
 fn persist_host_registry(
@@ -4818,6 +4853,52 @@ mod tests {
         assert_eq!(record.sessions[0].id, "session-1");
         assert!(!record.connected);
         assert_eq!(record.last_seen_at, Some(timestamp(5_000)));
+
+        let _ = std::fs::remove_file(&path);
+        let _ = path.parent().map(std::fs::remove_dir_all);
+    }
+
+    #[test]
+    fn load_host_registry_normalizes_and_merges_local_suffix_hosts() {
+        let path = unique_test_path("expected-hosts-normalized.json");
+        let contents = serde_json::json!({
+            "hosts": [
+                {
+                    "host": { "location": "nakajima@macstudio", "auth": "none" },
+                    "sessions": [sample_active_session("session-older")],
+                    "last_seen_at": timestamp(1_000),
+                },
+                {
+                    "host": { "location": "nakajima@macstudio.local", "auth": "none" },
+                    "sessions": [sample_active_session_with_updated("session-older", timestamp(3_000)), sample_active_session("session-new")],
+                    "last_seen_at": timestamp(5_000),
+                }
+            ]
+        });
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&contents).unwrap()).unwrap();
+
+        let loaded = load_host_registry(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let record = loaded.get("nakajima@macstudio").unwrap();
+        assert_eq!(record.host.location, "nakajima@macstudio");
+        assert_eq!(record.last_seen_at, Some(timestamp(5_000)));
+        assert_eq!(record.sessions.len(), 2);
+        assert!(
+            record
+                .sessions
+                .iter()
+                .any(|session| session.id == "session-new")
+        );
+        assert_eq!(
+            record
+                .sessions
+                .iter()
+                .find(|session| session.id == "session-older")
+                .unwrap()
+                .updated_at,
+            timestamp(3_000)
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = path.parent().map(std::fs::remove_dir_all);
