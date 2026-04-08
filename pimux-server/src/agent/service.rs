@@ -373,9 +373,12 @@ fn agent_run_args(config: &Config) -> Vec<String> {
         config.server_url.clone(),
         "--auth".to_string(),
         host_auth_arg(config.auth).to_string(),
-        "--summary-model".to_string(),
-        config.summary_model.clone(),
     ];
+
+    if let Some(summary_model) = &config.summary_model {
+        args.push("--summary-model".to_string());
+        args.push(summary_model.clone());
+    }
 
     if let Some(location) = &config.location {
         args.push("--location".to_string());
@@ -662,7 +665,7 @@ mod tests {
             location: Some("dev@mac".to_string()),
             auth: HostAuth::Pk,
             pi_agent_dir: Some(PathBuf::from("/tmp/pi agent")),
-            summary_model: DEFAULT_SUMMARY_MODEL.to_string(),
+            summary_model: Some(DEFAULT_SUMMARY_MODEL.to_string()),
         }
     }
 
@@ -679,6 +682,28 @@ mod tests {
                 "pk",
                 "--summary-model",
                 crate::agent::DEFAULT_SUMMARY_MODEL,
+                "--location",
+                "dev@mac",
+                "--pi-agent-dir",
+                "/tmp/pi agent",
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_agent_run_args_without_summary_override() {
+        let mut config = sample_config();
+        config.summary_model = None;
+
+        let args = agent_run_args(&config);
+        assert_eq!(
+            args,
+            vec![
+                "agent",
+                "run",
+                "http://127.0.0.1:3000",
+                "--auth",
+                "pk",
                 "--location",
                 "dev@mac",
                 "--pi-agent-dir",

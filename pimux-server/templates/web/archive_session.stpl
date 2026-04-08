@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= summary %> · pimux archive</title>
+  <style><%- common_style %></style>
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">pimux</p>
+        <h1><%= summary %></h1>
+        <p class="muted"><code><%= host_location %></code> · <code><%= session_id %></code></p>
+      </div>
+      <nav class="nav">
+        <a href="/">status</a>
+        <a href="/ui/sessions">archive sessions</a>
+      </nav>
+    </header>
+
+    <section class="card session-card">
+      <ul class="key-value-list">
+        <li>
+          <span class="key">Host auth</span>
+          <strong><%= host_auth %></strong>
+        </li>
+        <li>
+          <span class="key">Created</span>
+          <strong><%= created_at %></strong>
+        </li>
+        <li>
+          <span class="key">Updated</span>
+          <strong><%= updated_at %></strong>
+        </li>
+        <li>
+          <span class="key">Last user message</span>
+          <strong><%= last_user_message_at %></strong>
+        </li>
+        <li>
+          <span class="key">Last assistant message</span>
+          <strong><%= last_assistant_message_at %></strong>
+        </li>
+        <li>
+          <span class="key">Last seen by archive</span>
+          <strong><%= last_seen_at %></strong>
+        </li>
+        <li>
+          <span class="key">Model</span>
+          <strong><%= model %></strong>
+        </li>
+        <li>
+          <span class="key">Working directory</span>
+          <strong><%= cwd %></strong>
+        </li>
+        <li>
+          <span class="key">Transcript freshness</span>
+          <strong><%= transcript_freshness %></strong>
+        </li>
+        <li>
+          <span class="key">Activity</span>
+          <strong><%= activity %></strong>
+        </li>
+        <li>
+          <span class="key">Archived messages</span>
+          <strong><%= message_count %></strong>
+        </li>
+      </ul>
+
+      <% if let Some(selected_message_key) = &selected_message_key { %>
+        <div class="callout">
+          <% if selected_message_found { %>
+            Highlighting message <code><%= selected_message_key %></code>.
+          <% } else { %>
+            Message <code><%= selected_message_key %></code> was not found in the archived transcript. Showing the full session instead.
+          <% } %>
+        </div>
+      <% } %>
+    </section>
+
+    <section class="card session-card" style="margin-top: 18px;">
+      <% if messages.is_empty() { %>
+        <p class="empty">No archived messages were found for this session.</p>
+      <% } else { %>
+        <ol class="message-list">
+          <% for message in &messages { %>
+            <li id="<%= message.anchor_id %>" class="message-item<% if message.is_selected { %> selected<% } %>">
+              <div class="message-header">
+                <div>
+                  <span class="role-pill <%= message.role_class %>"><%= message.role %></span>
+                  <span class="meta"><%= message.created_at %></span>
+                  <% if let Some(tool_name) = &message.tool_name { %>
+                    <span class="meta">tool: <code><%= tool_name %></code></span>
+                  <% } %>
+                </div>
+                <a class="permalink" href="<%= message.permalink_url %>" title="Permalink to this message">¶</a>
+              </div>
+              <pre class="message-body"><%= message.body %></pre>
+              <span class="meta"><code><%= message.message_key %></code></span>
+            </li>
+          <% } %>
+        </ol>
+      <% } %>
+    </section>
+  </main>
+</body>
+</html>

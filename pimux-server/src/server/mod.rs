@@ -1,4 +1,5 @@
 mod postgres_backup;
+mod web;
 
 use std::{
     collections::HashMap,
@@ -361,6 +362,7 @@ pub fn restart_service_if_installed() -> Result<Option<&'static str>, BoxError> 
 
 fn app(state: AppState) -> Router {
     Router::new()
+        .route("/", get(web::dashboard))
         .route("/health", get(health))
         .route("/version", get(version))
         .route("/hosts", get(hosts))
@@ -393,6 +395,8 @@ fn app(state: AppState) -> Router {
         )
         .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/agent/connect", get(agent_connect))
+        .route("/ui/sessions", get(web::archive_sessions))
+        .route("/ui/session", get(web::archive_session))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -3973,6 +3977,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serves_html_status_dashboard() {
+        let state = AppState::default();
+        update_host_snapshot(
+            &state,
+            HostIdentity {
+                location: "dev@mac".to_string(),
+                auth: HostAuth::None,
+            },
+            vec![sample_active_session("session-1")],
+        )
+        .await;
+
+        let app = app(state);
+        let response = app.oneshot(empty_request(Method::GET, "/")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+
+        let body = text_response(response).await;
+        assert!(body.contains("Server status"));
+        assert!(body.contains("dev@mac"));
+        assert!(body.contains("session-1"));
+    }
+
+    #[tokio::test]
+    async fn archive_sessions_ui_reports_when_archive_is_disabled() {
+        let app = app(AppState::default());
+        let response = app
+            .oneshot(empty_request(Method::GET, "/ui/sessions"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = text_response(response).await;
+        assert!(body.contains("archive is disabled"));
+        assert!(body.contains(postgres_backup::POSTGRES_BACKUP_URL_ENV));
+    }
+
+    #[tokio::test]
     async fn replacing_agent_connection_closes_previous_connection() {
         let state = AppState::default();
         let host = HostIdentity {
@@ -5038,5 +5083,10 @@ mod tests {
     {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn text_response(response: axum::response::Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 }

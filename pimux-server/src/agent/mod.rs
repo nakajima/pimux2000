@@ -45,8 +45,11 @@ pub fn resolve_pi_agent_dir(
     discovery::resolve_pi_agent_dir(override_dir)
 }
 
-pub fn resolve_summary_model(pi_agent_dir: &Path, requested_model: &str) -> String {
-    summarizer::resolve_summary_model(pi_agent_dir, requested_model)
+pub fn resolve_summary_model_or_default(
+    pi_agent_dir: &Path,
+    requested_model: Option<&str>,
+) -> String {
+    summarizer::resolve_summary_model_or_default(pi_agent_dir, requested_model)
 }
 
 const SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -56,7 +59,7 @@ pub struct Config {
     pub location: Option<String>,
     pub auth: HostAuth,
     pub pi_agent_dir: Option<PathBuf>,
-    pub summary_model: String,
+    pub summary_model: Option<String>,
 }
 
 #[derive(Debug)]
@@ -67,7 +70,7 @@ pub struct NormalizedServerUrl {
 
 pub struct ListConfig {
     pub pi_agent_dir: Option<PathBuf>,
-    pub summary_model: String,
+    pub summary_model: Option<String>,
     pub date: Option<String>,
 }
 
@@ -131,7 +134,7 @@ pub async fn list(config: ListConfig) -> Result<(), BoxError> {
     eprintln!("discovering sessions in {}...", pi_agent_dir.display());
 
     let summary_config = summarizer::Config {
-        model: summarizer::resolve_summary_model(&pi_agent_dir, &config.summary_model),
+        model: resolve_summary_model_or_default(&pi_agent_dir, config.summary_model.as_deref()),
         pi_agent_dir: pi_agent_dir.clone(),
     };
     let mut summary_cache = summarizer::SummaryCache::load(&pi_agent_dir);
@@ -208,7 +211,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     let pi_agent_dir = discovery::resolve_pi_agent_dir(config.pi_agent_dir)?;
     let session_root = discovery::session_root(&pi_agent_dir);
     let summary_config = summarizer::Config {
-        model: summarizer::resolve_summary_model(&pi_agent_dir, &config.summary_model),
+        model: resolve_summary_model_or_default(&pi_agent_dir, config.summary_model.as_deref()),
         pi_agent_dir: pi_agent_dir.clone(),
     };
     let host = HostIdentity {

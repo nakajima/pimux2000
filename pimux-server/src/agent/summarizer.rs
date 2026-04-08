@@ -15,8 +15,9 @@ use super::discovery::{DiscoveredSession, SessionFingerprint};
 
 pub const DEFAULT_SUMMARY_MODEL: &str = "anthropic/claude-haiku-4-5";
 
-const FALLBACK_MODELS: &[(&str, &str)] = &[
+const PROVIDER_SUMMARY_MODELS: &[(&str, &str)] = &[
     ("anthropic", "anthropic/claude-haiku-4-5"),
+    ("openai-codex", "openai-codex/gpt-5.4-mini"),
     ("openai", "openai/gpt-4o-mini"),
     ("google", "google/gemini-2.0-flash"),
 ];
@@ -40,7 +41,7 @@ pub fn resolve_summary_model(pi_agent_dir: &Path, requested_model: &str) -> Stri
         return requested_model.to_string();
     }
 
-    for &(fallback_provider, fallback_model) in FALLBACK_MODELS {
+    for &(fallback_provider, fallback_model) in PROVIDER_SUMMARY_MODELS {
         if fallback_provider == provider {
             continue;
         }
@@ -56,6 +57,52 @@ pub fn resolve_summary_model(pi_agent_dir: &Path, requested_model: &str) -> Stri
     requested_model.to_string()
 }
 
+pub fn resolve_summary_model_or_default(
+    pi_agent_dir: &Path,
+    requested_model: Option<&str>,
+) -> String {
+    let requested_model = requested_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match requested_model {
+        Some(requested_model) => resolve_summary_model(pi_agent_dir, requested_model),
+        None => default_provider_summary_model(pi_agent_dir)
+            .map(|model| resolve_summary_model(pi_agent_dir, model))
+            .unwrap_or_else(|| resolve_summary_model(pi_agent_dir, DEFAULT_SUMMARY_MODEL)),
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PiSettings {
+    #[serde(default, rename = "defaultProvider")]
+    default_provider: Option<String>,
+}
+
+fn default_provider_summary_model(pi_agent_dir: &Path) -> Option<&'static str> {
+    let settings = load_pi_settings(pi_agent_dir)?;
+    let provider = settings.default_provider?.trim().to_string();
+    if provider.is_empty() {
+        return None;
+    }
+
+    PROVIDER_SUMMARY_MODELS
+        .iter()
+        .find_map(|(candidate, model)| {
+            if *candidate == provider {
+                Some(*model)
+            } else {
+                None
+            }
+        })
+}
+
+fn load_pi_settings(pi_agent_dir: &Path) -> Option<PiSettings> {
+    let settings_path = pi_agent_dir.join("settings.json");
+    let contents = fs::read_to_string(settings_path).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
 fn extract_provider(model: &str) -> Option<&str> {
     let provider = model.split('/').next()?;
     if provider.is_empty() || !model.contains('/') {
@@ -67,7 +114,7 @@ fn extract_provider(model: &str) -> Option<&str> {
 fn has_provider_auth(pi_agent_dir: &Path, provider: &str) -> bool {
     let env_vars: &[&str] = match provider {
         "anthropic" => &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-        "openai" => &["OPENAI_API_KEY"],
+        "openai" | "openai-codex" => &["OPENAI_API_KEY"],
         "google" => &["GEMINI_API_KEY"],
         "groq" => &["GROQ_API_KEY"],
         "xai" => &["XAI_API_KEY"],
@@ -805,6 +852,15 @@ mod tests {
     }
 
     #[test]
+    fn resolve_model_falls_back_to_openai_codex_when_available() {
+        let dir = tempdir_with_auth("resolve_fallback_codex", &["openai-codex"]);
+        assert_eq!(
+            resolve_summary_model(&dir, "anthropic/claude-haiku-4-5"),
+            "openai-codex/gpt-5.4-mini"
+        );
+    }
+
+    #[test]
     fn resolve_model_returns_requested_when_no_auth_at_all() {
         let dir = tempdir_with_auth("resolve_none", &[]);
         assert_eq!(
@@ -813,7 +869,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_model_or_default_uses_default_provider_summary_model() {
+        let dir = tempdir_with_auth_and_settings(
+            "resolve_default_provider",
+            &["openai-codex"],
+            Some("openai-codex"),
+        );
+        assert_eq!(
+            resolve_summary_model_or_default(&dir, None),
+            "openai-codex/gpt-5.4-mini"
+        );
+    }
+
+    #[test]
+    fn resolve_model_or_default_falls_back_from_default_provider_when_needed() {
+        let dir = tempdir_with_auth_and_settings(
+            "resolve_default_provider_fallback",
+            &["openai-codex"],
+            Some("anthropic"),
+        );
+        assert_eq!(
+            resolve_summary_model_or_default(&dir, None),
+            "openai-codex/gpt-5.4-mini"
+        );
+    }
+
+    #[test]
+    fn resolve_model_or_default_prefers_explicit_override() {
+        let dir = tempdir_with_auth_and_settings(
+            "resolve_explicit_override",
+            &["anthropic", "openai-codex"],
+            Some("openai-codex"),
+        );
+        assert_eq!(
+            resolve_summary_model_or_default(&dir, Some("anthropic/claude-haiku-4-5")),
+            "anthropic/claude-haiku-4-5"
+        );
+    }
+
+    #[test]
+    fn resolve_model_or_default_keeps_legacy_default_without_settings() {
+        let dir = tempdir_with_auth("resolve_default_legacy", &["anthropic"]);
+        assert_eq!(
+            resolve_summary_model_or_default(&dir, None),
+            "anthropic/claude-haiku-4-5"
+        );
+    }
+
     fn tempdir_with_auth(name: &str, providers: &[&str]) -> PathBuf {
+        tempdir_with_auth_and_settings(name, providers, None)
+    }
+
+    fn tempdir_with_auth_and_settings(
+        name: &str,
+        providers: &[&str],
+        default_provider: Option<&str>,
+    ) -> PathBuf {
         let dir = env::temp_dir().join(format!("pimux-test-{name}-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let mut auth = serde_json::Map::new();
@@ -834,6 +946,19 @@ mod tests {
             serde_json::to_vec_pretty(&auth).unwrap(),
         )
         .unwrap();
+
+        if let Some(default_provider) = default_provider {
+            fs::write(
+                dir.join("settings.json"),
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "defaultProvider": default_provider,
+                    "defaultModel": "ignored-for-summary-tests"
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
         dir
     }
 

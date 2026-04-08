@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pimux archive</title>
+  <style><%- common_style %></style>
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">pimux</p>
+        <h1>Archived sessions</h1>
+        <p class="muted">Showing up to <code><%= total_sessions %></code> archived sessions from Postgres.</p>
+      </div>
+      <nav class="nav">
+        <a href="/">status</a>
+        <a href="/hosts">/hosts</a>
+        <a href="/sessions">/sessions</a>
+      </nav>
+    </header>
+
+    <section class="card list-card">
+      <% if sessions.is_empty() { %>
+        <p class="empty">No archived sessions were found.</p>
+      <% } else { %>
+        <ul class="archive-list">
+          <% for session in &sessions { %>
+            <li class="archive-item">
+              <div class="row-header">
+                <div>
+                  <h2><a href="<%= session.session_url %>"><%= session.summary %></a></h2>
+                  <span class="meta"><code><%= session.host_location %></code> · <code><%= session.session_id %></code></span>
+                  <span class="meta">updated: <%= session.updated_at %> · last seen: <%= session.last_seen_at %></span>
+                  <span class="meta"><%= session.cwd %> · <%= session.model %></span>
+                </div>
+                <div class="actions">
+                  <a href="<%= session.session_url %>">open session</a>
+                </div>
+              </div>
+            </li>
+          <% } %>
+        </ul>
+      <% } %>
+    </section>
+  </main>
+</body>
+</html>

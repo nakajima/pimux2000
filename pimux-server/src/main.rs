@@ -47,9 +47,9 @@ enum Commands {
         /// Override pi's agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)
         #[arg(long, env = "PI_CODING_AGENT_DIR")]
         pi_agent_dir: Option<PathBuf>,
-        /// Model to use when generating session titles via pi
-        #[arg(long, env = "PIMUX_SUMMARY_MODEL", default_value = agent::DEFAULT_SUMMARY_MODEL)]
-        summary_model: String,
+        /// Model to use when generating session titles via pi. Defaults to a provider-appropriate summary model for pi's default provider.
+        #[arg(long, env = "PIMUX_SUMMARY_MODEL")]
+        summary_model: Option<String>,
         /// Filter sessions to a local calendar day in the system timezone, for example 2026-03-27
         #[arg(long)]
         date: Option<String>,
@@ -107,9 +107,12 @@ struct ReportDayArgs {
     /// Override pi's agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)
     #[arg(long, env = "PI_CODING_AGENT_DIR")]
     pi_agent_dir: Option<PathBuf>,
-    /// Model to use when generating report summaries via pi
-    #[arg(long, env = "PIMUX_SUMMARY_MODEL", default_value = agent::DEFAULT_SUMMARY_MODEL)]
-    summary_model: String,
+    /// Model to use when generating report summaries via pi. Defaults to a provider-appropriate summary model for pi's default provider.
+    #[arg(long, env = "PIMUX_SUMMARY_MODEL")]
+    summary_model: Option<String>,
+    /// Base URL for the pimux web UI used in report footnote links. Defaults to http://127.0.0.1:3000.
+    #[arg(long, env = report::REPORT_UI_BASE_URL_ENV)]
+    ui_base_url: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -146,9 +149,9 @@ struct AgentRunArgs {
     /// Override pi's agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)
     #[arg(long, env = "PI_CODING_AGENT_DIR")]
     pi_agent_dir: Option<PathBuf>,
-    /// Model to use when generating session titles via pi
-    #[arg(long, env = "PIMUX_SUMMARY_MODEL", default_value = agent::DEFAULT_SUMMARY_MODEL)]
-    summary_model: String,
+    /// Model to use when generating session titles via pi. Defaults to a provider-appropriate summary model for pi's default provider.
+    #[arg(long, env = "PIMUX_SUMMARY_MODEL")]
+    summary_model: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -363,6 +366,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     date: args.date,
                     pi_agent_dir: args.pi_agent_dir,
                     summary_model: args.summary_model,
+                    ui_base_url: args.ui_base_url,
                 })
                 .await?;
             }

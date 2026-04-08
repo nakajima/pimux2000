@@ -572,7 +572,7 @@ pimux list --date 2026-03-27
 
 Options:
 - `--pi-agent-dir <path>`
-- `--summary-model <model>`
+- `--summary-model <model>` — optional override; if omitted, pimux picks a provider-appropriate summary model based on pi's configured default provider and otherwise falls back to its legacy default summary model
 - `--date YYYY-MM-DD` — optional local calendar day filter using the system timezone
 
 When `--date` is provided, it filters by `updatedAt` using the same local-day semantics as `GET /sessions?date=...`.
@@ -590,15 +590,18 @@ PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux report day --date 2026-04-08
 Options:
 - `--date YYYY-MM-DD` — optional local calendar day filter using the system timezone; defaults to today
 - `--pi-agent-dir <path>`
-- `--summary-model <model>`
+- `--summary-model <model>` — optional override; if omitted, pimux picks a provider-appropriate summary model based on pi's configured default provider and otherwise falls back to its legacy default summary model
+- `--ui-base-url <url>` — optional web UI base URL for report footnote links; defaults to `http://127.0.0.1:3000`
 
 Behavior:
 - requires `PIMUX_BACKUP_POSTGRES_URL`
 - reads archived messages for that local day across all hosts
 - groups output by normalized project cwd, for example both `/Users/alice/apps/foo` and `/home/alice/apps/foo` render as `~/apps/foo`
-- prints `Worked on` bullets plus `Accomplished` bullets with supporting excerpts nested under each accomplishment
+- prints `Worked on` bullets, `Accomplished` bullets, and an `LLM misses` section for clear assistant mis-scopes or corrections seen in the archived sessions
+- includes supporting excerpts as Markdown footnotes when they are good fits, but does not force every accomplishment to have one
+- footnotes include links into `/ui/session?...&message=...` so you can jump from report evidence to the archived web UI
 - does not show hosts or session counts in the rendered report
-- uses `pi` to synthesize concise project-level bullets from the archived excerpts, with a heuristic fallback if that summarization fails
+- uses `pi` to synthesize concise project-level bullets from cleaned archived evidence, with a heuristic fallback if that summarization fails
 
 ## Server service details
 
@@ -612,6 +615,11 @@ pimux server
 
 The server listens on port `3000` by default.
 You can still override that with the `PORT` environment variable.
+
+It also serves a small built-in web UI:
+- `/` — live server status dashboard for tracked hosts and sessions
+- `/ui/sessions` — archived sessions browser when Postgres backup is enabled
+- `/ui/session?host=...&id=...&message=...` — archived session transcript view with per-message permalinks
 
 When the server starts, it also advertises itself on the local network via Bonjour / DNS-SD as `_pimux._tcp.local.` so the iOS app can discover nearby servers automatically.
 If you want to disable that advertisement, set:
@@ -736,7 +744,7 @@ Supported options:
 - `--location <user@host>`
 - `--auth none|pk`
 - `--pi-agent-dir <path>`
-- `--summary-model <model>`
+- `--summary-model <model>` — optional override; if omitted, pimux picks a provider-appropriate summary model based on pi's configured default provider and otherwise falls back to its legacy default summary model
 
 Behavior:
 - auto-normalizes `localhost:3000` to `http://localhost:3000`
@@ -757,7 +765,7 @@ Supported options:
 - `--location <user@host>`
 - `--auth none|pk`
 - `--pi-agent-dir <path>`
-- `--summary-model <model>`
+- `--summary-model <model>` — optional override; if omitted, the installed service follows pi's configured default provider and pimux falls back to its legacy default summary model only when needed
 - `--force-extension` — overwrite an existing bundled live extension file if it differs
 
 Behavior:
