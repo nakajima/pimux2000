@@ -449,6 +449,7 @@ pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
     }
 
     let mut store = postgres_backup::connect_from_env_required().await?;
+    update_installed_service_file();
     let client = reqwest::Client::new();
     let hosts_url = build_server_url(&normalized.url, "/hosts")?;
     let response = client
@@ -3612,6 +3613,54 @@ fn launchctl_domain() -> Result<String, BoxError> {
 
 fn home_dir() -> Result<PathBuf, BoxError> {
     Ok(PathBuf::from(env::var("HOME")?))
+}
+
+fn update_installed_service_file() {
+    let result = match env::consts::OS {
+        "linux" => update_systemd_unit_file(),
+        "macos" => update_launch_agent_file(),
+        _ => return,
+    };
+    match result {
+        Ok(Some(path)) => info!(path = %path.display(), "updated installed service file"),
+        Ok(None) => {}
+        Err(error) => warn!(%error, "failed to update installed service file"),
+    }
+}
+
+fn update_systemd_unit_file() -> Result<Option<PathBuf>, BoxError> {
+    let unit_path = systemd_unit_path()?;
+    if !unit_path.exists() {
+        return Ok(None);
+    }
+    let executable = env::current_exe()?;
+    let port = env_var_if_set("PORT").and_then(|v| v.parse().ok());
+    let backup_postgres_url = env_var_if_set(postgres_backup::POSTGRES_BACKUP_URL_ENV);
+    let unit = render_systemd_unit(&executable, port, backup_postgres_url.as_deref());
+    write_file(&unit_path, &unit)?;
+    let _ = run_command("systemctl", &["--user", "daemon-reload"]);
+    Ok(Some(unit_path))
+}
+
+fn update_launch_agent_file() -> Result<Option<PathBuf>, BoxError> {
+    let plist_path = launch_agent_path()?;
+    if !plist_path.exists() {
+        return Ok(None);
+    }
+    let executable = env::current_exe()?;
+    let port = env_var_if_set("PORT").and_then(|v| v.parse().ok());
+    let backup_postgres_url = env_var_if_set(postgres_backup::POSTGRES_BACKUP_URL_ENV);
+    let stdout_log = launch_agent_log_path("out")?;
+    let stderr_log = launch_agent_log_path("err")?;
+    let plist = render_launch_agent_plist(
+        &executable,
+        port,
+        backup_postgres_url.as_deref(),
+        &stdout_log,
+        &stderr_log,
+    );
+    write_file(&plist_path, &plist)?;
+    Ok(Some(plist_path))
 }
 
 fn write_file(path: &FsPath, contents: &str) -> Result<(), BoxError> {
