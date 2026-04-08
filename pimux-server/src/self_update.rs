@@ -494,8 +494,7 @@ mod tests {
             },
         ];
 
-        let selected = select_asset(&assets, "pimux", "0.1.0", "aarch64-apple-darwin")
-            .unwrap();
+        let selected = select_asset(&assets, "pimux", "0.1.0", "aarch64-apple-darwin").unwrap();
         assert_eq!(
             selected.browser_download_url,
             "https://example.com/macos-aarch64"

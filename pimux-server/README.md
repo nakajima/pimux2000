@@ -677,6 +677,7 @@ Notes:
 - it reads hosts and transcripts from the running server over HTTP
 - it upserts all discovered session rows first, then transcript messages
 - transcript fetches use `GET /sessions/{id}/messages?hostLocation=...` so duplicate session ids across hosts are handled deterministically
+- it prints per-host and periodic progress logs while it runs
 
 ### `pimux restart`
 

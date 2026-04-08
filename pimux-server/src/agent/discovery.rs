@@ -361,7 +361,8 @@ impl ModelCapabilitiesCache {
             return false;
         }
 
-        self.retry_after.is_none_or(|retry_after| now >= retry_after)
+        self.retry_after
+            .is_none_or(|retry_after| now >= retry_after)
     }
 
     fn apply_success(&mut self, now: Instant, capabilities: HashMap<String, ModelCapabilities>) {

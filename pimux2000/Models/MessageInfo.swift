@@ -61,47 +61,11 @@ struct MessagesRequest: ValueObservationQueryable {
 			.fetchAll(db)
 
 		let blocksByMessage = Dictionary(grouping: blocks, by: \.messageID)
-		let messageInfos = messages.map { message in
+		return messages.map { message in
 			MessageInfo(
 				message: message,
 				contentBlocks: blocksByMessage[message.id ?? -1] ?? []
 			)
 		}
-		return deduplicatedMessages(messageInfos)
-	}
-
-	private func deduplicatedMessages(_ messages: [MessageInfo]) -> [MessageInfo] {
-		guard messages.count > 1 else { return messages }
-
-		var deduplicatedByID: [String: MessageInfo] = [:]
-		deduplicatedByID.reserveCapacity(messages.count)
-
-		for message in messages {
-			guard let existing = deduplicatedByID[message.id] else {
-				deduplicatedByID[message.id] = message
-				continue
-			}
-
-			let existingRowID = existing.message.id ?? -1
-			let candidateRowID = message.message.id ?? -1
-			if message.message.position > existing.message.position
-				|| (message.message.position == existing.message.position && candidateRowID > existingRowID)
-			{
-				deduplicatedByID[message.id] = message
-			}
-		}
-
-		let deduplicatedMessages = deduplicatedByID.values.sorted { lhs, rhs in
-			if lhs.message.position != rhs.message.position {
-				return lhs.message.position < rhs.message.position
-			}
-			return (lhs.message.id ?? -1) < (rhs.message.id ?? -1)
-		}
-
-		if deduplicatedMessages.count != messages.count {
-			print("Deduplicated \(messages.count - deduplicatedMessages.count) duplicate message(s) while fetching transcript for \(sessionID)")
-		}
-
-		return deduplicatedMessages
 	}
 }

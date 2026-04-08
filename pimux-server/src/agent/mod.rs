@@ -1066,7 +1066,9 @@ async fn handle_builtin_command(
                 pi_agent_dir.to_path_buf(),
             )
             .await?;
-            if let Err(error) = resummarize_session_name_headless(session_id, pi_agent_dir, summary_config).await {
+            if let Err(error) =
+                resummarize_session_name_headless(session_id, pi_agent_dir, summary_config).await
+            {
                 warn!(session_id, %error, "failed to re-summarize session after compaction");
             }
             publish_persisted_snapshot_for_session(session_id, pi_agent_dir, live_updates_tx).await;
@@ -1493,10 +1495,8 @@ mod tests {
     }
 
     fn temp_test_dir(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "pimux-agent-test-{name}-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("pimux-agent-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root

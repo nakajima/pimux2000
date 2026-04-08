@@ -335,9 +335,14 @@ async fn upsert_message_rows(
     observed_at: DateTime<Utc>,
 ) -> Result<usize, BoxError> {
     let mut count = 0;
+    let host_location = sanitize_postgres_text(&host.location);
+    let session_id = sanitize_postgres_text(&transcript.session_id);
     for (ordinal, message) in transcript.messages.iter().enumerate() {
-        let dedupe_key = message_dedupe_key(message)?;
-        let message_json = serde_json::to_value(message)?;
+        let dedupe_key = sanitize_postgres_text(&message_dedupe_key(message)?);
+        let message_id = sanitize_option_postgres_text(message.message_id.clone());
+        let body = sanitize_postgres_text(&message.body);
+        let tool_name = sanitize_option_postgres_text(message.tool_name.clone());
+        let message_json = sanitize_json_value(serde_json::to_value(message)?);
         let ordinal = i32::try_from(ordinal).unwrap_or(i32::MAX);
         let role = role_name(message.role);
 
@@ -345,15 +350,15 @@ async fn upsert_message_rows(
             .execute(
                 "INSERT INTO messages (host_location, session_id, dedupe_key, message_id, ordinal, created_at, role, body, tool_name, message_json, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (host_location, session_id, dedupe_key) DO UPDATE SET message_id = COALESCE(EXCLUDED.message_id, messages.message_id), ordinal = EXCLUDED.ordinal, created_at = EXCLUDED.created_at, role = EXCLUDED.role, body = EXCLUDED.body, tool_name = COALESCE(EXCLUDED.tool_name, messages.tool_name), message_json = EXCLUDED.message_json, last_seen_at = GREATEST(messages.last_seen_at, EXCLUDED.last_seen_at)",
                 &[
-                    &host.location,
-                    &transcript.session_id,
+                    &host_location,
+                    &session_id,
                     &dedupe_key,
-                    &message.message_id,
+                    &message_id,
                     &ordinal,
                     &message.created_at,
                     &role,
-                    &message.body,
-                    &message.tool_name,
+                    &body,
+                    &tool_name,
                     &message_json,
                     &observed_at,
                 ],
@@ -388,20 +393,20 @@ fn session_row(
         .ok_or_else(|| "session row requires active session or transcript".to_string())?;
 
     let warnings_json = transcript
-        .map(|transcript| serde_json::to_value(&transcript.warnings))
+        .map(|transcript| serde_json::to_value(&transcript.warnings).map(sanitize_json_value))
         .transpose()?;
 
     Ok(SessionRow {
-        host_location: host.location.clone(),
-        session_id,
-        host_auth: host_auth_name(host.auth).to_string(),
-        summary: active_session.map(|session| session.summary.clone()),
+        host_location: sanitize_postgres_text(&host.location),
+        session_id: sanitize_postgres_text(&session_id),
+        host_auth: sanitize_postgres_text(host_auth_name(host.auth)),
+        summary: active_session.map(|session| sanitize_postgres_text(&session.summary)),
         created_at: active_session.map(|session| session.created_at),
         updated_at: active_session.map(|session| session.updated_at),
         last_user_message_at: active_session.map(|session| session.last_user_message_at),
         last_assistant_message_at: active_session.map(|session| session.last_assistant_message_at),
-        cwd: active_session.map(|session| session.cwd.clone()),
-        model: active_session.map(|session| session.model.clone()),
+        cwd: active_session.map(|session| sanitize_postgres_text(&session.cwd)),
+        model: active_session.map(|session| sanitize_postgres_text(&session.model)),
         context_usage_used_tokens: active_session.and_then(|session| {
             session
                 .context_usage
@@ -417,10 +422,12 @@ fn session_row(
                 .map(saturating_u64_to_i64)
         }),
         supports_images: active_session.and_then(|session| session.supports_images),
-        transcript_freshness_state: transcript
-            .map(|transcript| freshness_state_name(transcript.freshness.state).to_string()),
-        transcript_freshness_source: transcript
-            .map(|transcript| freshness_source_name(transcript.freshness.source).to_string()),
+        transcript_freshness_state: transcript.map(|transcript| {
+            sanitize_postgres_text(freshness_state_name(transcript.freshness.state))
+        }),
+        transcript_freshness_source: transcript.map(|transcript| {
+            sanitize_postgres_text(freshness_source_name(transcript.freshness.source))
+        }),
         transcript_freshness_as_of: transcript.map(|transcript| transcript.freshness.as_of),
         activity_active: transcript.map(|transcript| transcript.activity.active),
         activity_attached: transcript.map(|transcript| transcript.activity.attached),
@@ -433,6 +440,32 @@ fn host_auth_name(auth: HostAuth) -> &'static str {
     match auth {
         HostAuth::None => "none",
         HostAuth::Pk => "pk",
+    }
+}
+
+fn sanitize_postgres_text(value: &str) -> String {
+    if value.contains('\0') {
+        value.replace('\0', r"\u0000")
+    } else {
+        value.to_string()
+    }
+}
+
+fn sanitize_option_postgres_text(value: Option<String>) -> Option<String> {
+    value.map(|value| sanitize_postgres_text(&value))
+}
+
+fn sanitize_json_value(value: Value) -> Value {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => value,
+        Value::String(value) => Value::String(sanitize_postgres_text(&value)),
+        Value::Array(values) => Value::Array(values.into_iter().map(sanitize_json_value).collect()),
+        Value::Object(entries) => Value::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (sanitize_postgres_text(&key), sanitize_json_value(value)))
+                .collect(),
+        ),
     }
 }
 
@@ -524,6 +557,22 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_postgres_text_replaces_nul() {
+        assert_eq!(sanitize_postgres_text("a\0b"), "a\\u0000b");
+    }
+
+    #[test]
+    fn sanitize_json_value_replaces_nul_recursively() {
+        let value = serde_json::json!({
+            "a\0b": ["x\0y", { "nested": "z\0w" }]
+        });
+
+        let sanitized = sanitize_json_value(value);
+        assert_eq!(sanitized["a\\u0000b"][0], "x\\u0000y");
+        assert_eq!(sanitized["a\\u0000b"][1]["nested"], "z\\u0000w");
+    }
+
+    #[test]
     fn session_row_includes_transcript_metadata() {
         let host = HostIdentity {
             location: "dev@mac".to_string(),
@@ -558,5 +607,39 @@ mod tests {
         assert_eq!(row.transcript_freshness_state.as_deref(), Some("live"));
         assert_eq!(row.activity_active, Some(true));
         assert!(row.warnings_json.is_some());
+    }
+
+    #[test]
+    fn session_row_sanitizes_nul_bytes() {
+        let host = HostIdentity {
+            location: "dev@mac\0bad".to_string(),
+            auth: HostAuth::None,
+        };
+        let session = ActiveSession {
+            id: "session\0-1".to_string(),
+            summary: "sum\0mary".to_string(),
+            created_at: Utc.timestamp_opt(1_000, 0).unwrap(),
+            updated_at: Utc.timestamp_opt(1_000, 0).unwrap(),
+            last_user_message_at: Utc.timestamp_opt(1_000, 0).unwrap(),
+            last_assistant_message_at: Utc.timestamp_opt(1_000, 0).unwrap(),
+            cwd: "/tmp/\0project".to_string(),
+            model: "claude\0model".to_string(),
+            context_usage: None,
+            supports_images: None,
+        };
+
+        let row = session_row(
+            &host,
+            Some(&session),
+            None,
+            Utc.timestamp_opt(3_000, 0).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(row.host_location, "dev@mac\\u0000bad");
+        assert_eq!(row.session_id, "session\\u0000-1");
+        assert_eq!(row.summary.as_deref(), Some("sum\\u0000mary"));
+        assert_eq!(row.cwd.as_deref(), Some("/tmp/\\u0000project"));
+        assert_eq!(row.model.as_deref(), Some("claude\\u0000model"));
     }
 }

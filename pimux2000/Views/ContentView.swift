@@ -60,7 +60,7 @@ struct ContentView: View {
 		.task(id: syncTaskKey) {
 			guard let pimuxServerClient else { return }
 			let syncer = PiSessionSync(dbContext: dbContext, pimuxServerClient: pimuxServerClient)
-			await syncer.sync()
+			await syncer.sync(full: true)
 			while !Task.isCancelled {
 				try? await Task.sleep(for: .seconds(3))
 				await syncer.sync()

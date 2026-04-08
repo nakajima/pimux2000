@@ -690,15 +690,11 @@ mod tests {
     #[test]
     fn renders_systemd_unit() {
         let args = agent_run_args(&sample_config());
-        let unit = render_systemd_unit(
-            Path::new("/tmp/pimux"),
-            &args,
-            Some("/usr/bin:/opt/bin"),
-        );
+        let unit = render_systemd_unit(Path::new("/tmp/pimux"), &args, Some("/usr/bin:/opt/bin"));
 
-        assert!(unit.contains(
-            "ExecStart=\"/tmp/pimux\" \"agent\" \"run\" \"http://127.0.0.1:3000\""
-        ));
+        assert!(
+            unit.contains("ExecStart=\"/tmp/pimux\" \"agent\" \"run\" \"http://127.0.0.1:3000\"")
+        );
         assert!(unit.contains("Environment=PATH=\"/usr/bin:/opt/bin\""));
         assert!(unit.contains("WantedBy=default.target"));
     }

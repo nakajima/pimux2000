@@ -197,9 +197,8 @@ struct AppDatabase {
 			guard var session = try PiSession
 				.filter(Column("sessionID") == sessionID)
 				.fetchOne(db) else { return }
-			let isLive = active && attached
-			guard session.isCliActive != isLive else { return }
-			session.isCliActive = isLive
+			guard session.isCliActive != attached else { return }
+			session.isCliActive = attached
 			try session.update(db, columns: ["isCliActive"])
 		}
 	}

@@ -64,7 +64,11 @@ impl SessionHelperManagerHandle {
             entry.process.is_none()
         };
 
-        if !should_spawn || live_store.has_command_connection(&discovered_session.id).await {
+        if !should_spawn
+            || live_store
+                .has_command_connection(&discovered_session.id)
+                .await
+        {
             return Ok(());
         }
 
@@ -97,7 +101,10 @@ impl SessionHelperManagerHandle {
             if entry.retain_count > 0 {
                 return;
             }
-            guard.sessions.remove(session_id).and_then(|entry| entry.process)
+            guard
+                .sessions
+                .remove(session_id)
+                .and_then(|entry| entry.process)
         };
 
         if let Some(process) = process {
@@ -111,7 +118,9 @@ impl SessionHelperManagerHandle {
             guard
                 .sessions
                 .drain()
-                .filter_map(|(session_id, entry)| entry.process.map(|process| (session_id, process)))
+                .filter_map(|(session_id, entry)| {
+                    entry.process.map(|process| (session_id, process))
+                })
                 .collect::<Vec<_>>()
         };
 

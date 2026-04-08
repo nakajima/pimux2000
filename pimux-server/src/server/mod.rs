@@ -406,6 +406,8 @@ fn port_from_env() -> Result<u16, BoxError> {
     }
 }
 
+const BACKFILL_PROGRESS_INTERVAL_SESSIONS: usize = 25;
+
 #[derive(Debug)]
 struct BackfillFailure {
     host_location: String,
@@ -437,6 +439,19 @@ pub async fn status(server_url: &str) -> Result<String, BoxError> {
         &version.version,
         &hosts,
     ))
+}
+
+fn log_backfill_progress(
+    processed_sessions: usize,
+    total_sessions: usize,
+    sessions_upserted: usize,
+    messages_upserted: usize,
+    failure_count: usize,
+) {
+    eprintln!(
+        "backfill progress: {}/{} session(s) processed, {} session row(s), {} message row(s), {} failure(s)",
+        processed_sessions, total_sessions, sessions_upserted, messages_upserted, failure_count
+    );
 }
 
 pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
@@ -474,19 +489,36 @@ pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
 
     let mut sessions_upserted = 0usize;
     let mut messages_upserted = 0usize;
+    let mut processed_sessions = 0usize;
     let mut failures = Vec::new();
 
     for host in hosts {
+        let host_session_count = host.sessions.len();
         let host_identity = HostIdentity {
             location: host.location.clone(),
             auth: host.auth,
         };
+        eprintln!(
+            "backfilling host {} ({} session(s))",
+            host_identity.location, host_session_count
+        );
 
         for session in host.sessions {
-            store
+            match store
                 .upsert_active_session(&host_identity, &session, Utc::now())
-                .await?;
-            sessions_upserted += 1;
+                .await
+            {
+                Ok(()) => {
+                    sessions_upserted += 1;
+                }
+                Err(error) => {
+                    failures.push(BackfillFailure {
+                        host_location: host_identity.location.clone(),
+                        session_id: session.id.clone(),
+                        error: format!("failed to upsert session row: {error}"),
+                    });
+                }
+            }
 
             let mut session_url = build_server_url(
                 &normalized.url,
@@ -503,6 +535,18 @@ pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
                         session_id: session.id.clone(),
                         error: format!("failed to fetch {session_url}: {error}"),
                     });
+                    processed_sessions += 1;
+                    if processed_sessions % BACKFILL_PROGRESS_INTERVAL_SESSIONS == 0
+                        || processed_sessions == total_sessions
+                    {
+                        log_backfill_progress(
+                            processed_sessions,
+                            total_sessions,
+                            sessions_upserted,
+                            messages_upserted,
+                            failures.len(),
+                        );
+                    }
                     continue;
                 }
             };
@@ -515,6 +559,18 @@ pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
                     session_id: session.id.clone(),
                     error: format!("server responded with {status}: {body}"),
                 });
+                processed_sessions += 1;
+                if processed_sessions % BACKFILL_PROGRESS_INTERVAL_SESSIONS == 0
+                    || processed_sessions == total_sessions
+                {
+                    log_backfill_progress(
+                        processed_sessions,
+                        total_sessions,
+                        sessions_upserted,
+                        messages_upserted,
+                        failures.len(),
+                    );
+                }
                 continue;
             }
 
@@ -526,13 +582,50 @@ pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
                         session_id: session.id.clone(),
                         error: format!("invalid transcript response: {error}"),
                     });
+                    processed_sessions += 1;
+                    if processed_sessions % BACKFILL_PROGRESS_INTERVAL_SESSIONS == 0
+                        || processed_sessions == total_sessions
+                    {
+                        log_backfill_progress(
+                            processed_sessions,
+                            total_sessions,
+                            sessions_upserted,
+                            messages_upserted,
+                            failures.len(),
+                        );
+                    }
                     continue;
                 }
             };
 
-            messages_upserted += store
+            match store
                 .upsert_transcript(&host_identity, Some(&session), &snapshot, Utc::now())
-                .await?;
+                .await
+            {
+                Ok(inserted) => {
+                    messages_upserted += inserted;
+                }
+                Err(error) => {
+                    failures.push(BackfillFailure {
+                        host_location: host_identity.location.clone(),
+                        session_id: session.id.clone(),
+                        error: format!("failed to upsert transcript rows: {error}"),
+                    });
+                }
+            }
+
+            processed_sessions += 1;
+            if processed_sessions % BACKFILL_PROGRESS_INTERVAL_SESSIONS == 0
+                || processed_sessions == total_sessions
+            {
+                log_backfill_progress(
+                    processed_sessions,
+                    total_sessions,
+                    sessions_upserted,
+                    messages_upserted,
+                    failures.len(),
+                );
+            }
         }
     }
 
@@ -542,7 +635,7 @@ pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
     );
 
     if !failures.is_empty() {
-        eprintln!("failed to backfill {} session(s):", failures.len());
+        eprintln!("backfill encountered {} failure(s):", failures.len());
         for failure in &failures {
             eprintln!(
                 "- {} on {}: {}",
@@ -554,11 +647,7 @@ pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(format!(
-            "backfill finished with {} failed session(s)",
-            failures.len()
-        )
-        .into())
+        Err(format!("backfill finished with {} failure(s)", failures.len()).into())
     }
 }
 
@@ -603,7 +692,10 @@ async fn record_postgres_transcript(
     }
 }
 
-async fn fetch_status_text(client: &reqwest::Client, url: reqwest::Url) -> Result<String, BoxError> {
+async fn fetch_status_text(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+) -> Result<String, BoxError> {
     let response = client
         .get(url.clone())
         .send()
@@ -633,9 +725,10 @@ async fn fetch_status_json<T: DeserializeOwned>(
         return Err(format!("server responded to {url} with {status}: {body}").into());
     }
 
-    Ok(response.json::<T>().await.map_err(|error| {
-        format!("server returned an invalid response from {url}: {error}")
-    })?)
+    Ok(response
+        .json::<T>()
+        .await
+        .map_err(|error| format!("server returned an invalid response from {url}: {error}"))?)
 }
 
 fn render_server_status(
@@ -644,8 +737,14 @@ fn render_server_status(
     version: &str,
     hosts: &[HostSessions],
 ) -> String {
-    let connected_hosts = hosts.iter().filter(|host| host.connected).collect::<Vec<_>>();
-    let missing_hosts = hosts.iter().filter(|host| !host.connected).collect::<Vec<_>>();
+    let connected_hosts = hosts
+        .iter()
+        .filter(|host| host.connected)
+        .collect::<Vec<_>>();
+    let missing_hosts = hosts
+        .iter()
+        .filter(|host| !host.connected)
+        .collect::<Vec<_>>();
     let tracked_sessions = hosts.iter().map(|host| host.sessions.len()).sum::<usize>();
 
     let mut output = String::new();
@@ -1297,7 +1396,8 @@ async fn session_stream(
     let subscription_id = subscribe_session(&state, &session_id, subscription_tx).await;
     let helper_host_location = host_for_session(&state, &session_id).await;
     if let Some(host_location) = helper_host_location.as_deref()
-        && let Err((_, Json(error))) = retain_session_helper(&state, host_location, &session_id).await
+        && let Err((_, Json(error))) =
+            retain_session_helper(&state, host_location, &session_id).await
     {
         warn!(
             session_id = %session_id,
@@ -2335,7 +2435,8 @@ async fn cleanup_session_subscription(
 ) {
     unsubscribe_session(state, session_id, subscriber_id).await;
     if let Some(host_location) = helper_host_location
-        && let Err((_, Json(error))) = release_session_helper(state, host_location, session_id).await
+        && let Err((_, Json(error))) =
+            release_session_helper(state, host_location, session_id).await
     {
         warn!(
             session_id = %session_id,
@@ -3764,7 +3865,11 @@ mod tests {
         assert!(output.contains("connected agents: 1"));
         assert!(output.contains("missing agents: 1"));
         assert!(output.contains("tracked sessions: 1"));
-        assert!(output.contains("dev@mac (auth: none, sessions: 1, last seen: 1970-01-01T00:00:00+00:00)"));
+        assert!(
+            output.contains(
+                "dev@mac (auth: none, sessions: 1, last seen: 1970-01-01T00:00:00+00:00)"
+            )
+        );
         assert!(output.contains("old@host (auth: pk, sessions: 0, last seen: never)"));
     }
 

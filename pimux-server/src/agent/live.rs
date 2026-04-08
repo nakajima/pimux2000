@@ -933,7 +933,8 @@ async fn start_listener_impl(
                                     let snapshot = {
                                         let mut guard = store.inner.lock().await;
                                         guard.purge_expired();
-                                        if guard.has_bound_command_connection_for_session(&session_id)
+                                        if guard
+                                            .has_bound_command_connection_for_session(&session_id)
                                         {
                                             None
                                         } else {
@@ -1351,7 +1352,9 @@ impl LiveSessionStore {
                 self.warned_legacy_sessions.remove(&session_id);
                 self.warned_missing_metadata_sessions.remove(&session_id);
                 if let Some(state) = self.active_sessions.get_mut(&session_id) {
-                    return state.upgrade_transport(transport).then(|| state.active_response());
+                    return state
+                        .upgrade_transport(transport)
+                        .then(|| state.active_response());
                 }
 
                 let state =

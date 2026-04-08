@@ -169,9 +169,11 @@ mod tests {
         fs::write(&extension_path, "stale").unwrap();
 
         let error = install(Some(root.clone()), false).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("rerun with --force (or --force-extension)"));
+        assert!(
+            error
+                .to_string()
+                .contains("rerun with --force (or --force-extension)")
+        );
 
         let status = status(Some(root.clone())).unwrap();
         assert_eq!(status.state, FileStatus::Stale);

@@ -6,14 +6,20 @@ struct PiSessionSync {
 	var dbContext: DatabaseContext
 	let pimuxServerClient: PimuxServerClient
 
-	func sync() async {
+	/// Syncs session data from the server.
+	/// - Parameter full: When `true`, fetches all session pages and deletes stale
+	///   local sessions. When `false` (default), fetches only the first page for
+	///   a lightweight incremental update.
+	func sync(full: Bool = false) async {
 		do {
 			async let remoteHosts = pimuxServerClient.listHosts()
-			async let remoteSessions = pimuxServerClient.listAllSessions()
-			let (hosts, sessions) = try await (remoteHosts, remoteSessions)
+			let remoteSessions = try await full
+				? pimuxServerClient.listAllSessions()
+				: pimuxServerClient.listSessions(count: 25)
+			let hosts = try await remoteHosts
 
 			try await dbContext.writer.write { db in
-				try Self.store(remoteHosts: hosts, remoteSessions: sessions, in: db)
+				try Self.store(remoteHosts: hosts, remoteSessions: remoteSessions, deleteStale: full, in: db)
 			}
 		} catch {
 			print("Error syncing pimux server: \(error)")
@@ -23,6 +29,7 @@ struct PiSessionSync {
 	nonisolated static func store(
 		remoteHosts: [PimuxHostSessions],
 		remoteSessions: [PimuxListedSession],
+		deleteStale: Bool = true,
 		in db: Database
 	) throws {
 		var latestHostUpdates: [String: Date] = [:]
@@ -75,9 +82,11 @@ struct PiSessionSync {
 			}
 		}
 
-		let staleHostIDs = existingHostsByLocation.values.compactMap(\.id)
-		if !staleHostIDs.isEmpty {
-			_ = try Host.filter(staleHostIDs.contains(Column("id"))).deleteAll(db)
+		if deleteStale {
+			let staleHostIDs = existingHostsByLocation.values.compactMap(\.id)
+			if !staleHostIDs.isEmpty {
+				_ = try Host.filter(staleHostIDs.contains(Column("id"))).deleteAll(db)
+			}
 		}
 
 		let activeSessionIDs = Set(
@@ -88,7 +97,22 @@ struct PiSessionSync {
 		)
 
 		let canonicalRemoteSessions = canonicalRemoteSessions(from: remoteSessions)
-		let existingSessions = try PiSession.fetchAll(db)
+
+		// During incremental sync, only fetch local sessions matching incoming IDs
+		// instead of loading the entire table.
+		let existingSessions: [PiSession]
+		if deleteStale {
+			existingSessions = try PiSession.fetchAll(db)
+		} else {
+			let incomingIDs = canonicalRemoteSessions.map(\.id)
+			if incomingIDs.isEmpty {
+				existingSessions = []
+			} else {
+				existingSessions = try PiSession
+					.filter(incomingIDs.contains(Column("sessionID")))
+					.fetchAll(db)
+			}
+		}
 		var existingSessionsByID = Dictionary(uniqueKeysWithValues: existingSessions.map { ($0.sessionID, $0) })
 
 		for remoteSession in canonicalRemoteSessions {
@@ -144,9 +168,11 @@ struct PiSessionSync {
 			}
 		}
 
-		let staleSessionIDs = existingSessionsByID.values.compactMap(\.id)
-		if !staleSessionIDs.isEmpty {
-			_ = try PiSession.filter(staleSessionIDs.contains(Column("id"))).deleteAll(db)
+		if deleteStale {
+			let staleSessionIDs = existingSessionsByID.values.compactMap(\.id)
+			if !staleSessionIDs.isEmpty {
+				_ = try PiSession.filter(staleSessionIDs.contains(Column("id"))).deleteAll(db)
+			}
 		}
 	}
 

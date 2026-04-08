@@ -77,7 +77,7 @@ struct SidebarView: View {
 		.refreshable {
 			guard let pimuxServerClient else { return }
 			let syncer = PiSessionSync(dbContext: dbContext, pimuxServerClient: pimuxServerClient)
-			await syncer.sync()
+			await syncer.sync(full: true)
 		}
 		.toolbar {
 			ToolbarItem(placement: .primaryAction) {
