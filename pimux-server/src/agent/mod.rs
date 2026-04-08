@@ -39,6 +39,16 @@ pub use summarizer::DEFAULT_SUMMARY_MODEL;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+pub fn resolve_pi_agent_dir(
+    override_dir: Option<PathBuf>,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    discovery::resolve_pi_agent_dir(override_dir)
+}
+
+pub fn resolve_summary_model(pi_agent_dir: &Path, requested_model: &str) -> String {
+    summarizer::resolve_summary_model(pi_agent_dir, requested_model)
+}
+
 const SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub struct Config {

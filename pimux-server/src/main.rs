@@ -16,7 +16,7 @@ mod transcript;
 
 #[derive(Debug, Parser)]
 #[command(name = "pimux")]
-#[command(about = "pimux server and agent")]
+#[command(about = "pimux server, agent, and reporting")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -37,6 +37,11 @@ enum Commands {
     },
     /// Restart installed managed services
     Restart(RestartArgs),
+    /// Reporting commands backed by the Postgres archive
+    Report {
+        #[command(subcommand)]
+        command: ReportCommand,
+    },
     /// List the local sessions the agent would discover
     List {
         /// Override pi's agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)
@@ -86,6 +91,25 @@ enum AgentCommand {
     Status(AgentStatusArgs),
     /// Show recent service logs
     Logs(AgentLogsArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ReportCommand {
+    /// Generate a project-based daily report from the Postgres archive
+    Day(ReportDayArgs),
+}
+
+#[derive(Debug, Args)]
+struct ReportDayArgs {
+    /// Local calendar day to report on, for example 2026-04-08. Defaults to today in the system timezone.
+    #[arg(long)]
+    date: Option<String>,
+    /// Override pi's agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)
+    #[arg(long, env = "PI_CODING_AGENT_DIR")]
+    pi_agent_dir: Option<PathBuf>,
+    /// Model to use when generating report summaries via pi
+    #[arg(long, env = "PIMUX_SUMMARY_MODEL", default_value = agent::DEFAULT_SUMMARY_MODEL)]
+    summary_model: String,
 }
 
 #[derive(Debug, Args)]
@@ -333,6 +357,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Commands::Restart(args) => {
             restart_requested_services(args)?;
         }
+        Commands::Report { command } => match command {
+            ReportCommand::Day(args) => {
+                report::day(report::DayConfig {
+                    date: args.date,
+                    pi_agent_dir: args.pi_agent_dir,
+                    summary_model: args.summary_model,
+                })
+                .await?;
+            }
+        },
         Commands::List {
             pi_agent_dir,
             summary_model,

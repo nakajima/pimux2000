@@ -578,6 +578,28 @@ Options:
 When `--date` is provided, it filters by `updatedAt` using the same local-day semantics as `GET /sessions?date=...`.
 The command prints progress logs to stderr while discovering sessions and resolving LLM summaries.
 
+### `pimux report day`
+
+Generates a project-based daily report from the archived Postgres `sessions` / `messages` tables.
+
+```sh
+PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux report day
+PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux report day --date 2026-04-08
+```
+
+Options:
+- `--date YYYY-MM-DD` — optional local calendar day filter using the system timezone; defaults to today
+- `--pi-agent-dir <path>`
+- `--summary-model <model>`
+
+Behavior:
+- requires `PIMUX_BACKUP_POSTGRES_URL`
+- reads archived messages for that local day across all hosts
+- groups output by normalized project cwd, for example both `/Users/alice/apps/foo` and `/home/alice/apps/foo` render as `~/apps/foo`
+- prints `Worked on` bullets plus `Accomplished` bullets with supporting excerpts nested under each accomplishment
+- does not show hosts or session counts in the rendered report
+- uses `pi` to synthesize concise project-level bullets from the archived excerpts, with a heuristic fallback if that summarization fails
+
 ## Server service details
 
 ### `pimux server`
