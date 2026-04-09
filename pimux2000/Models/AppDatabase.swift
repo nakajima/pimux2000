@@ -127,6 +127,18 @@ struct AppDatabase {
 			}
 		}
 
+		migrator.registerMigration("addToolCallLinkageColumns") { db in
+			let messageColumnNames = try Self.columnNames(in: "messages", db: db)
+			if !messageColumnNames.contains("toolCallID") {
+				try db.execute(sql: "ALTER TABLE messages ADD COLUMN toolCallID TEXT")
+			}
+
+			let blockColumnNames = try Self.columnNames(in: "messageContentBlocks", db: db)
+			if !blockColumnNames.contains("toolCallID") {
+				try db.execute(sql: "ALTER TABLE messageContentBlocks ADD COLUMN toolCallID TEXT")
+			}
+		}
+
 		migrator.registerMigration("addPiSessionSupportsImages") { db in
 			let columnNames = try Self.columnNames(in: "piSessions", db: db)
 			if !columnNames.contains("supportsImages") {

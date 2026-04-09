@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title><%= summary %> · pimux archive</title>
-  <style><%- common_style %></style>
+  <link rel="stylesheet" href="/static/reset.css">
+  <link rel="stylesheet" href="/static/pimux.css">
 </head>
 <body>
   <main>
@@ -17,62 +18,61 @@
       <nav class="nav">
         <a href="/">status</a>
         <a href="/ui/sessions">archive sessions</a>
+        <a href="/ui/reports">reports</a>
       </nav>
     </header>
 
     <section class="card session-card">
-      <ul class="key-value-list">
-        <li>
-          <span class="key">Host auth</span>
-          <strong><%= host_auth %></strong>
-        </li>
-        <li>
-          <span class="key">Created</span>
-          <strong><%= created_at %></strong>
-        </li>
-        <li>
-          <span class="key">Updated</span>
-          <strong><%= updated_at %></strong>
-        </li>
-        <li>
-          <span class="key">Last user message</span>
-          <strong><%= last_user_message_at %></strong>
-        </li>
-        <li>
-          <span class="key">Last assistant message</span>
-          <strong><%= last_assistant_message_at %></strong>
-        </li>
-        <li>
-          <span class="key">Last seen by archive</span>
-          <strong><%= last_seen_at %></strong>
-        </li>
-        <li>
-          <span class="key">Model</span>
-          <strong><%= model %></strong>
-        </li>
-        <li>
-          <span class="key">Working directory</span>
-          <strong><%= cwd %></strong>
-        </li>
-        <li>
-          <span class="key">Transcript freshness</span>
-          <strong><%= transcript_freshness %></strong>
-        </li>
-        <li>
-          <span class="key">Activity</span>
-          <strong><%= activity %></strong>
-        </li>
-        <li>
-          <span class="key">Archived messages</span>
-          <strong><%= message_count %></strong>
-        </li>
-      </ul>
+      <dl class="key-value-list">
+        <div>
+          <dt>Host auth</dt>
+          <dd><%= host_auth %></dd>
+        </div>
+        <div>
+          <dt>Created</dt>
+          <dd><%= created_at %></dd>
+        </div>
+        <div>
+          <dt>Updated</dt>
+          <dd><%= updated_at %></dd>
+        </div>
+        <div>
+          <dt>Last user message</dt>
+          <dd><%= last_user_message_at %></dd>
+        </div>
+        <div>
+          <dt>Last assistant message</dt>
+          <dd><%= last_assistant_message_at %></dd>
+        </div>
+        <div>
+          <dt>Last seen by archive</dt>
+          <dd><%= last_seen_at %></dd>
+        </div>
+        <div>
+          <dt>Model</dt>
+          <dd><%= model %></dd>
+        </div>
+        <div>
+          <dt>Working directory</dt>
+          <dd><%= cwd %></dd>
+        </div>
+        <div>
+          <dt>Transcript freshness</dt>
+          <dd><%= transcript_freshness %></dd>
+        </div>
+        <div>
+          <dt>Activity</dt>
+          <dd><%= activity %></dd>
+        </div>
+        <div>
+          <dt>Archived messages</dt>
+          <dd><%= message_count %></dd>
+        </div>
+      </dl>
 
       <% if let Some(selected_message_key) = &selected_message_key { %>
         <div class="callout">
-          <% if selected_message_found { %>
-            Highlighting message <code><%= selected_message_key %></code>.
-          <% } else { %>
+          <% if !selected_message_found { %>
             Message <code><%= selected_message_key %></code> was not found in the archived transcript. Showing the full session instead.
           <% } %>
         </div>
@@ -85,19 +85,54 @@
       <% } else { %>
         <ol class="message-list">
           <% for message in &messages { %>
-            <li id="<%= message.anchor_id %>" class="message-item<% if message.is_selected { %> selected<% } %>">
+            <li id="<%= message.anchor_id %>" class="message-item<% if message.is_selected { %> selected<% } %> <%= message.role_class %>">
               <div class="message-header">
                 <div>
-                  <span class="role-pill <%= message.role_class %>"><%= message.role %></span>
-                  <span class="meta"><%= message.created_at %></span>
+                  <span class="role-pill "><%= message.role %></span>
                   <% if let Some(tool_name) = &message.tool_name { %>
                     <span class="meta">tool: <code><%= tool_name %></code></span>
                   <% } %>
+                  <% if let Some(tool_call_badge) = &message.tool_call_badge { %>
+                    <span class="meta">call: <code><%= tool_call_badge %></code></span>
+                  <% } %>
                 </div>
-                <a class="permalink" href="<%= message.permalink_url %>" title="Permalink to this message">¶</a>
+
+                <div class="message-meta">
+                  <a class="permalink" href="<%= message.permalink_url %>" title="Permalink to this message"><%= message.created_at %></a>
+                  <span class="meta"><code><%= message.message_key %></code></span>
+                </div>
               </div>
-              <pre class="message-body"><%= message.body %></pre>
-              <span class="meta"><code><%= message.message_key %></code></span>
+
+              <% if let Some(related_tool_call) = &message.related_tool_call { %>
+                <div class="message-link-callout">
+                  <a href="<%= related_tool_call.url %>"><%= related_tool_call.label %></a>
+                </div>
+              <% } %>
+
+              <% if !message.body_html.is_empty() { %>
+                <div class="message-body <%= message.body_format_class %>"><%- message.body_html %></div>
+              <% } %>
+
+              <% if !message.tool_call_blocks.is_empty() { %>
+                <ol class="tool-call-list">
+                  <% for block in &message.tool_call_blocks { %>
+                    <li id="<%= block.anchor_id %>" class="tool-call-item">
+                      <div class="tool-call-header">
+                        <div>
+                          <strong><%= block.tool_name %></strong>
+                          <% if let Some(tool_call_badge) = &block.tool_call_badge { %>
+                            <span class="meta">call: <code><%= tool_call_badge %></code></span>
+                          <% } %>
+                        </div>
+                        <% if let Some(result_link) = &block.result_link { %>
+                          <a href="<%= result_link.url %>"><%= result_link.label %></a>
+                        <% } %>
+                      </div>
+                      <div class="tool-call-body"><%- block.body_html %></div>
+                    </li>
+                  <% } %>
+                </ol>
+              <% } %>
             </li>
           <% } %>
         </ol>

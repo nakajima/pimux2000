@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= date %> · pimux report</title>
+  <link rel="stylesheet" href="/static/reset.css">
+  <link rel="stylesheet" href="/static/pimux.css">
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">pimux</p>
+        <h1>Daily report for <%= date %></h1>
+        <p class="muted">Timezone <code><%= timezone %></code> · <%= source_label %></p>
+      </div>
+      <nav class="nav">
+        <a href="/">status</a>
+        <a href="/ui/sessions">archive</a>
+        <a href="/ui/reports">reports</a>
+      </nav>
+    </header>
+
+    <section class="card report-card">
+      <div class="row-header">
+        <div>
+          <span class="meta">source: <%= source_label %></span>
+          <% if let Some(saved_at) = &saved_at { %>
+            <span class="meta">saved: <%= saved_at %></span>
+          <% } %>
+        </div>
+        <div class="actions">
+          <a href="/ui/report?date=<%= date %>">permalink</a>
+        </div>
+      </div>
+
+      <article class="message-body message-body-markdown"><%- report_html %></article>
+    </section>
+  </main>
+</body>
+</html>

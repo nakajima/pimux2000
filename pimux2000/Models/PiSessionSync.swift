@@ -255,6 +255,7 @@ struct PiSessionSync {
 						serverMessageID: serverID,
 						role: message.role,
 						toolName: message.toolName,
+						toolCallID: message.toolCallID,
 						position: message.position,
 						createdAt: message.createdAt,
 						blocks: (blocksByMessageID[message.id ?? -1] ?? []).map(BlockPayload.init)
@@ -288,6 +289,7 @@ struct PiSessionSync {
 				var updated = existing.message
 				updated.role = payload.role
 				updated.toolName = payload.toolName
+				updated.toolCallID = payload.toolCallID
 				updated.position = payload.position
 				updated.createdAt = payload.createdAt
 				try updated.update(db)
@@ -299,6 +301,7 @@ struct PiSessionSync {
 						type: blockPayload.type,
 						text: blockPayload.text,
 						toolCallName: blockPayload.toolCallName,
+						toolCallID: blockPayload.toolCallID,
 						mimeType: blockPayload.mimeType,
 						attachmentID: blockPayload.attachmentID,
 						position: blockPayload.position
@@ -311,6 +314,7 @@ struct PiSessionSync {
 					serverMessageID: serverID,
 					role: payload.role,
 					toolName: payload.toolName,
+					toolCallID: payload.toolCallID,
 					position: payload.position,
 					createdAt: payload.createdAt
 				)
@@ -322,6 +326,7 @@ struct PiSessionSync {
 						type: blockPayload.type,
 						text: blockPayload.text,
 						toolCallName: blockPayload.toolCallName,
+						toolCallID: blockPayload.toolCallID,
 						mimeType: blockPayload.mimeType,
 						attachmentID: blockPayload.attachmentID,
 						position: blockPayload.position
@@ -345,6 +350,7 @@ struct PiSessionSync {
 				serverMessageID: payload.serverMessageID,
 				role: payload.role,
 				toolName: payload.toolName,
+				toolCallID: payload.toolCallID,
 				position: payload.position,
 				createdAt: payload.createdAt
 			)
@@ -356,6 +362,7 @@ struct PiSessionSync {
 					type: blockPayload.type,
 					text: blockPayload.text,
 					toolCallName: blockPayload.toolCallName,
+					toolCallID: blockPayload.toolCallID,
 					mimeType: blockPayload.mimeType,
 					attachmentID: blockPayload.attachmentID,
 					position: blockPayload.position
@@ -375,6 +382,12 @@ struct PiSessionSync {
 						return nil
 					}
 					return toolName
+				}(),
+				toolCallID: {
+					guard let toolCallID = remoteMessage.toolCallId?.trimmingCharacters(in: .whitespacesAndNewlines), !toolCallID.isEmpty else {
+						return nil
+					}
+					return toolCallID
 				}(),
 				position: index,
 				createdAt: remoteMessage.createdAt,
@@ -411,24 +424,26 @@ struct PiSessionSync {
 			switch block.type {
 			case "text", "thinking", "other":
 				guard let normalizedText, !normalizedText.isEmpty else { return nil }
-				return BlockPayload(type: block.type, text: normalizedText, toolCallName: nil, mimeType: nil, attachmentID: nil, position: index)
+				return BlockPayload(type: block.type, text: normalizedText, toolCallName: nil, toolCallID: nil, mimeType: nil, attachmentID: nil, position: index)
 			case "toolCall":
 				guard let toolCallName = block.toolCallName?.trimmingCharacters(in: .whitespacesAndNewlines), !toolCallName.isEmpty else {
 					return nil
 				}
-				return BlockPayload(type: "toolCall", text: normalizedText, toolCallName: toolCallName, mimeType: nil, attachmentID: nil, position: index)
+				let toolCallID = block.toolCallId?.trimmingCharacters(in: .whitespacesAndNewlines)
+				return BlockPayload(type: "toolCall", text: normalizedText, toolCallName: toolCallName, toolCallID: toolCallID?.isEmpty == false ? toolCallID : nil, mimeType: nil, attachmentID: nil, position: index)
 			case "image":
 				return BlockPayload(
 					type: "image",
 					text: nil,
 					toolCallName: nil,
+					toolCallID: nil,
 					mimeType: block.mimeType,
 					attachmentID: block.attachmentId,
 					position: index
 				)
 			default:
 				guard let normalizedText, !normalizedText.isEmpty else { return nil }
-				return BlockPayload(type: block.type, text: normalizedText, toolCallName: block.toolCallName, mimeType: block.mimeType, attachmentID: block.attachmentId, position: index)
+				return BlockPayload(type: block.type, text: normalizedText, toolCallName: block.toolCallName, toolCallID: block.toolCallId, mimeType: block.mimeType, attachmentID: block.attachmentId, position: index)
 			}
 		}
 
@@ -437,7 +452,7 @@ struct PiSessionSync {
 		}
 
 		guard !remoteMessage.body.isEmpty else { return [] }
-		return [BlockPayload(type: "text", text: remoteMessage.body, toolCallName: nil, mimeType: nil, attachmentID: nil, position: 0)]
+		return [BlockPayload(type: "text", text: remoteMessage.body, toolCallName: nil, toolCallID: nil, mimeType: nil, attachmentID: nil, position: 0)]
 	}
 
 	private nonisolated static func messagePayloads(in db: Database, piSessionID: Int64) throws -> [MessagePayload] {
@@ -464,6 +479,7 @@ struct PiSessionSync {
 				serverMessageID: message.serverMessageID,
 				role: message.role,
 				toolName: message.toolName,
+				toolCallID: message.toolCallID,
 				position: message.position,
 				createdAt: message.createdAt,
 				blocks: (blocksByMessageID[message.id ?? -1] ?? []).map(BlockPayload.init)
@@ -476,6 +492,7 @@ private nonisolated struct MessagePayload: Equatable, Sendable {
 	let serverMessageID: String?
 	let role: Message.Role
 	let toolName: String?
+	let toolCallID: String?
 	let position: Int
 	let createdAt: Date
 	let blocks: [BlockPayload]
@@ -485,6 +502,7 @@ private nonisolated struct MessagePayload: Equatable, Sendable {
 			serverMessageID: serverMessageID,
 			role: role,
 			toolName: toolName,
+			toolCallID: toolCallID,
 			position: position,
 			createdAt: createdAt,
 			blocks: blocks
@@ -496,14 +514,16 @@ private nonisolated struct BlockPayload: Equatable, Sendable {
 	let type: String
 	let text: String?
 	let toolCallName: String?
+	let toolCallID: String?
 	let mimeType: String?
 	let attachmentID: String?
 	let position: Int
 
-	nonisolated init(type: String, text: String?, toolCallName: String?, mimeType: String?, attachmentID: String?, position: Int) {
+	nonisolated init(type: String, text: String?, toolCallName: String?, toolCallID: String?, mimeType: String?, attachmentID: String?, position: Int) {
 		self.type = type
 		self.text = text
 		self.toolCallName = toolCallName
+		self.toolCallID = toolCallID
 		self.mimeType = mimeType
 		self.attachmentID = attachmentID
 		self.position = position
@@ -513,6 +533,7 @@ private nonisolated struct BlockPayload: Equatable, Sendable {
 		self.type = block.type
 		self.text = block.text
 		self.toolCallName = block.toolCallName
+		self.toolCallID = block.toolCallID
 		self.mimeType = block.mimeType
 		self.attachmentID = block.attachmentID
 		self.position = block.position

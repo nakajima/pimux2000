@@ -1,10 +1,17 @@
 import SwiftUI
 
+func shortToolCallLabel(_ value: String) -> String {
+	let trimmed = value.split(separator: "|", maxSplits: 1).first.map(String.init) ?? value
+	guard trimmed.count > 18 else { return trimmed }
+	return String(trimmed.prefix(18)) + "…"
+}
+
 struct MessageHeader: View {
 	let icon: String
 	let label: String
 	let color: Color
 	var toolName: String? = nil
+	var detailText: String? = nil
 
 	var body: some View {
 		HStack(spacing: 6) {
@@ -15,6 +22,12 @@ struct MessageHeader: View {
 
 			if let toolName {
 				Text(verbatim: "· \(toolName)")
+					.font(.caption)
+					.foregroundStyle(.secondary)
+			}
+
+			if let detailText {
+				Text(verbatim: "· \(detailText)")
 					.font(.caption)
 					.foregroundStyle(.secondary)
 			}

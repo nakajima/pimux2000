@@ -585,10 +585,12 @@ Generates a project-based daily report from the archived Postgres `sessions` / `
 ```sh
 PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux report day
 PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux report day --date 2026-04-08
+PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux report day --timezone UTC
 ```
 
 Options:
-- `--date YYYY-MM-DD` — optional local calendar day filter using the system timezone; defaults to today
+- `--date YYYY-MM-DD` — optional calendar day in the selected report timezone; defaults to today in `America/Los_Angeles`
+- `--timezone <iana-name>` — optional IANA timezone name like `America/Los_Angeles` or `UTC`; defaults to `America/Los_Angeles`
 - `--pi-agent-dir <path>`
 - `--summary-model <model>` — optional override; if omitted, pimux picks a provider-appropriate summary model based on pi's configured default provider and otherwise falls back to its legacy default summary model
 - `--ui-base-url <url>` — optional web UI base URL for report footnote links; defaults to `http://127.0.0.1:3000`
@@ -620,6 +622,14 @@ It also serves a small built-in web UI:
 - `/` — live server status dashboard for tracked hosts and sessions
 - `/ui/sessions` — archived sessions browser when Postgres backup is enabled
 - `/ui/session?host=...&id=...&message=...` — archived session transcript view with per-message permalinks
+- `/ui/reports` — daily report browser showing recent days and whether a saved report already exists
+- `/ui/report?date=YYYY-MM-DD` — renders a saved daily report, or generates and saves it on demand when missing
+
+Daily report UI behavior:
+- defaults to the `America/Los_Angeles` report timezone
+- stores generated reports under `PIMUX_REPORTS_DIR` when set
+- otherwise stores them in the pimux server state directory under `reports/daily`
+- generates missing reports on first open, then reuses the saved markdown on later visits
 
 When the server starts, it also advertises itself on the local network via Bonjour / DNS-SD as `_pimux._tcp.local.` so the iOS app can discover nearby servers automatically.
 If you want to disable that advertisement, set:

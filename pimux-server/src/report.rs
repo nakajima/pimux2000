@@ -6,7 +6,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Duration as ChronoDuration, Local, NaiveDate, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::process::Command;
@@ -17,7 +17,7 @@ use crate::{
     agent,
     host::HostIdentity,
     message::{Message, MessageContentBlockKind, collapse_whitespace},
-    session::{ActiveSession, parse_local_date_filter, utc_range_for_local_date},
+    session::{ActiveSession, parse_local_date_filter},
 };
 
 type BoxError = Box<dyn StdError + Send + Sync>;
@@ -25,6 +25,7 @@ type BoxError = Box<dyn StdError + Send + Sync>;
 pub const POSTGRES_BACKUP_URL_ENV: &str = "PIMUX_BACKUP_POSTGRES_URL";
 pub const REPORT_UI_BASE_URL_ENV: &str = "PIMUX_UI_BASE_URL";
 const DEFAULT_REPORT_UI_BASE_URL: &str = "http://127.0.0.1:3000";
+pub(crate) const DEFAULT_REPORT_TIMEZONE: &str = "America/Los_Angeles";
 const NO_WORKING_DIRECTORY: &str = "No working directory";
 const MAX_CANDIDATE_EXCERPTS: usize = 24;
 const MAX_OUTCOME_EXCERPTS: usize = 10;
@@ -43,9 +44,17 @@ const MIN_FOOTNOTE_SCORE: i32 = 35;
 #[derive(Debug, Clone)]
 pub struct DayConfig {
     pub date: Option<String>,
+    pub timezone: Option<String>,
     pub pi_agent_dir: Option<PathBuf>,
     pub summary_model: Option<String>,
     pub ui_base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GeneratedDayReport {
+    pub report_date: NaiveDate,
+    pub timezone: String,
+    pub markdown: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,27 +180,40 @@ struct RenderedMiss {
 }
 
 pub async fn day(config: DayConfig) -> Result<(), BoxError> {
-    let report_date = resolve_report_date(config.date.as_deref())?;
-    let (start, end) = utc_range_for_local_date(report_date)?;
+    let report = generate_day_report(config).await?;
+    print!("{}", report.markdown);
+    Ok(())
+}
+
+pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDayReport, BoxError> {
     let Some(postgres_url) = postgres_url_from_env() else {
         return Err(format!("{POSTGRES_BACKUP_URL_ENV} is not set").into());
     };
 
+    let timezone = resolve_report_timezone(config.timezone.as_deref())?;
     let pi_agent_dir = agent::resolve_pi_agent_dir(config.pi_agent_dir)?;
     let summary_model =
         agent::resolve_summary_model_or_default(&pi_agent_dir, config.summary_model.as_deref());
     let ui_base_url = resolve_ui_base_url(config.ui_base_url.as_deref())?;
 
-    eprintln!(
-        "loading archived activity for {} from {}...",
-        report_date, POSTGRES_BACKUP_URL_ENV
-    );
     let client = connect_postgres(&postgres_url).await?;
+    let report_date = resolve_report_date(&client, config.date.as_deref(), &timezone).await?;
+    let (start, end) = utc_range_for_report_date(&client, report_date, &timezone).await?;
+
+    eprintln!(
+        "loading archived activity for {} in {} from {}...",
+        report_date, timezone, POSTGRES_BACKUP_URL_ENV
+    );
     let messages = load_archived_messages(&client, start, end).await?;
 
     if messages.is_empty() {
-        println!("# Daily report for {report_date}\n\nNo archived project activity found.");
-        return Ok(());
+        return Ok(GeneratedDayReport {
+            report_date,
+            timezone,
+            markdown: format!(
+                "# Daily report for {report_date}\n\nNo archived project activity found.\n"
+            ),
+        });
     }
 
     let mut projects = group_messages_by_project(messages);
@@ -242,15 +264,71 @@ pub async fn day(config: DayConfig) -> Result<(), BoxError> {
         rendered_projects.push(rendered);
     }
 
-    print!("{}", render_day_report(report_date, &rendered_projects));
-    Ok(())
+    Ok(GeneratedDayReport {
+        report_date,
+        timezone,
+        markdown: render_day_report(report_date, &rendered_projects),
+    })
 }
 
-fn resolve_report_date(value: Option<&str>) -> Result<NaiveDate, BoxError> {
+fn resolve_report_timezone(value: Option<&str>) -> Result<String, BoxError> {
+    let timezone = value.unwrap_or(DEFAULT_REPORT_TIMEZONE).trim();
+    if timezone.is_empty() {
+        return Err("timezone must not be empty".into());
+    }
+    Ok(timezone.to_string())
+}
+
+async fn resolve_report_date(
+    client: &Client,
+    value: Option<&str>,
+    timezone: &str,
+) -> Result<NaiveDate, BoxError> {
     match value {
         Some(value) => Ok(parse_local_date_filter(value)?),
-        None => Ok(Local::now().date_naive()),
+        None => current_date_in_timezone(client, timezone).await,
     }
+}
+
+pub(crate) async fn current_report_date(
+    client: &Client,
+    timezone: Option<&str>,
+) -> Result<NaiveDate, BoxError> {
+    let timezone = resolve_report_timezone(timezone)?;
+    current_date_in_timezone(client, &timezone).await
+}
+
+async fn current_date_in_timezone(client: &Client, timezone: &str) -> Result<NaiveDate, BoxError> {
+    let row = client
+        .query_one(
+            "SELECT (now() AT TIME ZONE $1)::date AS local_date",
+            &[&timezone],
+        )
+        .await
+        .map_err(|error| timezone_query_error(timezone, error))?;
+    Ok(row.get("local_date"))
+}
+
+async fn utc_range_for_report_date(
+    client: &Client,
+    date: NaiveDate,
+    timezone: &str,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), BoxError> {
+    let row = client
+        .query_one(
+            concat!(
+                "SELECT ($1::date::timestamp AT TIME ZONE $2) AS start_utc, ",
+                "(($1::date + 1)::timestamp AT TIME ZONE $2) AS end_utc"
+            ),
+            &[&date, &timezone],
+        )
+        .await
+        .map_err(|error| timezone_query_error(timezone, error))?;
+    Ok((row.get("start_utc"), row.get("end_utc")))
+}
+
+fn timezone_query_error(timezone: &str, error: tokio_postgres::Error) -> BoxError {
+    format!("failed to resolve report timezone `{timezone}`: {error}").into()
 }
 
 fn postgres_url_from_env() -> Option<String> {
@@ -261,7 +339,15 @@ fn postgres_url_from_env() -> Option<String> {
 }
 
 fn resolve_ui_base_url(value: Option<&str>) -> Result<String, BoxError> {
-    let normalized = agent::normalize_server_url(value.unwrap_or(DEFAULT_REPORT_UI_BASE_URL))?;
+    let value = value.unwrap_or(DEFAULT_REPORT_UI_BASE_URL).trim();
+    if value.is_empty() {
+        return Err("UI base URL must not be empty".into());
+    }
+    if value.starts_with('/') {
+        return Ok(value.trim_end_matches('/').to_string());
+    }
+
+    let normalized = agent::normalize_server_url(value)?;
     Ok(normalized.url.trim_end_matches('/').to_string())
 }
 
@@ -1743,6 +1829,25 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn report_timezone_defaults_to_los_angeles() {
+        assert_eq!(
+            resolve_report_timezone(None).unwrap(),
+            "America/Los_Angeles"
+        );
+    }
+
+    #[test]
+    fn report_timezone_rejects_blank_override() {
+        assert!(resolve_report_timezone(Some("   ")).is_err());
+    }
+
+    #[test]
+    fn resolve_ui_base_url_accepts_relative_paths() {
+        assert_eq!(resolve_ui_base_url(Some("/")).unwrap(), "");
+        assert_eq!(resolve_ui_base_url(Some("/pimux/")).unwrap(), "/pimux");
+    }
 
     #[test]
     fn normalizes_project_keys_across_mac_and_linux_home_paths() {

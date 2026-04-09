@@ -741,21 +741,12 @@ fn extract_session_state(response: &Value) -> Result<HeadlessSessionState, Strin
 }
 
 fn rpc_message_to_message(value: &Value) -> Option<Message> {
-    let role = match value.get("role").and_then(Value::as_str)? {
-        "user" => Role::User,
-        "assistant" => Role::Assistant,
-        "toolResult" => Role::ToolResult,
-        "bashExecution" => Role::BashExecution,
-        "custom" => Role::Custom,
-        "branchSummary" => Role::BranchSummary,
-        "compactionSummary" => Role::CompactionSummary,
-        _ => Role::Other,
-    };
+    let role = Role::from_raw(value.get("role").and_then(Value::as_str)?);
 
     let created_at = value.get("timestamp").and_then(parse_unix_millis)?;
 
-    let mut parsed = match role {
-        Role::User | Role::ToolResult | Role::Custom | Role::Other => Message::from_blocks(
+    let mut parsed = match role.clone() {
+        Role::User | Role::ToolResult | Role::Custom | Role::Other(_) => Message::from_blocks(
             created_at,
             role,
             content_blocks(value.get("content"), false),
@@ -777,6 +768,7 @@ fn rpc_message_to_message(value: &Value) -> Option<Message> {
     }?;
 
     parsed.tool_name = message_tool_name(value);
+    parsed.tool_call_id = message_tool_call_id(value);
     Some(parsed)
 }
 
@@ -801,6 +793,13 @@ fn message_tool_name(message: &Value) -> Option<String> {
     }
 }
 
+fn message_tool_call_id(message: &Value) -> Option<String> {
+    message
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .and_then(normalized_display_text)
+}
+
 fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<MessageContentBlock> {
     let Some(content) = content else {
         return Vec::new();
@@ -822,7 +821,16 @@ fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<Mess
                 Some("toolCall") if include_tool_calls => {
                     let name = block.get("name").and_then(Value::as_str)?;
                     let summary = tool_call_summary(name, block.get("arguments"));
-                    MessageContentBlock::tool_call(name, summary.as_deref())
+                    match block.get("id").and_then(Value::as_str) {
+                        Some(tool_call_id) => {
+                            MessageContentBlock::tool_call_with_id(
+                                Some(tool_call_id),
+                                name,
+                                summary.as_deref(),
+                            )
+                        }
+                        None => MessageContentBlock::tool_call(name, summary.as_deref()),
+                    }
                 }
                 Some("image") => Some(MessageContentBlock::image(
                     block.get("mimeType").and_then(Value::as_str),
@@ -881,7 +889,7 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
 
-    use super::{content_blocks, prompt_payload, same_message_ignoring_id};
+    use super::{content_blocks, prompt_payload, rpc_message_to_message, same_message_ignoring_id};
     use crate::message::{ImageContent, Message, MessageContentBlockKind, Role};
 
     #[test]
@@ -926,5 +934,21 @@ mod tests {
         persisted.blocks[0].text = Some("abc".to_string());
 
         assert!(same_message_ignoring_id(&persisted, &live));
+    }
+
+    #[test]
+    fn rpc_messages_preserve_tool_call_id_and_unknown_role() {
+        let message = json!({
+            "timestamp": 1_000,
+            "role": "futureRole",
+            "toolCallId": "call-xyz",
+            "content": [
+                { "type": "text", "text": "hello" }
+            ]
+        });
+
+        let parsed = rpc_message_to_message(&message).unwrap();
+        assert_eq!(parsed.role, Role::Other("futureRole".to_string()));
+        assert_eq!(parsed.tool_call_id.as_deref(), Some("call-xyz"));
     }
 }

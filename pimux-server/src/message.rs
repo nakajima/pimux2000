@@ -1,9 +1,8 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
     User,
     Assistant,
@@ -12,7 +11,65 @@ pub enum Role {
     Custom,
     BranchSummary,
     CompactionSummary,
-    Other,
+    Other(String),
+}
+
+impl Role {
+    pub fn from_raw(raw: &str) -> Self {
+        match raw {
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            "toolResult" => Self::ToolResult,
+            "bashExecution" => Self::BashExecution,
+            "custom" => Self::Custom,
+            "branchSummary" => Self::BranchSummary,
+            "compactionSummary" => Self::CompactionSummary,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    pub fn raw_value(&self) -> &str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::ToolResult => "toolResult",
+            Self::BashExecution => "bashExecution",
+            Self::Custom => "custom",
+            Self::BranchSummary => "branchSummary",
+            Self::CompactionSummary => "compactionSummary",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+
+    pub fn dedupe_value(&self) -> &str {
+        match self {
+            Self::Other(_) => "other",
+            _ => self.raw_value(),
+        }
+    }
+
+    pub fn is_assistant(&self) -> bool {
+        matches!(self, Self::Assistant)
+    }
+}
+
+impl Serialize for Role {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.raw_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for Role {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::from_raw(&raw))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +116,8 @@ pub struct MessageContentBlock {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,6 +133,8 @@ pub struct Message {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "toolCallId")]
+    pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<MessageContentBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "messageId")]
@@ -90,6 +151,8 @@ pub struct ApiMessageContentBlock {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment_id: Option<String>,
@@ -104,6 +167,8 @@ pub struct ApiMessage {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "toolCallId")]
+    pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<ApiMessageContentBlock>,
 }
@@ -127,11 +192,14 @@ impl Message {
             return None;
         }
 
+        let body = body_from_blocks(&role, &blocks);
+
         Some(Self {
             created_at,
             role,
-            body: body_from_blocks(role, &blocks),
+            body,
             tool_name: None,
+            tool_call_id: None,
             blocks,
             message_id: None,
         })
@@ -141,9 +209,10 @@ impl Message {
         ApiMessage {
             message_id: self.message_id.clone(),
             created_at: self.created_at,
-            role: self.role,
+            role: self.role.clone(),
             body: self.body.clone(),
             tool_name: self.tool_name.clone(),
+            tool_call_id: self.tool_call_id.clone(),
             blocks: self
                 .blocks
                 .iter()
@@ -159,6 +228,7 @@ impl MessageContentBlock {
             kind: MessageContentBlockKind::Text,
             text: Some(text),
             tool_call_name: None,
+            tool_call_id: None,
             mime_type: None,
             data: None,
             attachment_id: None,
@@ -170,6 +240,7 @@ impl MessageContentBlock {
             kind: MessageContentBlockKind::Thinking,
             text: Some(text),
             tool_call_name: None,
+            tool_call_id: None,
             mime_type: None,
             data: None,
             attachment_id: None,
@@ -177,6 +248,14 @@ impl MessageContentBlock {
     }
 
     pub fn tool_call(name: impl AsRef<str>, text: Option<&str>) -> Option<Self> {
+        Self::tool_call_with_id(None, name, text)
+    }
+
+    pub fn tool_call_with_id(
+        tool_call_id: Option<&str>,
+        name: impl AsRef<str>,
+        text: Option<&str>,
+    ) -> Option<Self> {
         let name = collapse_whitespace(name.as_ref());
         if name.is_empty() {
             return None;
@@ -186,6 +265,7 @@ impl MessageContentBlock {
             kind: MessageContentBlockKind::ToolCall,
             text: text.and_then(normalized_display_text),
             tool_call_name: Some(name),
+            tool_call_id: tool_call_id.and_then(normalized_display_text),
             mime_type: None,
             data: None,
             attachment_id: None,
@@ -197,6 +277,7 @@ impl MessageContentBlock {
             kind: MessageContentBlockKind::Image,
             text: None,
             tool_call_name: None,
+            tool_call_id: None,
             mime_type: mime_type.and_then(normalize_mime_type),
             data: data.and_then(normalize_image_data),
             attachment_id: None,
@@ -250,6 +331,7 @@ impl From<&MessageContentBlock> for ApiMessageContentBlock {
             kind: block.kind,
             text: block.text.clone(),
             tool_call_name: block.tool_call_name.clone(),
+            tool_call_id: block.tool_call_id.clone(),
             mime_type: block.mime_type.clone(),
             attachment_id,
         }
@@ -262,6 +344,7 @@ impl From<&ApiMessageContentBlock> for MessageContentBlock {
             kind: block.kind,
             text: block.text.clone(),
             tool_call_name: block.tool_call_name.clone(),
+            tool_call_id: block.tool_call_id.clone(),
             mime_type: block.mime_type.clone(),
             data: None,
             attachment_id: block.attachment_id.clone(),
@@ -273,9 +356,10 @@ impl From<&ApiMessage> for Message {
     fn from(message: &ApiMessage) -> Self {
         Self {
             created_at: message.created_at,
-            role: message.role,
+            role: message.role.clone(),
             body: message.body.clone(),
             tool_name: message.tool_name.clone(),
+            tool_call_id: message.tool_call_id.clone(),
             blocks: message
                 .blocks
                 .iter()
@@ -480,6 +564,7 @@ fn normalize_block(mut block: MessageContentBlock) -> Option<MessageContentBlock
                 return None;
             }
             block.tool_call_name = None;
+            block.tool_call_id = None;
             block.mime_type = None;
             block.data = None;
             block.attachment_id = None;
@@ -495,6 +580,7 @@ fn normalize_block(mut block: MessageContentBlock) -> Option<MessageContentBlock
                 return None;
             }
             block.text = block.text.as_deref().and_then(normalized_display_text);
+            block.tool_call_id = block.tool_call_id.as_deref().and_then(normalized_display_text);
             block.mime_type = None;
             block.data = None;
             block.attachment_id = None;
@@ -502,6 +588,7 @@ fn normalize_block(mut block: MessageContentBlock) -> Option<MessageContentBlock
         MessageContentBlockKind::Image => {
             block.text = None;
             block.tool_call_name = None;
+            block.tool_call_id = None;
             block.mime_type = block.mime_type.as_deref().and_then(normalize_mime_type);
             block.data = block.data.as_deref().and_then(normalize_image_data);
             block.attachment_id = block
@@ -520,12 +607,12 @@ fn normalize_block(mut block: MessageContentBlock) -> Option<MessageContentBlock
     Some(block)
 }
 
-fn body_from_blocks(role: Role, blocks: &[MessageContentBlock]) -> String {
+fn body_from_blocks(role: &Role, blocks: &[MessageContentBlock]) -> String {
     let parts = blocks
         .iter()
         .filter_map(|block| match block.kind {
             MessageContentBlockKind::Text => block.text.clone(),
-            MessageContentBlockKind::ToolCall if role == Role::Assistant => block
+            MessageContentBlockKind::ToolCall if role.is_assistant() => block
                 .tool_call_name
                 .as_ref()
                 .map(|name| format!("Tool call: {name}")),
@@ -638,6 +725,35 @@ mod tests {
         assert_eq!(api.blocks[0].kind, MessageContentBlockKind::Image);
         assert_eq!(api.blocks[0].mime_type.as_deref(), Some("image/png"));
         assert!(api.blocks[0].attachment_id.is_some());
+    }
+
+    #[test]
+    fn preserves_unknown_role_raw_value_through_json() {
+        let role = Role::Other("planning-mode-state".to_string());
+        let encoded = serde_json::to_string(&role).unwrap();
+        let decoded = serde_json::from_str::<Role>(&encoded).unwrap();
+
+        assert_eq!(encoded, "\"planning-mode-state\"");
+        assert_eq!(decoded, role);
+        assert_eq!(decoded.raw_value(), "planning-mode-state");
+    }
+
+    #[test]
+    fn tool_call_blocks_preserve_tool_call_id_for_api() {
+        let message = Message::from_blocks(
+            Utc::now(),
+            Role::Assistant,
+            vec![MessageContentBlock::tool_call_with_id(
+                Some("call-123"),
+                "read",
+                Some("foo.txt"),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+
+        let api = message.to_api();
+        assert_eq!(api.blocks[0].tool_call_id.as_deref(), Some("call-123"));
     }
 
     #[test]

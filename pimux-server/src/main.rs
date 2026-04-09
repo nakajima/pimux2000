@@ -101,9 +101,12 @@ enum ReportCommand {
 
 #[derive(Debug, Args)]
 struct ReportDayArgs {
-    /// Local calendar day to report on, for example 2026-04-08. Defaults to today in the system timezone.
+    /// Local calendar day to report on, for example 2026-04-08. Defaults to today in America/Los_Angeles unless --timezone is passed.
     #[arg(long)]
     date: Option<String>,
+    /// IANA timezone name used for day boundaries, for example America/Los_Angeles or UTC.
+    #[arg(long)]
+    timezone: Option<String>,
     /// Override pi's agent directory (defaults to PI_CODING_AGENT_DIR or ~/.pi/agent)
     #[arg(long, env = "PI_CODING_AGENT_DIR")]
     pi_agent_dir: Option<PathBuf>,
@@ -364,6 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             ReportCommand::Day(args) => {
                 report::day(report::DayConfig {
                     date: args.date,
+                    timezone: args.timezone,
                     pi_agent_dir: args.pi_agent_dir,
                     summary_model: args.summary_model,
                     ui_base_url: args.ui_base_url,

@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title><%= title %></title>
-  <style><%- common_style %></style>
+<link rel="stylesheet" href="/static/reset.css">
+  <link rel="stylesheet" href="/static/pimux.css">
 </head>
 <body>
   <main>

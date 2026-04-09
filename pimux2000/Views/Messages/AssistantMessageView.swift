@@ -40,10 +40,17 @@ struct AssistantMessageView: View {
 
 		case "toolCall":
 			VStack(alignment: .leading, spacing: 0) {
-				HStack {
-					Text(verbatim: block.toolCallName ?? "unknown tool")
-						.font(.caption)
-						.fontDesign(.monospaced)
+				HStack(alignment: .firstTextBaseline) {
+					VStack(alignment: .leading, spacing: 2) {
+						Text(verbatim: block.toolCallName ?? "unknown tool")
+							.font(.caption)
+							.fontDesign(.monospaced)
+						if let toolCallID = block.toolCallID, !toolCallID.isEmpty {
+							Text(verbatim: shortToolCallLabel(toolCallID))
+								.font(.caption2)
+								.foregroundStyle(.secondary)
+						}
+					}
 					Spacer()
 					Image(systemName: "terminal.fill")
 				}

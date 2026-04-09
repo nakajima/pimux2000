@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::{
     host::{HostAuth, HostIdentity},
-    message::{Message, Role},
+    message::{Message, MessageContentBlockKind, Role},
     session::ActiveSession,
     transcript::{SessionMessagesResponse, TranscriptFreshnessState, TranscriptSource},
 };
@@ -18,6 +18,7 @@ use super::BoxError;
 pub const POSTGRES_BACKUP_URL_ENV: &str = "PIMUX_BACKUP_POSTGRES_URL";
 const BACKUP_QUEUE_CAPACITY: usize = 256;
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
+const TRANSCRIPT_SCHEMA_VERSION_V2: i16 = 2;
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
     host_location TEXT NOT NULL,
@@ -39,10 +40,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     activity_active BOOLEAN,
     activity_attached BOOLEAN,
     warnings_json JSONB,
+    transcript_schema_version SMALLINT NOT NULL DEFAULT 1,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (host_location, session_id)
 );
+ALTER TABLE sessions
+    ADD COLUMN IF NOT EXISTS transcript_schema_version SMALLINT NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS sessions_updated_at_idx
     ON sessions (updated_at DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS sessions_last_seen_at_idx
@@ -58,6 +62,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role TEXT NOT NULL,
     body TEXT NOT NULL,
     tool_name TEXT,
+    tool_call_id TEXT,
     message_json JSONB NOT NULL,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_seen_at TIMESTAMPTZ NOT NULL,
@@ -66,11 +71,16 @@ CREATE TABLE IF NOT EXISTS messages (
         REFERENCES sessions (host_location, session_id)
         ON DELETE CASCADE
 );
+ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS tool_call_id TEXT;
 CREATE INDEX IF NOT EXISTS messages_session_created_at_idx
     ON messages (host_location, session_id, created_at, ordinal);
 CREATE INDEX IF NOT EXISTS messages_message_id_idx
     ON messages (message_id)
     WHERE message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS messages_tool_call_id_idx
+    ON messages (tool_call_id)
+    WHERE tool_call_id IS NOT NULL;
 "#;
 
 #[derive(Debug, Clone)]
@@ -122,6 +132,7 @@ struct SessionRow {
     activity_active: Option<bool>,
     activity_attached: Option<bool>,
     warnings_json: Option<Value>,
+    transcript_schema_version: i16,
     last_seen_at: DateTime<Utc>,
 }
 
@@ -201,6 +212,22 @@ impl PostgresBackupStore {
         let row = session_row(host, active_session, Some(transcript), observed_at)?;
         let transaction = self.client.transaction().await?;
         upsert_session_row(&transaction, &row).await?;
+        let inserted = upsert_message_rows(&transaction, host, transcript, observed_at).await?;
+        transaction.commit().await?;
+        Ok(inserted)
+    }
+
+    pub async fn replace_transcript(
+        &mut self,
+        host: &HostIdentity,
+        active_session: Option<&ActiveSession>,
+        transcript: &SessionMessagesResponse,
+        observed_at: DateTime<Utc>,
+    ) -> Result<usize, BoxError> {
+        let row = session_row(host, active_session, Some(transcript), observed_at)?;
+        let transaction = self.client.transaction().await?;
+        upsert_session_row(&transaction, &row).await?;
+        delete_message_rows(&transaction, &row.host_location, &row.session_id).await?;
         let inserted = upsert_message_rows(&transaction, host, transcript, observed_at).await?;
         transaction.commit().await?;
         Ok(inserted)
@@ -300,7 +327,7 @@ async fn connect_and_initialize(url: &str) -> Result<Client, BoxError> {
 async fn upsert_session_row(client: &impl GenericClient, row: &SessionRow) -> Result<(), BoxError> {
     client
         .execute(
-            "INSERT INTO sessions (host_location, session_id, host_auth, summary, created_at, updated_at, last_user_message_at, last_assistant_message_at, cwd, model, context_usage_used_tokens, context_usage_max_tokens, supports_images, transcript_freshness_state, transcript_freshness_source, transcript_freshness_as_of, activity_active, activity_attached, warnings_json, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) ON CONFLICT (host_location, session_id) DO UPDATE SET host_auth = EXCLUDED.host_auth, summary = COALESCE(EXCLUDED.summary, sessions.summary), created_at = COALESCE(EXCLUDED.created_at, sessions.created_at), updated_at = COALESCE(EXCLUDED.updated_at, sessions.updated_at), last_user_message_at = COALESCE(EXCLUDED.last_user_message_at, sessions.last_user_message_at), last_assistant_message_at = COALESCE(EXCLUDED.last_assistant_message_at, sessions.last_assistant_message_at), cwd = COALESCE(EXCLUDED.cwd, sessions.cwd), model = COALESCE(EXCLUDED.model, sessions.model), context_usage_used_tokens = COALESCE(EXCLUDED.context_usage_used_tokens, sessions.context_usage_used_tokens), context_usage_max_tokens = COALESCE(EXCLUDED.context_usage_max_tokens, sessions.context_usage_max_tokens), supports_images = COALESCE(EXCLUDED.supports_images, sessions.supports_images), transcript_freshness_state = COALESCE(EXCLUDED.transcript_freshness_state, sessions.transcript_freshness_state), transcript_freshness_source = COALESCE(EXCLUDED.transcript_freshness_source, sessions.transcript_freshness_source), transcript_freshness_as_of = COALESCE(EXCLUDED.transcript_freshness_as_of, sessions.transcript_freshness_as_of), activity_active = COALESCE(EXCLUDED.activity_active, sessions.activity_active), activity_attached = COALESCE(EXCLUDED.activity_attached, sessions.activity_attached), warnings_json = COALESCE(EXCLUDED.warnings_json, sessions.warnings_json), last_seen_at = GREATEST(sessions.last_seen_at, EXCLUDED.last_seen_at)",
+            "INSERT INTO sessions (host_location, session_id, host_auth, summary, created_at, updated_at, last_user_message_at, last_assistant_message_at, cwd, model, context_usage_used_tokens, context_usage_max_tokens, supports_images, transcript_freshness_state, transcript_freshness_source, transcript_freshness_as_of, activity_active, activity_attached, warnings_json, transcript_schema_version, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) ON CONFLICT (host_location, session_id) DO UPDATE SET host_auth = EXCLUDED.host_auth, summary = COALESCE(EXCLUDED.summary, sessions.summary), created_at = COALESCE(EXCLUDED.created_at, sessions.created_at), updated_at = COALESCE(EXCLUDED.updated_at, sessions.updated_at), last_user_message_at = COALESCE(EXCLUDED.last_user_message_at, sessions.last_user_message_at), last_assistant_message_at = COALESCE(EXCLUDED.last_assistant_message_at, sessions.last_assistant_message_at), cwd = COALESCE(EXCLUDED.cwd, sessions.cwd), model = COALESCE(EXCLUDED.model, sessions.model), context_usage_used_tokens = COALESCE(EXCLUDED.context_usage_used_tokens, sessions.context_usage_used_tokens), context_usage_max_tokens = COALESCE(EXCLUDED.context_usage_max_tokens, sessions.context_usage_max_tokens), supports_images = COALESCE(EXCLUDED.supports_images, sessions.supports_images), transcript_freshness_state = COALESCE(EXCLUDED.transcript_freshness_state, sessions.transcript_freshness_state), transcript_freshness_source = COALESCE(EXCLUDED.transcript_freshness_source, sessions.transcript_freshness_source), transcript_freshness_as_of = COALESCE(EXCLUDED.transcript_freshness_as_of, sessions.transcript_freshness_as_of), activity_active = COALESCE(EXCLUDED.activity_active, sessions.activity_active), activity_attached = COALESCE(EXCLUDED.activity_attached, sessions.activity_attached), warnings_json = COALESCE(EXCLUDED.warnings_json, sessions.warnings_json), transcript_schema_version = GREATEST(sessions.transcript_schema_version, EXCLUDED.transcript_schema_version), last_seen_at = GREATEST(sessions.last_seen_at, EXCLUDED.last_seen_at)",
             &[
                 &row.host_location,
                 &row.session_id,
@@ -321,8 +348,23 @@ async fn upsert_session_row(client: &impl GenericClient, row: &SessionRow) -> Re
                 &row.activity_active,
                 &row.activity_attached,
                 &row.warnings_json,
+                &row.transcript_schema_version,
                 &row.last_seen_at,
             ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn delete_message_rows(
+    client: &impl GenericClient,
+    host_location: &str,
+    session_id: &str,
+) -> Result<(), BoxError> {
+    client
+        .execute(
+            "DELETE FROM messages WHERE host_location = $1 AND session_id = $2",
+            &[&host_location, &session_id],
         )
         .await?;
     Ok(())
@@ -342,13 +384,14 @@ async fn upsert_message_rows(
         let message_id = sanitize_option_postgres_text(message.message_id.clone());
         let body = sanitize_postgres_text(&message.body);
         let tool_name = sanitize_option_postgres_text(message.tool_name.clone());
+        let tool_call_id = sanitize_option_postgres_text(message.tool_call_id.clone());
         let message_json = sanitize_json_value(serde_json::to_value(message)?);
         let ordinal = i32::try_from(ordinal).unwrap_or(i32::MAX);
-        let role = role_name(message.role);
+        let role = sanitize_postgres_text(message.role.raw_value());
 
         client
             .execute(
-                "INSERT INTO messages (host_location, session_id, dedupe_key, message_id, ordinal, created_at, role, body, tool_name, message_json, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT (host_location, session_id, dedupe_key) DO UPDATE SET message_id = COALESCE(EXCLUDED.message_id, messages.message_id), ordinal = EXCLUDED.ordinal, created_at = EXCLUDED.created_at, role = EXCLUDED.role, body = EXCLUDED.body, tool_name = COALESCE(EXCLUDED.tool_name, messages.tool_name), message_json = EXCLUDED.message_json, last_seen_at = GREATEST(messages.last_seen_at, EXCLUDED.last_seen_at)",
+                "INSERT INTO messages (host_location, session_id, dedupe_key, message_id, ordinal, created_at, role, body, tool_name, tool_call_id, message_json, last_seen_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) ON CONFLICT (host_location, session_id, dedupe_key) DO UPDATE SET message_id = COALESCE(EXCLUDED.message_id, messages.message_id), ordinal = EXCLUDED.ordinal, created_at = EXCLUDED.created_at, role = EXCLUDED.role, body = EXCLUDED.body, tool_name = COALESCE(EXCLUDED.tool_name, messages.tool_name), tool_call_id = COALESCE(EXCLUDED.tool_call_id, messages.tool_call_id), message_json = EXCLUDED.message_json, last_seen_at = GREATEST(messages.last_seen_at, EXCLUDED.last_seen_at)",
                 &[
                     &host_location,
                     &session_id,
@@ -359,6 +402,7 @@ async fn upsert_message_rows(
                     &role,
                     &body,
                     &tool_name,
+                    &tool_call_id,
                     &message_json,
                     &observed_at,
                 ],
@@ -432,6 +476,11 @@ fn session_row(
         activity_active: transcript.map(|transcript| transcript.activity.active),
         activity_attached: transcript.map(|transcript| transcript.activity.attached),
         warnings_json,
+        transcript_schema_version: if transcript.is_some() {
+            TRANSCRIPT_SCHEMA_VERSION_V2
+        } else {
+            1
+        },
         last_seen_at: observed_at,
     })
 }
@@ -485,19 +534,6 @@ fn freshness_source_name(source: TranscriptSource) -> &'static str {
     }
 }
 
-fn role_name(role: Role) -> &'static str {
-    match role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::ToolResult => "toolResult",
-        Role::BashExecution => "bashExecution",
-        Role::Custom => "custom",
-        Role::BranchSummary => "branchSummary",
-        Role::CompactionSummary => "compactionSummary",
-        Role::Other => "other",
-    }
-}
-
 fn saturating_u64_to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
@@ -509,7 +545,57 @@ fn message_dedupe_key(message: &Message) -> Result<String, BoxError> {
         return Ok(format!("id:{message_id}"));
     }
 
-    let fingerprint = serde_json::to_string(message)?;
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LegacyBlockFingerprint<'a> {
+        #[serde(rename = "type")]
+        kind: MessageContentBlockKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_call_name: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mime_type: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<&'a str>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachment_id: Option<&'a str>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct LegacyMessageFingerprint<'a> {
+        created_at: DateTime<Utc>,
+        role: &'a str,
+        body: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_name: Option<&'a str>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocks: Vec<LegacyBlockFingerprint<'a>>,
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "messageId")]
+        message_id: Option<&'a str>,
+    }
+
+    let fingerprint = LegacyMessageFingerprint {
+        created_at: message.created_at,
+        role: message.role.dedupe_value(),
+        body: &message.body,
+        tool_name: message.tool_name.as_deref(),
+        blocks: message
+            .blocks
+            .iter()
+            .map(|block| LegacyBlockFingerprint {
+                kind: block.kind,
+                text: block.text.as_deref(),
+                tool_call_name: block.tool_call_name.as_deref(),
+                mime_type: block.mime_type.as_deref(),
+                data: block.data.as_deref(),
+                attachment_id: block.attachment_id.as_deref(),
+            })
+            .collect(),
+        message_id: message.message_id.as_deref(),
+    };
+
+    let fingerprint = serde_json::to_string(&fingerprint)?;
     Ok(format!("fnv1a64:{:016x}", fnv1a64(fingerprint.as_bytes())))
 }
 
@@ -554,6 +640,27 @@ mod tests {
         let first = message_dedupe_key(&message).unwrap();
         let second = message_dedupe_key(&message).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn message_dedupe_key_ignores_new_tool_call_linkage_fields() {
+        let mut message = Message::from_blocks(
+            Utc.timestamp_opt(1_000, 0).unwrap(),
+            Role::Assistant,
+            vec![MessageContentBlock::tool_call_with_id(
+                Some("call-123"),
+                "read",
+                Some("foo.txt"),
+            )
+            .unwrap()],
+        )
+        .unwrap();
+        let baseline = message_dedupe_key(&message).unwrap();
+
+        message.tool_call_id = Some("result-call-123".to_string());
+        message.blocks[0].tool_call_id = Some("call-999".to_string());
+
+        assert_eq!(message_dedupe_key(&message).unwrap(), baseline);
     }
 
     #[test]
@@ -606,6 +713,7 @@ mod tests {
         assert_eq!(row.session_id, "session-1");
         assert_eq!(row.transcript_freshness_state.as_deref(), Some("live"));
         assert_eq!(row.activity_active, Some(true));
+        assert_eq!(row.transcript_schema_version, TRANSCRIPT_SCHEMA_VERSION_V2);
         assert!(row.warnings_json.is_some());
     }
 

@@ -146,20 +146,11 @@ fn entry_to_message(entry: &Value) -> Option<Message> {
 
 fn nested_message_to_message(entry: &Value) -> Option<Message> {
     let message = entry.get("message")?;
-    let role = match message.get("role").and_then(Value::as_str)? {
-        "user" => Role::User,
-        "assistant" => Role::Assistant,
-        "toolResult" => Role::ToolResult,
-        "bashExecution" => Role::BashExecution,
-        "custom" => Role::Custom,
-        "branchSummary" => Role::BranchSummary,
-        "compactionSummary" => Role::CompactionSummary,
-        _ => Role::Other,
-    };
+    let role = Role::from_raw(message.get("role").and_then(Value::as_str)?);
     let created_at = parse_message_timestamp(entry, message)?;
 
-    let mut parsed = match role {
-        Role::User | Role::ToolResult | Role::Custom | Role::Other => Message::from_blocks(
+    let mut parsed = match role.clone() {
+        Role::User | Role::ToolResult | Role::Custom | Role::Other(_) => Message::from_blocks(
             created_at,
             role,
             content_blocks(message.get("content"), false),
@@ -189,6 +180,7 @@ fn nested_message_to_message(entry: &Value) -> Option<Message> {
     }?;
 
     parsed.tool_name = message_tool_name(message);
+    parsed.tool_call_id = message_tool_call_id(message);
     Some(parsed)
 }
 
@@ -230,6 +222,13 @@ fn message_tool_name(message: &Value) -> Option<String> {
     }
 }
 
+fn message_tool_call_id(message: &Value) -> Option<String> {
+    message
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .and_then(normalized_display_text)
+}
+
 fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<MessageContentBlock> {
     let Some(content) = content else {
         return Vec::new();
@@ -251,7 +250,16 @@ fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<Mess
                 Some("toolCall") if include_tool_calls => {
                     let name = block.get("name").and_then(Value::as_str)?;
                     let summary = tool_call_summary(name, block.get("arguments"));
-                    MessageContentBlock::tool_call(name, summary.as_deref())
+                    match block.get("id").and_then(Value::as_str) {
+                        Some(tool_call_id) => {
+                            MessageContentBlock::tool_call_with_id(
+                                Some(tool_call_id),
+                                name,
+                                summary.as_deref(),
+                            )
+                        }
+                        None => MessageContentBlock::tool_call(name, summary.as_deref()),
+                    }
                 }
                 Some("image") => Some(MessageContentBlock::image(
                     block.get("mimeType").and_then(Value::as_str),
@@ -365,6 +373,7 @@ mod tests {
             },
             {
                 "type": "toolCall",
+                "id": "call-123",
                 "name": "bash",
                 "arguments": {
                     "command": "ls -la",
@@ -379,6 +388,7 @@ mod tests {
         assert_eq!(blocks[0].text.as_deref(), Some("considering"));
         assert_eq!(blocks[1].kind, MessageContentBlockKind::ToolCall);
         assert_eq!(blocks[1].tool_call_name.as_deref(), Some("bash"));
+        assert_eq!(blocks[1].tool_call_id.as_deref(), Some("call-123"));
         assert_eq!(blocks[1].text.as_deref(), Some("$ ls -la\n\ntimeout: 10s"));
     }
 

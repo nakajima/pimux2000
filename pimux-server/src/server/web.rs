@@ -1,4 +1,7 @@
-use std::env;
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use axum::{
     extract::{Query, State},
@@ -6,277 +9,32 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Utc};
-use sailfish::TemplateSimple;
+use chrono::{DateTime, Days, NaiveDate, Utc};
+use pulldown_cmark::{Options, Parser};
+use sailfish::{TemplateSimple, runtime::escape::escape_to_string};
 use serde::Deserialize;
+use serde_json::Value;
 use tokio_postgres::{Client, NoTls};
 use tracing::warn;
 
-use crate::session::ActiveSession;
+use crate::{
+    message::{Message, MessageContentBlockKind, normalized_display_text},
+    report::{self, DayConfig},
+    session::{ActiveSession, parse_local_date_filter},
+};
 
 use super::{AppState, HostRecord, postgres_backup};
 
-const COMMON_STYLE: &str = r#"
-:root {
-  color-scheme: light dark;
-  --bg: #0b1020;
-  --bg-elevated: #121932;
-  --border: #2a365f;
-  --fg: #edf2ff;
-  --muted: #9aa6c6;
-  --accent: #7dd3fc;
-  --accent-strong: #38bdf8;
-  --green: #34d399;
-  --yellow: #fbbf24;
-  --red: #f87171;
-  --code-bg: rgba(148, 163, 184, 0.15);
-  --shadow: 0 18px 50px rgba(15, 23, 42, 0.28);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-body {
-  margin: 0;
-  background: linear-gradient(180deg, #0b1020 0%, #0f172a 100%);
-  color: var(--fg);
-}
-main {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 32px 20px 64px;
-}
-a {
-  color: var(--accent);
-  text-decoration: none;
-}
-a:hover {
-  color: var(--accent-strong);
-  text-decoration: underline;
-}
-code {
-  background: var(--code-bg);
-  border-radius: 6px;
-  padding: 0.15rem 0.35rem;
-  font-size: 0.92em;
-}
-pre {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font: 0.95rem/1.55 ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
-}
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 24px;
-}
-.page-header h1 {
-  margin: 0;
-  font-size: clamp(1.8rem, 5vw, 2.6rem);
-}
-.eyebrow {
-  margin: 0 0 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  font-size: 0.72rem;
-  color: var(--accent);
-}
-.nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-.nav a {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 0.55rem 0.9rem;
-  background: rgba(15, 23, 42, 0.35);
-}
-.card {
-  background: rgba(18, 25, 50, 0.92);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  box-shadow: var(--shadow);
-}
-.stats {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 14px;
-  margin-bottom: 22px;
-}
-.stat-card {
-  padding: 16px;
-}
-.stat-label {
-  display: block;
-  color: var(--muted);
-  font-size: 0.9rem;
-  margin-bottom: 6px;
-}
-.stat-value {
-  font-size: 1.7rem;
-  font-weight: 700;
-}
-.stack {
-  display: grid;
-  gap: 18px;
-}
-.host-card,
-.list-card,
-.session-card,
-.error-card {
-  padding: 18px;
-}
-.host-header,
-.row-header,
-.session-header,
-.message-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-}
-.host-header h2,
-.row-header h2,
-.session-header h2 {
-  margin: 0;
-  font-size: 1.2rem;
-}
-.muted,
-.meta,
-.empty {
-  color: var(--muted);
-}
-.meta {
-  display: block;
-  margin-top: 4px;
-  font-size: 0.92rem;
-}
-.status-pill,
-.role-pill {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  padding: 0.3rem 0.7rem;
-  font-size: 0.82rem;
-  font-weight: 700;
-  border: 1px solid transparent;
-  white-space: nowrap;
-}
-.status-connected {
-  color: var(--green);
-  background: rgba(52, 211, 153, 0.12);
-  border-color: rgba(52, 211, 153, 0.35);
-}
-.status-missing {
-  color: var(--yellow);
-  background: rgba(251, 191, 36, 0.12);
-  border-color: rgba(251, 191, 36, 0.35);
-}
-.role-user {
-  color: var(--accent);
-  background: rgba(56, 189, 248, 0.12);
-  border-color: rgba(56, 189, 248, 0.35);
-}
-.role-assistant {
-  color: var(--green);
-  background: rgba(52, 211, 153, 0.12);
-  border-color: rgba(52, 211, 153, 0.35);
-}
-.role-tool,
-.role-other {
-  color: var(--yellow);
-  background: rgba(251, 191, 36, 0.12);
-  border-color: rgba(251, 191, 36, 0.35);
-}
-.session-list,
-.archive-list,
-.message-list,
-.key-value-list {
-  list-style: none;
-  margin: 14px 0 0;
-  padding: 0;
-}
-.session-list,
-.archive-list,
-.message-list {
-  display: grid;
-  gap: 12px;
-}
-.session-item,
-.archive-item,
-.message-item {
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 14px;
-  padding: 14px;
-  background: rgba(15, 23, 42, 0.38);
-}
-.message-item {
-  scroll-margin-top: 18px;
-}
-.message-item.selected {
-  border-color: rgba(125, 211, 252, 0.9);
-  box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.65);
-}
-.actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: center;
-}
-.key-value-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
-}
-.key-value-list li {
-  padding: 12px 14px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  border-radius: 14px;
-  background: rgba(15, 23, 42, 0.38);
-}
-.key {
-  display: block;
-  color: var(--muted);
-  font-size: 0.85rem;
-  margin-bottom: 4px;
-}
-.message-body {
-  margin-top: 12px;
-}
-.permalink {
-  font-weight: 700;
-  font-size: 1rem;
-}
-.callout {
-  margin: 16px 0 0;
-  padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px solid rgba(125, 211, 252, 0.35);
-  background: rgba(56, 189, 248, 0.09);
-}
-.error-card h1 {
-  margin-top: 0;
-}
-@media (max-width: 720px) {
-  .page-header,
-  .host-header,
-  .row-header,
-  .session-header,
-  .message-header {
-    flex-direction: column;
-  }
-}
-"#;
 const DEFAULT_ARCHIVE_SESSION_COUNT: i64 = 100;
 const MAX_ARCHIVE_SESSION_COUNT: i64 = 500;
+const DEFAULT_REPORT_DAY_COUNT: u32 = 14;
+const MAX_REPORT_DAY_COUNT: u32 = 90;
+const REPORTS_DIR_ENV: &str = "PIMUX_REPORTS_DIR";
+const WEB_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/status.stpl")]
 struct StatusPageTemplate {
-    common_style: &'static str,
     server_version: String,
     postgres_enabled: bool,
     tracked_hosts: usize,
@@ -311,7 +69,6 @@ struct StatusSessionView {
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/archive_sessions.stpl")]
 struct ArchiveSessionsPageTemplate {
-    common_style: &'static str,
     total_sessions: usize,
     sessions: Vec<ArchiveSessionListItemView>,
 }
@@ -331,7 +88,6 @@ struct ArchiveSessionListItemView {
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/archive_session.stpl")]
 struct ArchiveSessionPageTemplate {
-    common_style: &'static str,
     host_location: String,
     session_id: String,
     summary: String,
@@ -359,15 +115,73 @@ struct ArchiveMessageView {
     role: String,
     role_class: &'static str,
     tool_name: Option<String>,
-    body: String,
+    tool_call_badge: Option<String>,
+    related_tool_call: Option<ArchiveToolLinkView>,
+    tool_call_blocks: Vec<ArchiveToolCallBlockView>,
+    body_html: String,
+    body_format_class: &'static str,
     is_selected: bool,
     permalink_url: String,
+}
+
+#[derive(Debug)]
+struct ArchiveToolLinkView {
+    label: String,
+    url: String,
+}
+
+#[derive(Debug)]
+struct ArchiveToolCallBlockView {
+    anchor_id: String,
+    tool_name: String,
+    tool_call_badge: Option<String>,
+    body_html: String,
+    result_link: Option<ArchiveToolLinkView>,
+}
+
+#[derive(Debug)]
+struct ParsedArchiveMessage {
+    record: ArchiveMessageRecord,
+    normalized: Option<Message>,
+}
+
+#[derive(Debug, TemplateSimple)]
+#[template(path = "web/reports.stpl")]
+struct ReportsPageTemplate {
+    timezone: String,
+    day_count: usize,
+    reports_dir: String,
+    days: Vec<ReportDayListItemView>,
+}
+
+#[derive(Debug)]
+struct ReportDayListItemView {
+    date: String,
+    report_url: String,
+    status_label: &'static str,
+    status_class: &'static str,
+    saved_at: Option<String>,
+}
+
+#[derive(Debug, TemplateSimple)]
+#[template(path = "web/report.stpl")]
+struct ReportPageTemplate {
+    date: String,
+    timezone: String,
+    source_label: String,
+    saved_at: Option<String>,
+    report_html: String,
+}
+
+#[derive(Debug)]
+struct RenderedMessageBody {
+    html: String,
+    format_class: &'static str,
 }
 
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/error.stpl")]
 struct ErrorPageTemplate {
-    common_style: &'static str,
     title: String,
     headline: String,
     message: String,
@@ -385,6 +199,16 @@ pub(super) struct ArchiveSessionQuery {
     host: Option<String>,
     id: Option<String>,
     message: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ReportsQuery {
+    count: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ReportQuery {
+    date: Option<String>,
 }
 
 #[derive(Debug)]
@@ -413,6 +237,7 @@ struct ArchiveMessageRecord {
     role: String,
     tool_name: Option<String>,
     body: String,
+    message_json: Value,
 }
 
 pub(super) async fn dashboard(State(state): State<AppState>) -> Response {
@@ -428,7 +253,6 @@ pub(super) async fn dashboard(State(state): State<AppState>) -> Response {
 
     render_html(
         StatusPageTemplate {
-            common_style: COMMON_STYLE,
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             postgres_enabled,
             tracked_hosts,
@@ -482,9 +306,199 @@ pub(super) async fn archive_sessions(Query(query): Query<ArchiveSessionsQuery>) 
 
     render_html(
         ArchiveSessionsPageTemplate {
-            common_style: COMMON_STYLE,
             total_sessions,
             sessions: views,
+        },
+        StatusCode::OK,
+    )
+}
+
+pub(super) async fn reports(Query(query): Query<ReportsQuery>) -> Response {
+    let count = query
+        .count
+        .unwrap_or(DEFAULT_REPORT_DAY_COUNT)
+        .clamp(1, MAX_REPORT_DAY_COUNT) as usize;
+
+    let reports_dir = match resolve_reports_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reports directory unavailable",
+                &error,
+                "/",
+                "Back to status",
+            );
+        }
+    };
+
+    let client = match connect_archive_client().await {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+
+    let today =
+        match report::current_report_date(&client, Some(report::DEFAULT_REPORT_TIMEZONE)).await {
+            Ok(today) => today,
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "report date query failed",
+                    &error.to_string(),
+                    "/",
+                    "Back to status",
+                );
+            }
+        };
+
+    let days = recent_report_dates(today, count)
+        .into_iter()
+        .map(|date| {
+            let path = daily_report_path(&reports_dir, date);
+            let exists = path.is_file();
+            let saved_at = report_saved_at(&path);
+            ReportDayListItemView {
+                date: date.to_string(),
+                report_url: report_url(date),
+                status_label: if exists {
+                    "available"
+                } else {
+                    "missing · generate on open"
+                },
+                status_class: if exists {
+                    "status-connected"
+                } else {
+                    "status-missing"
+                },
+                saved_at,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    render_html(
+        ReportsPageTemplate {
+            timezone: report::DEFAULT_REPORT_TIMEZONE.to_string(),
+            day_count: days.len(),
+            reports_dir: reports_dir.display().to_string(),
+            days,
+        },
+        StatusCode::OK,
+    )
+}
+
+pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
+    let Some(date_value) = query
+        .date
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "missing report date",
+            "report pages require a `date` query parameter like `2026-04-08`.",
+            "/ui/reports",
+            "Back to reports",
+        );
+    };
+
+    let report_date = match parse_local_date_filter(date_value) {
+        Ok(date) => date,
+        Err(error) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid report date",
+                &error,
+                "/ui/reports",
+                "Back to reports",
+            );
+        }
+    };
+
+    let reports_dir = match resolve_reports_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reports directory unavailable",
+                &error,
+                "/ui/reports",
+                "Back to reports",
+            );
+        }
+    };
+    let report_path = daily_report_path(&reports_dir, report_date);
+
+    let (markdown, source_label, timezone) = if report_path.is_file() {
+        let markdown = match fs::read_to_string(&report_path) {
+            Ok(markdown) => markdown,
+            Err(error) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "report read failed",
+                    &format!(
+                        "could not read saved report `{}`: {error}",
+                        report_path.display()
+                    ),
+                    "/ui/reports",
+                    "Back to reports",
+                );
+            }
+        };
+        (
+            markdown,
+            "loaded from saved report".to_string(),
+            report::DEFAULT_REPORT_TIMEZONE.to_string(),
+        )
+    } else {
+        let generated = match report::generate_day_report(DayConfig {
+            date: Some(report_date.to_string()),
+            timezone: Some(report::DEFAULT_REPORT_TIMEZONE.to_string()),
+            pi_agent_dir: None,
+            summary_model: None,
+            ui_base_url: Some("/".to_string()),
+        })
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "report generation failed",
+                    &error.to_string(),
+                    "/ui/reports",
+                    "Back to reports",
+                );
+            }
+        };
+
+        if let Err(error) = save_report_markdown(&report_path, &generated.markdown) {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "report save failed",
+                &format!(
+                    "could not save generated report `{}`: {error}",
+                    report_path.display()
+                ),
+                "/ui/reports",
+                "Back to reports",
+            );
+        }
+
+        (
+            generated.markdown,
+            "generated on demand".to_string(),
+            generated.timezone,
+        )
+    };
+
+    render_html(
+        ReportPageTemplate {
+            date: report_date.to_string(),
+            timezone,
+            source_label,
+            saved_at: report_saved_at(&report_path),
+            report_html: markdown_to_html(&markdown),
         },
         StatusCode::OK,
     )
@@ -567,27 +581,175 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
         }
     };
 
+    let parsed_messages = messages
+        .into_iter()
+        .map(|record| ParsedArchiveMessage {
+            normalized: serde_json::from_value::<Message>(record.message_json.clone()).ok(),
+            record,
+        })
+        .collect::<Vec<_>>();
+
+    let tool_calls_by_id = parsed_messages
+        .iter()
+        .flat_map(|message| {
+            message
+                .normalized
+                .as_ref()
+                .into_iter()
+                .flat_map(move |normalized| {
+                    normalized.blocks.iter().enumerate().filter_map(move |(index, block)| {
+                        (block.kind == MessageContentBlockKind::ToolCall)
+                            .then_some(())
+                            .and(block.tool_call_id.as_ref())
+                            .map(|tool_call_id| {
+                                (
+                                    tool_call_id.clone(),
+                                    (
+                                        message.record.message_key.clone(),
+                                        tool_call_block_anchor_id(&message.record.message_key, index),
+                                        block
+                                            .tool_call_name
+                                            .clone()
+                                            .unwrap_or_else(|| "unknown tool".to_string()),
+                                    ),
+                                )
+                            })
+                    })
+                })
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let tool_results_by_id = parsed_messages
+        .iter()
+        .filter_map(|message| {
+            let normalized = message.normalized.as_ref()?;
+            let tool_call_id = normalized.tool_call_id.as_ref()?;
+            Some((
+                tool_call_id.clone(),
+                (
+                    message.record.message_key.clone(),
+                    normalized
+                        .tool_name
+                        .clone()
+                        .or_else(|| message.record.tool_name.clone())
+                        .unwrap_or_else(|| "tool result".to_string()),
+                ),
+            ))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+
     let mut selected_message_found = false;
-    let message_views = messages
+    let message_views = parsed_messages
         .into_iter()
         .map(|message| {
             let is_selected = selected_message_key
                 .as_deref()
-                .map(|selected| selected == message.message_key)
+                .map(|selected| selected == message.record.message_key)
                 .unwrap_or(false);
             if is_selected {
                 selected_message_found = true;
             }
 
-            let message_key = message.message_key;
+            let rendered_body = render_message_body(
+                &message.record.role,
+                message.normalized.as_ref(),
+                &message.record.message_json,
+                &message.record.body,
+            );
+            let message_key = message.record.message_key;
+            let related_tool_call = message
+                .normalized
+                .as_ref()
+                .and_then(|normalized| normalized.tool_call_id.as_ref())
+                .and_then(|tool_call_id| {
+                    tool_calls_by_id.get(tool_call_id).map(|(call_message_key, anchor_id, tool_name)| {
+                        ArchiveToolLinkView {
+                            label: format!(
+                                "for call: {tool_name} · {}",
+                                short_tool_call_id(tool_call_id)
+                            ),
+                            url: archive_session_anchor_url(
+                                host,
+                                session_id,
+                                call_message_key,
+                                anchor_id,
+                            ),
+                        }
+                    })
+                });
+            let tool_call_badge = message
+                .normalized
+                .as_ref()
+                .and_then(|normalized| normalized.tool_call_id.as_ref())
+                .map(|tool_call_id| short_tool_call_id(tool_call_id));
+            let tool_call_blocks = message
+                .normalized
+                .as_ref()
+                .map(|normalized| {
+                    normalized
+                        .blocks
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, block)| {
+                            if block.kind != MessageContentBlockKind::ToolCall {
+                                return None;
+                            }
+
+                            let result_link = block
+                                .tool_call_id
+                                .as_ref()
+                                .and_then(|tool_call_id| {
+                                    tool_results_by_id.get(tool_call_id).map(|(result_message_key, tool_name)| {
+                                        ArchiveToolLinkView {
+                                            label: format!(
+                                                "result: {tool_name} · {}",
+                                                short_tool_call_id(tool_call_id)
+                                            ),
+                                            url: archive_session_anchor_url(
+                                                host,
+                                                session_id,
+                                                result_message_key,
+                                                &message_anchor_id(result_message_key),
+                                            ),
+                                        }
+                                    })
+                                });
+
+                            Some(ArchiveToolCallBlockView {
+                                anchor_id: tool_call_block_anchor_id(&message_key, index),
+                                tool_name: block
+                                    .tool_call_name
+                                    .clone()
+                                    .unwrap_or_else(|| "unknown tool".to_string()),
+                                tool_call_badge: block
+                                    .tool_call_id
+                                    .as_ref()
+                                    .map(|tool_call_id| short_tool_call_id(tool_call_id)),
+                                body_html: escape_html(
+                                    block
+                                        .text
+                                        .as_deref()
+                                        .unwrap_or("(no tool call summary available)"),
+                                ),
+                                result_link,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
             ArchiveMessageView {
                 anchor_id: message_anchor_id(&message_key),
                 permalink_url: archive_session_url(host, session_id, Some(&message_key)),
-                created_at: format_timestamp(message.created_at),
-                role_class: role_class(&message.role),
-                role: message.role,
-                tool_name: message.tool_name,
-                body: display_message_body(&message.body),
+                created_at: format_timestamp(message.record.created_at),
+                role_class: role_class(&message.record.role),
+                role: message.record.role,
+                tool_name: message.record.tool_name,
+                tool_call_badge,
+                related_tool_call,
+                tool_call_blocks,
+                body_html: rendered_body.html,
+                body_format_class: rendered_body.format_class,
                 is_selected,
                 message_key,
             }
@@ -596,7 +758,6 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
 
     render_html(
         ArchiveSessionPageTemplate {
-            common_style: COMMON_STYLE,
             host_location: session.host_location,
             session_id: session.session_id.clone(),
             summary: display_summary(session.summary.as_deref(), &session.session_id),
@@ -699,17 +860,121 @@ fn display_optional_text(value: Option<&str>, fallback: &str) -> String {
         .to_string()
 }
 
-fn display_message_body(body: &str) -> String {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        "(empty message body)".to_string()
+fn render_message_body(
+    role: &str,
+    normalized_message: Option<&Message>,
+    message_json: &Value,
+    body: &str,
+) -> RenderedMessageBody {
+    let body_text = display_message_body_text(role, normalized_message, message_json, body);
+    if body_text.is_empty() {
+        return RenderedMessageBody {
+            html: String::new(),
+            format_class: "message-body-empty",
+        };
+    }
+
+    if renders_markdown(role) {
+        RenderedMessageBody {
+            html: markdown_to_html(&body_text),
+            format_class: "message-body-markdown",
+        }
     } else {
-        body.to_string()
+        RenderedMessageBody {
+            html: escape_html(&body_text),
+            format_class: "message-body-plain",
+        }
+    }
+}
+
+fn display_message_body_text(
+    role: &str,
+    normalized_message: Option<&Message>,
+    message_json: &Value,
+    body: &str,
+) -> String {
+    let parsed_message = normalized_message
+        .cloned()
+        .or_else(|| parse_archived_message(message_json));
+
+    if role == "assistant"
+        && let Some(message) = parsed_message.as_ref()
+    {
+        if let Some(text) = archived_message_body_from_message(message) {
+            return text;
+        }
+        if message
+            .blocks
+            .iter()
+            .any(|block| block.kind == MessageContentBlockKind::ToolCall)
+        {
+            return String::new();
+        }
+    }
+
+    let trimmed = body.trim();
+    if !trimmed.is_empty() {
+        return body.to_string();
+    }
+
+    archived_message_body_from_blocks(message_json)
+        .unwrap_or_else(|| "(empty message body)".to_string())
+}
+
+fn renders_markdown(role: &str) -> bool {
+    !matches!(role, "toolResult" | "bashExecution")
+}
+
+fn markdown_to_html(markdown: &str) -> String {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_FOOTNOTES);
+
+    let parser = Parser::new_ext(markdown, options);
+    let mut rendered = String::new();
+    pulldown_cmark::html::push_html(&mut rendered, parser);
+    ammonia::clean(&rendered)
+}
+
+fn escape_html(text: &str) -> String {
+    let mut escaped = String::new();
+    escape_to_string(text, &mut escaped);
+    escaped
+}
+
+fn parse_archived_message(message_json: &Value) -> Option<Message> {
+    serde_json::from_value::<Message>(message_json.clone()).ok()
+}
+
+fn archived_message_body_from_blocks(message_json: &Value) -> Option<String> {
+    let message = parse_archived_message(message_json)?;
+    archived_message_body_from_message(&message)
+}
+
+fn archived_message_body_from_message(message: &Message) -> Option<String> {
+    let parts = message
+        .blocks
+        .iter()
+        .filter_map(|block| match block.kind {
+            MessageContentBlockKind::Text
+            | MessageContentBlockKind::Thinking
+            | MessageContentBlockKind::Other => {
+                block.text.as_deref().and_then(normalized_display_text)
+            }
+            MessageContentBlockKind::ToolCall | MessageContentBlockKind::Image => None,
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
     }
 }
 
 fn format_timestamp(value: DateTime<Utc>) -> String {
-    value.to_rfc3339()
+    value.format(WEB_TIMESTAMP_FORMAT).to_string()
 }
 
 fn format_optional_timestamp(value: Option<DateTime<Utc>>) -> String {
@@ -768,8 +1033,84 @@ fn archive_session_url(host_location: &str, session_id: &str, message_key: Optio
     url
 }
 
+fn report_url(date: NaiveDate) -> String {
+    format!("/ui/report?date={date}")
+}
+
+fn recent_report_dates(today: NaiveDate, count: usize) -> Vec<NaiveDate> {
+    (0..count)
+        .filter_map(|offset| today.checked_sub_days(Days::new(offset as u64)))
+        .collect()
+}
+
+fn resolve_reports_dir() -> Result<PathBuf, String> {
+    if let Ok(path) = env::var(REPORTS_DIR_ENV) {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Err(format!("{REPORTS_DIR_ENV} must not be empty when set"));
+        }
+        return Ok(PathBuf::from(trimmed));
+    }
+
+    super::default_state_dir()
+        .map(|path| path.join("reports").join("daily"))
+        .map_err(|error| error.to_string())
+}
+
+fn daily_report_path(reports_dir: &Path, date: NaiveDate) -> PathBuf {
+    reports_dir.join(format!("{date}.md"))
+}
+
+fn report_saved_at(path: &Path) -> Option<String> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let modified: DateTime<Utc> = modified.into();
+    Some(format_timestamp(modified))
+}
+
+fn save_report_markdown(path: &Path, markdown: &str) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Err(format!(
+            "report path `{}` has no parent directory",
+            path.display()
+        ));
+    };
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    fs::write(path, markdown).map_err(|error| error.to_string())
+}
+
 fn message_anchor_id(message_key: &str) -> String {
     format!("m-{}", URL_SAFE_NO_PAD.encode(message_key.as_bytes()))
+}
+
+fn tool_call_block_anchor_id(message_key: &str, block_index: usize) -> String {
+    format!(
+        "tc-{}",
+        URL_SAFE_NO_PAD.encode(format!("{message_key}:{block_index}").as_bytes())
+    )
+}
+
+fn archive_session_anchor_url(
+    host_location: &str,
+    session_id: &str,
+    message_key: &str,
+    anchor_id: &str,
+) -> String {
+    let mut url = archive_session_url(host_location, session_id, Some(message_key));
+    if let Some(index) = url.find('#') {
+        url.truncate(index);
+    }
+    url.push('#');
+    url.push_str(anchor_id);
+    url
+}
+
+fn short_tool_call_id(tool_call_id: &str) -> String {
+    let trimmed = tool_call_id.split('|').next().unwrap_or(tool_call_id).trim();
+    if trimmed.chars().count() <= 18 {
+        trimmed.to_string()
+    } else {
+        format!("{}…", trimmed.chars().take(18).collect::<String>())
+    }
 }
 
 fn percent_encode_component(value: &str) -> String {
@@ -902,7 +1243,7 @@ async fn load_archive_messages(
     let rows = client
         .query(
             concat!(
-                "SELECT dedupe_key, created_at, role, tool_name, body ",
+                "SELECT dedupe_key, created_at, role, tool_name, body, message_json ",
                 "FROM messages ",
                 "WHERE host_location = $1 AND session_id = $2 ",
                 "ORDER BY created_at ASC, ordinal ASC"
@@ -920,6 +1261,7 @@ async fn load_archive_messages(
             role: row.get("role"),
             tool_name: row.get("tool_name"),
             body: row.get("body"),
+            message_json: row.get("message_json"),
         })
         .collect())
 }
@@ -946,7 +1288,6 @@ fn error_response(
 ) -> Response {
     render_html(
         ErrorPageTemplate {
-            common_style: COMMON_STYLE,
             title: format!("{headline} · pimux"),
             headline: headline.to_string(),
             message: message.to_string(),
@@ -959,9 +1300,13 @@ fn error_response(
 
 #[cfg(test)]
 mod tests {
+    use chrono::{NaiveDate, TimeZone, Utc};
+    use serde_json::{Value, json};
+
     use super::{
-        archive_session_url, message_anchor_id, percent_encode_component,
-        transcript_freshness_label,
+        archive_session_url, display_message_body_text, format_timestamp, markdown_to_html,
+        message_anchor_id, percent_encode_component, recent_report_dates, render_message_body,
+        short_tool_call_id, transcript_freshness_label,
     };
 
     #[test]
@@ -986,5 +1331,106 @@ mod tests {
             transcript_freshness_label(Some("live"), Some("extension")),
             "live via extension"
         );
+    }
+
+    #[test]
+    fn formats_web_timestamps_without_timezone() {
+        let value = Utc.with_ymd_and_hms(2026, 4, 8, 13, 37, 42).unwrap();
+        assert_eq!(format_timestamp(value), "2026-04-08 13:37:42");
+    }
+
+    #[test]
+    fn displays_thinking_blocks_when_archived_body_is_empty() {
+        let message_json = json!({
+            "created_at": "2026-04-08T19:01:21Z",
+            "role": "assistant",
+            "body": "",
+            "blocks": [
+                {
+                    "type": "thinking",
+                    "text": "considering the next step"
+                }
+            ]
+        });
+
+        assert_eq!(
+            display_message_body_text("assistant", None, &message_json, ""),
+            "considering the next step"
+        );
+    }
+
+    #[test]
+    fn hides_duplicate_assistant_body_for_tool_call_only_messages() {
+        let message_json = json!({
+            "created_at": "2026-04-08T19:01:21Z",
+            "role": "assistant",
+            "body": "Tool call: read",
+            "blocks": [
+                {
+                    "type": "toolCall",
+                    "toolCallName": "read",
+                    "toolCallId": "call-123",
+                    "text": "foo.txt"
+                }
+            ]
+        });
+
+        assert_eq!(
+            display_message_body_text("assistant", None, &message_json, "Tool call: read"),
+            ""
+        );
+    }
+
+    #[test]
+    fn renders_markdown_for_assistant_messages() {
+        let rendered = render_message_body(
+            "assistant",
+            None,
+            &Value::Null,
+            "# Hello\n\n- one\n- two\n\n<script>alert('xss')</script>",
+        );
+
+        assert_eq!(rendered.format_class, "message-body-markdown");
+        assert!(rendered.html.contains("<h1>Hello</h1>"));
+        assert!(rendered.html.contains("<ul>"));
+        assert!(!rendered.html.contains("<script>"));
+    }
+
+    #[test]
+    fn keeps_bash_output_as_plain_escaped_text() {
+        let rendered = render_message_body("bashExecution", None, &Value::Null, "echo <ok>\nline 2");
+
+        assert_eq!(rendered.format_class, "message-body-plain");
+        assert_eq!(rendered.html, "echo &lt;ok&gt;\nline 2");
+    }
+
+    #[test]
+    fn short_tool_call_id_drops_hash_suffix() {
+        assert_eq!(
+            short_tool_call_id("call_abcdef123456|fc_deadbeef"),
+            "call_abcdef123456"
+        );
+    }
+
+    #[test]
+    fn recent_report_dates_descend_from_today() {
+        let today = NaiveDate::from_ymd_opt(2026, 4, 9).unwrap();
+        assert_eq!(
+            recent_report_dates(today, 3),
+            vec![
+                NaiveDate::from_ymd_opt(2026, 4, 9).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 4, 7).unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_renderer_supports_footnotes() {
+        let html = markdown_to_html("hello[^1]\n\n[^1]: footnote text");
+
+        assert!(html.contains("<sup"));
+        assert!(html.contains("footnote text"));
+        assert!(!html.contains("[^1]"));
     }
 }

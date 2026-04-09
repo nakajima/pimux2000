@@ -9,6 +9,7 @@ nonisolated struct MessageContentBlock: Codable, FetchableRecord, MutablePersist
 	var type: String
 	var text: String?
 	var toolCallName: String?
+	var toolCallID: String?
 	var mimeType: String?
 	var attachmentID: String?
 	var position: Int
@@ -19,6 +20,7 @@ nonisolated struct MessageContentBlock: Codable, FetchableRecord, MutablePersist
 		type: String,
 		text: String?,
 		toolCallName: String?,
+		toolCallID: String? = nil,
 		mimeType: String? = nil,
 		attachmentID: String? = nil,
 		position: Int
@@ -28,6 +30,7 @@ nonisolated struct MessageContentBlock: Codable, FetchableRecord, MutablePersist
 		self.type = type
 		self.text = text
 		self.toolCallName = toolCallName
+		self.toolCallID = toolCallID
 		self.mimeType = mimeType
 		self.attachmentID = attachmentID
 		self.position = position

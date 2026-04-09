@@ -10,15 +10,17 @@ nonisolated struct Message: Codable, FetchableRecord, MutablePersistableRecord, 
 	var serverMessageID: String?
 	var role: Role
 	var toolName: String?
+	var toolCallID: String?
 	var position: Int
 	var createdAt: Date
 
-	nonisolated init(id: Int64? = nil, piSessionID: Int64, serverMessageID: String? = nil, role: Role, toolName: String?, position: Int, createdAt: Date) {
+	nonisolated init(id: Int64? = nil, piSessionID: Int64, serverMessageID: String? = nil, role: Role, toolName: String?, toolCallID: String? = nil, position: Int, createdAt: Date) {
 		self.id = id
 		self.piSessionID = piSessionID
 		self.serverMessageID = serverMessageID
 		self.role = role
 		self.toolName = toolName
+		self.toolCallID = toolCallID
 		self.position = position
 		self.createdAt = createdAt
 	}

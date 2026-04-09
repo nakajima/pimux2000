@@ -14,7 +14,7 @@ use std::{
     },
 };
 
-use tower_http::trace::TraceLayer;
+use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{error, info, warn};
 
 use axum::{
@@ -397,9 +397,16 @@ fn app(state: AppState) -> Router {
         .route("/agent/connect", get(agent_connect))
         .route("/ui/sessions", get(web::archive_sessions))
         .route("/ui/session", get(web::archive_session))
+        .route("/ui/reports", get(web::reports))
+        .route("/ui/report", get(web::report))
+        .nest_service("/static", ServeDir::new(static_assets_dir()))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+fn static_assets_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static")
 }
 
 fn port_from_env() -> Result<u16, BoxError> {
@@ -603,7 +610,7 @@ pub async fn backfill(server_url: &str) -> Result<(), BoxError> {
             };
 
             match store
-                .upsert_transcript(&host_identity, Some(&session), &snapshot, Utc::now())
+                .replace_transcript(&host_identity, Some(&session), &snapshot, Utc::now())
                 .await
             {
                 Ok(inserted) => {
@@ -3256,20 +3263,32 @@ fn default_host_registry_path() -> Result<PathBuf, BoxError> {
         return Ok(PathBuf::from(path));
     }
 
+    Ok(default_state_dir()?.join(HOST_REGISTRY_FILE_NAME))
+}
+
+fn default_state_dir() -> Result<PathBuf, BoxError> {
+    if let Ok(path) = env::var("PIMUX_SERVER_STATE_PATH") {
+        let path = PathBuf::from(path);
+        return Ok(path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(FsPath::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")));
+    }
+
     match env::consts::OS {
         "macos" => Ok(home_dir()?
             .join("Library")
             .join("Application Support")
-            .join("pimux")
-            .join(HOST_REGISTRY_FILE_NAME)),
+            .join("pimux")),
         "linux" => {
             let base = match env::var("XDG_STATE_HOME") {
                 Ok(value) if !value.is_empty() => PathBuf::from(value),
                 _ => home_dir()?.join(".local").join("state"),
             };
-            Ok(base.join("pimux").join(HOST_REGISTRY_FILE_NAME))
+            Ok(base.join("pimux"))
         }
-        _ => Ok(home_dir()?.join(".pimux").join(HOST_REGISTRY_FILE_NAME)),
+        _ => Ok(home_dir()?.join(".pimux")),
     }
 }
 
@@ -4004,6 +4023,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serves_web_stylesheet() {
+        let app = app(AppState::default());
+        let response = app
+            .oneshot(empty_request(Method::GET, "/static/pimux.css"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/css"
+        );
+
+        let body = text_response(response).await;
+        assert!(body.contains(":root"));
+        assert!(body.contains(".container"));
+        assert!(body.contains(".page-header"));
+    }
+
+    #[tokio::test]
     async fn archive_sessions_ui_reports_when_archive_is_disabled() {
         let app = app(AppState::default());
         let response = app
@@ -4015,6 +4053,34 @@ mod tests {
         let body = text_response(response).await;
         assert!(body.contains("archive is disabled"));
         assert!(body.contains(postgres_backup::POSTGRES_BACKUP_URL_ENV));
+    }
+
+    #[tokio::test]
+    async fn reports_ui_reports_when_archive_is_disabled() {
+        let app = app(AppState::default());
+        let response = app
+            .oneshot(empty_request(Method::GET, "/ui/reports"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = text_response(response).await;
+        assert!(body.contains("archive is disabled"));
+        assert!(body.contains(postgres_backup::POSTGRES_BACKUP_URL_ENV));
+    }
+
+    #[tokio::test]
+    async fn report_ui_rejects_invalid_date() {
+        let app = app(AppState::default());
+        let response = app
+            .oneshot(empty_request(Method::GET, "/ui/report?date=not-a-date"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = text_response(response).await;
+        assert!(body.contains("invalid report date"));
+        assert!(body.contains("expected YYYY-MM-DD"));
     }
 
     #[tokio::test]
@@ -4997,6 +5063,7 @@ mod tests {
                 role: Role::Assistant,
                 body: body.to_string(),
                 tool_name: None,
+                tool_call_id: None,
                 blocks: vec![MessageContentBlock::text(body).unwrap()],
                 message_id: None,
             }],
@@ -5018,6 +5085,7 @@ mod tests {
                 role: Role::User,
                 body: "[Image]".to_string(),
                 tool_name: None,
+                tool_call_id: None,
                 blocks: vec![MessageContentBlock::image(
                     Some("image/png"),
                     Some("ZmFrZQ=="),

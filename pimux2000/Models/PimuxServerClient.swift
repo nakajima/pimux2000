@@ -112,6 +112,7 @@ nonisolated struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 	let role: String
 	let body: String
 	let toolName: String?
+	let toolCallId: String?
 	let blocks: [PimuxTranscriptMessageBlock]
 
 	enum CodingKeys: String, CodingKey {
@@ -120,19 +121,21 @@ nonisolated struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 		case role
 		case body
 		case toolName
+		case toolCallId
 		case blocks
 	}
 
-	init(messageId: String? = nil, createdAt: Date, role: String, body: String, toolName: String? = nil, blocks: [PimuxTranscriptMessageBlock]? = nil) {
+	init(messageId: String? = nil, createdAt: Date, role: String, body: String, toolName: String? = nil, toolCallId: String? = nil, blocks: [PimuxTranscriptMessageBlock]? = nil) {
 		self.messageId = messageId
 		self.createdAt = createdAt
 		self.role = role
 		self.body = body
 		self.toolName = toolName
+		self.toolCallId = toolCallId
 		if let blocks {
 			self.blocks = blocks
 		} else if !body.isEmpty {
-			self.blocks = [PimuxTranscriptMessageBlock(type: "text", text: body, toolCallName: nil, mimeType: nil, attachmentId: nil)]
+			self.blocks = [PimuxTranscriptMessageBlock(type: "text", text: body, toolCallName: nil, toolCallId: nil, mimeType: nil, attachmentId: nil)]
 		} else {
 			self.blocks = []
 		}
@@ -145,8 +148,9 @@ nonisolated struct PimuxTranscriptMessage: Decodable, Equatable, Sendable {
 		let role = try container.decode(String.self, forKey: .role)
 		let body = try container.decodeIfPresent(String.self, forKey: .body) ?? ""
 		let toolName = try container.decodeIfPresent(String.self, forKey: .toolName)
+		let toolCallId = try container.decodeIfPresent(String.self, forKey: .toolCallId)
 		let blocks = try container.decodeIfPresent([PimuxTranscriptMessageBlock].self, forKey: .blocks)
-		self.init(messageId: messageId, createdAt: createdAt, role: role, body: body, toolName: toolName, blocks: blocks)
+		self.init(messageId: messageId, createdAt: createdAt, role: role, body: body, toolName: toolName, toolCallId: toolCallId, blocks: blocks)
 	}
 }
 
@@ -154,13 +158,15 @@ nonisolated struct PimuxTranscriptMessageBlock: Decodable, Equatable, Sendable {
 	let type: String
 	let text: String?
 	let toolCallName: String?
+	let toolCallId: String?
 	let mimeType: String?
 	let attachmentId: String?
 
-	init(type: String, text: String?, toolCallName: String?, mimeType: String? = nil, attachmentId: String? = nil) {
+	init(type: String, text: String?, toolCallName: String?, toolCallId: String? = nil, mimeType: String? = nil, attachmentId: String? = nil) {
 		self.type = type
 		self.text = text
 		self.toolCallName = toolCallName
+		self.toolCallId = toolCallId
 		self.mimeType = mimeType
 		self.attachmentId = attachmentId
 	}

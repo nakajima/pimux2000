@@ -23,12 +23,14 @@ struct MessageInfo: Identifiable {
 		TranscriptFingerprint.make { fingerprint in
 			fingerprint.combine(message.role.rawString)
 			fingerprint.combine(message.toolName)
+			fingerprint.combine(message.toolCallID)
 			fingerprint.combine(message.position)
 			for block in contentBlocks {
 				fingerprint.combine(block.position)
 				fingerprint.combine(block.type)
 				fingerprint.combine(block.text)
 				fingerprint.combine(block.toolCallName)
+				fingerprint.combine(block.toolCallID)
 				fingerprint.combine(block.mimeType)
 				fingerprint.combine(block.attachmentID)
 			}

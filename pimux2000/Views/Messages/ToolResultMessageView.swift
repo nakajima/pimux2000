@@ -10,7 +10,13 @@ struct ToolResultMessageView: View {
 			Image(systemName: "wrench.fill")
 				.foregroundStyle(.orange)
 			VStack(alignment: .leading, spacing: 6) {
-				MessageHeader(icon: "wrench.fill", label: "Tool Result", color: .orange, toolName: message.toolName)
+				MessageHeader(
+					icon: "wrench.fill",
+					label: "Tool Result",
+					color: .orange,
+					toolName: message.toolName,
+					detailText: message.toolCallID.map(shortToolCallLabel)
+				)
 
 				ForEach(messageInfo.contentBlocks, id: \.position) { block in
 					if block.type == "text", let text = block.text, !text.isEmpty {

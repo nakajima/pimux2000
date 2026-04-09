@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>pimux archive</title>
-  <style><%- common_style %></style>
+<link rel="stylesheet" href="/static/reset.css">
+  <link rel="stylesheet" href="/static/pimux.css">
 </head>
 <body>
   <main>
@@ -18,6 +19,7 @@
         <a href="/">status</a>
         <a href="/hosts">/hosts</a>
         <a href="/sessions">/sessions</a>
+        <a href="/ui/reports">reports</a>
       </nav>
     </header>
 
