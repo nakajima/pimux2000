@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "pimux-server"
-version = "0.2.43"
+version = "0.2.44"
 dependencies = [
  "axum",
  "base64",
