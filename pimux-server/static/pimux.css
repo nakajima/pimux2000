@@ -38,7 +38,7 @@ code,
 kbd,
 samp,
 pre {
-  font-family: "Berkeley Mono" !important;
+  font-family: "Berkeley Mono", monospace !important;
   font-size: 14px;
 }
 
