@@ -624,6 +624,7 @@ It also serves a small built-in web UI:
 - `/ui/session?host=...&id=...&message=...` — archived session transcript view with per-message permalinks
 - `/ui/reports` — daily report browser showing recent days and whether a saved report already exists
 - `/ui/report?date=YYYY-MM-DD` — renders a saved daily report, or generates and saves it on demand when missing
+- report pages include a `regenerate` button that overwrites the saved report for that day
 
 Daily report UI behavior:
 - defaults to the `America/Los_Angeles` report timezone

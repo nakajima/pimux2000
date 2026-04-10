@@ -32,6 +32,10 @@
         </div>
         <div class="actions">
           <a href="/ui/report?date=<%= date %>">permalink</a>
+          <form class="action-form" method="post" action="/ui/report/regenerate">
+            <input type="hidden" name="date" value="<%= date %>">
+            <button class="action-button" type="submit">regenerate</button>
+          </form>
         </div>
       </div>
 

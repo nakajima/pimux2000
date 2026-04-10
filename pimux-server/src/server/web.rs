@@ -4,9 +4,9 @@ use std::{
 };
 
 use axum::{
-    extract::{Query, State},
+    extract::{Form, Query, State},
     http::{StatusCode, header},
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
@@ -226,6 +226,12 @@ pub(super) struct ReportsQuery {
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct ReportQuery {
     date: Option<String>,
+    regenerated: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ReportRegenerateForm {
+    date: Option<String>,
 }
 
 #[derive(Debug)]
@@ -412,32 +418,9 @@ pub(super) async fn reports(Query(query): Query<ReportsQuery>) -> Response {
 }
 
 pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
-    let Some(date_value) = query
-        .date
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "missing report date",
-            "report pages require a `date` query parameter like `2026-04-08`.",
-            "/ui/reports",
-            "Back to reports",
-        );
-    };
-
-    let report_date = match parse_local_date_filter(date_value) {
+    let report_date = match parse_report_date_param(query.date.as_deref()) {
         Ok(date) => date,
-        Err(error) => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid report date",
-                &error,
-                "/ui/reports",
-                "Back to reports",
-            );
-        }
+        Err(response) => return response,
     };
 
     let reports_dir = match resolve_reports_dir() {
@@ -453,99 +436,34 @@ pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
         }
     };
     let report_path = daily_report_path(&reports_dir, report_date);
-    let metadata_path = report_metadata_path(&report_path);
     let loaded_from_saved_report = report_path.is_file();
 
-    let (markdown, source_label, metadata) = if loaded_from_saved_report {
-        let markdown = match fs::read_to_string(&report_path) {
-            Ok(markdown) => markdown,
+    let (markdown, metadata) = if loaded_from_saved_report {
+        match load_saved_report(&report_path) {
+            Ok(loaded) => loaded,
             Err(error) => {
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "report read failed",
-                    &format!(
-                        "could not read saved report `{}`: {error}",
-                        report_path.display()
-                    ),
+                    &error,
                     "/ui/reports",
                     "Back to reports",
                 );
             }
-        };
-        let metadata = match load_report_metadata(&metadata_path) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "report metadata read failed",
-                    &format!(
-                        "could not read report metadata `{}`: {error}",
-                        metadata_path.display()
-                    ),
-                    "/ui/reports",
-                    "Back to reports",
-                );
-            }
-        };
-        (markdown, "loaded from saved report".to_string(), metadata)
+        }
     } else {
-        let generated = match report::generate_day_report(DayConfig {
-            date: Some(report_date.to_string()),
-            timezone: Some(report::DEFAULT_REPORT_TIMEZONE.to_string()),
-            pi_agent_dir: None,
-            summary_model: None,
-            ui_base_url: Some("/".to_string()),
-        })
-        .await
-        {
-            Ok(report) => report,
+        match generate_and_save_report(report_date, &reports_dir).await {
+            Ok(generated) => generated,
             Err(error) => {
                 return error_response(
                     StatusCode::BAD_GATEWAY,
                     "report generation failed",
-                    &error.to_string(),
+                    &error,
                     "/ui/reports",
                     "Back to reports",
                 );
             }
-        };
-
-        if let Err(error) = save_report_markdown(&report_path, &generated.markdown) {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "report save failed",
-                &format!(
-                    "could not save generated report `{}`: {error}",
-                    report_path.display()
-                ),
-                "/ui/reports",
-                "Back to reports",
-            );
         }
-
-        let metadata = SavedReportMetadata {
-            timezone: generated.timezone.clone(),
-            used_heuristic_fallback: generated.used_heuristic_fallback,
-            heuristic_project_keys: generated.heuristic_project_keys,
-        };
-        if let Err(error) = save_report_metadata(&metadata_path, &metadata) {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "report metadata save failed",
-                &format!(
-                    "could not save report metadata `{}`: {error}",
-                    metadata_path.display()
-                ),
-                "/ui/reports",
-                "Back to reports",
-            );
-        }
-
-        (
-            generated.markdown,
-            "generated on demand".to_string(),
-            Some(metadata),
-        )
     };
 
     let timezone = metadata
@@ -557,13 +475,48 @@ pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
         ReportPageTemplate {
             date: report_date.to_string(),
             timezone,
-            source_label,
+            source_label: report_source_label(
+                loaded_from_saved_report,
+                query.regenerated.is_some(),
+            ),
             saved_at: report_saved_at(&report_path),
             warning: report_warning(metadata.as_ref(), loaded_from_saved_report),
             report_html: markdown_to_html(&markdown),
         },
         StatusCode::OK,
     )
+}
+
+pub(super) async fn report_regenerate(Form(form): Form<ReportRegenerateForm>) -> Response {
+    let report_date = match parse_report_date_param(form.date.as_deref()) {
+        Ok(date) => date,
+        Err(response) => return response,
+    };
+
+    let reports_dir = match resolve_reports_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reports directory unavailable",
+                &error,
+                &report_url(report_date),
+                "Back to report",
+            );
+        }
+    };
+
+    if let Err(error) = generate_and_save_report(report_date, &reports_dir).await {
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "report regeneration failed",
+            &error,
+            &report_url(report_date),
+            "Back to report",
+        );
+    }
+
+    Redirect::to(&format!("{}&regenerated=1", report_url(report_date))).into_response()
 }
 
 pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) -> Response {
@@ -1104,6 +1057,28 @@ fn report_url(date: NaiveDate) -> String {
     format!("/ui/report?date={date}")
 }
 
+fn parse_report_date_param(value: Option<&str>) -> Result<NaiveDate, Response> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "missing report date",
+            "report pages require a `date` parameter like `2026-04-08`.",
+            "/ui/reports",
+            "Back to reports",
+        ));
+    };
+
+    parse_local_date_filter(value).map_err(|error| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid report date",
+            &error,
+            "/ui/reports",
+            "Back to reports",
+        )
+    })
+}
+
 fn recent_report_dates(today: NaiveDate, count: usize) -> Vec<NaiveDate> {
     (0..count)
         .filter_map(|offset| today.checked_sub_days(Days::new(offset as u64)))
@@ -1126,6 +1101,71 @@ fn resolve_reports_dir() -> Result<PathBuf, String> {
 
 fn daily_report_path(reports_dir: &Path, date: NaiveDate) -> PathBuf {
     reports_dir.join(format!("{date}.md"))
+}
+
+fn load_saved_report(report_path: &Path) -> Result<(String, Option<SavedReportMetadata>), String> {
+    let markdown = fs::read_to_string(report_path).map_err(|error| {
+        format!(
+            "could not read saved report `{}`: {error}",
+            report_path.display()
+        )
+    })?;
+    let metadata_path = report_metadata_path(report_path);
+    let metadata = load_report_metadata(&metadata_path).map_err(|error| {
+        format!(
+            "could not read report metadata `{}`: {error}",
+            metadata_path.display()
+        )
+    })?;
+    Ok((markdown, metadata))
+}
+
+async fn generate_and_save_report(
+    report_date: NaiveDate,
+    reports_dir: &Path,
+) -> Result<(String, Option<SavedReportMetadata>), String> {
+    let report_path = daily_report_path(reports_dir, report_date);
+    let metadata_path = report_metadata_path(&report_path);
+    let generated = report::generate_day_report(DayConfig {
+        date: Some(report_date.to_string()),
+        timezone: Some(report::DEFAULT_REPORT_TIMEZONE.to_string()),
+        pi_agent_dir: None,
+        summary_model: None,
+        ui_base_url: Some("/".to_string()),
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    save_report_markdown(&report_path, &generated.markdown).map_err(|error| {
+        format!(
+            "could not save generated report `{}`: {error}",
+            report_path.display()
+        )
+    })?;
+
+    let metadata = SavedReportMetadata {
+        timezone: generated.timezone.clone(),
+        used_heuristic_fallback: generated.used_heuristic_fallback,
+        heuristic_project_keys: generated.heuristic_project_keys,
+    };
+    save_report_metadata(&metadata_path, &metadata).map_err(|error| {
+        format!(
+            "could not save report metadata `{}`: {error}",
+            metadata_path.display()
+        )
+    })?;
+
+    Ok((generated.markdown, Some(metadata)))
+}
+
+fn report_source_label(loaded_from_saved_report: bool, regenerated: bool) -> String {
+    if regenerated {
+        "regenerated just now".to_string()
+    } else if loaded_from_saved_report {
+        "loaded from saved report".to_string()
+    } else {
+        "generated on demand".to_string()
+    }
 }
 
 fn report_metadata_path(report_path: &Path) -> PathBuf {

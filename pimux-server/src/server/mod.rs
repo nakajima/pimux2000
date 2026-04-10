@@ -399,6 +399,7 @@ fn app(state: AppState) -> Router {
         .route("/ui/session", get(web::archive_session))
         .route("/ui/reports", get(web::reports))
         .route("/ui/report", get(web::report))
+        .route("/ui/report/regenerate", post(web::report_regenerate))
         .route("/static/reset.css", get(web::static_reset_css))
         .route("/static/pimux.css", get(web::static_pimux_css))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
@@ -4081,6 +4082,27 @@ mod tests {
         let app = app(AppState::default());
         let response = app
             .oneshot(empty_request(Method::GET, "/ui/report?date=not-a-date"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = text_response(response).await;
+        assert!(body.contains("invalid report date"));
+        assert!(body.contains("expected YYYY-MM-DD"));
+    }
+
+    #[tokio::test]
+    async fn report_regenerate_rejects_invalid_date() {
+        let app = app(AppState::default());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/ui/report/regenerate")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("date=not-a-date"))
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
