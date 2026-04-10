@@ -107,7 +107,7 @@ async fn run_headless_prompt(
     let mut ack_tx = Some(ack_tx);
 
     let result = async {
-        let mut command = Command::new("pi");
+        let mut command = Command::new(super::resolve_pi_executable(&pi_agent_dir));
         command
             .arg("--mode")
             .arg("rpc")
@@ -624,7 +624,7 @@ async fn run_rpc_commands(
     pi_agent_dir: PathBuf,
 ) -> Result<Vec<Value>, String> {
     let session_id = discovered_session.id.clone();
-    let mut command = Command::new("pi");
+    let mut command = Command::new(super::resolve_pi_executable(&pi_agent_dir));
     command
         .arg("--mode")
         .arg("rpc")

@@ -960,7 +960,7 @@ async fn summarize_project_day_via_pi(
     }
 
     let prompt = build_project_summary_prompt(report_date, project, excerpts, misses);
-    let mut command = Command::new("pi");
+    let mut command = Command::new(agent::resolve_pi_executable(pi_agent_dir));
     command
         .arg("-p")
         .arg("--no-session")

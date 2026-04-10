@@ -408,7 +408,10 @@ fn model_capabilities(model: &str) -> Option<ModelCapabilities> {
 }
 
 fn load_model_capabilities() -> Result<HashMap<String, ModelCapabilities>, BoxError> {
-    let output = Command::new("pi").arg("--list-models").output()?;
+    let pi_agent_dir = resolve_pi_agent_dir(None)?;
+    let output = Command::new(super::resolve_pi_executable(&pi_agent_dir))
+        .arg("--list-models")
+        .output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let message = if stderr.is_empty() {

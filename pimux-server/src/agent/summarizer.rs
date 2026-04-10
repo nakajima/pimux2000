@@ -602,7 +602,7 @@ async fn summarize_via_pi(
 ) -> Result<String, SummaryError> {
     let prompt = build_summary_prompt(discovered_session, summary_input);
     trace_summary_prompt(discovered_session, config, &prompt);
-    let mut command = Command::new("pi");
+    let mut command = Command::new(super::resolve_pi_executable(&config.pi_agent_dir));
     command
         .arg("-p")
         .arg("--no-session")
@@ -678,10 +678,12 @@ fn summary_command_preview(
     prompt: &str,
 ) -> String {
     let working_dir = summary_working_dir(discovered_session, config);
+    let pi_executable = super::resolve_pi_executable(&config.pi_agent_dir);
     format!(
-        "( cd {} && PI_SKIP_VERSION_CHECK=1 PI_CODING_AGENT_DIR={} pi -p --no-session --no-extensions --no-skills --thinking off --model {} {} )",
+        "( cd {} && PI_SKIP_VERSION_CHECK=1 PI_CODING_AGENT_DIR={} {} -p --no-session --no-extensions --no-skills --thinking off --model {} {} )",
         shell_escape(&working_dir.display().to_string()),
         shell_escape(&config.pi_agent_dir.display().to_string()),
+        shell_escape(&pi_executable.display().to_string()),
         shell_escape(&config.model),
         shell_escape(prompt),
     )
@@ -799,7 +801,10 @@ impl SummaryError {
 
     fn from_io(error: io::Error) -> Self {
         if error.kind() == io::ErrorKind::NotFound {
-            return Self::PiUnavailable("`pi` was not found in PATH".to_string());
+            return Self::PiUnavailable(
+                "pimux could not find the `pi` CLI in the agent bin dir, bun install dir, or PATH"
+                    .to_string(),
+            );
         }
 
         Self::Invocation(error.to_string())

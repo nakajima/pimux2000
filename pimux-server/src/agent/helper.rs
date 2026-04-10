@@ -153,7 +153,7 @@ async fn spawn_helper_process(
     pi_agent_dir: &Path,
 ) -> Result<HelperProcess, String> {
     let session_id = discovered_session.id.clone();
-    let mut command = Command::new("pi");
+    let mut command = Command::new(super::resolve_pi_executable(pi_agent_dir));
     command
         .arg("--mode")
         .arg("rpc")

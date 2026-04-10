@@ -52,6 +52,44 @@ pub fn resolve_summary_model_or_default(
     summarizer::resolve_summary_model_or_default(pi_agent_dir, requested_model)
 }
 
+pub fn resolve_pi_executable(pi_agent_dir: &Path) -> PathBuf {
+    let executable_name = format!("pi{}", env::consts::EXE_SUFFIX);
+
+    let bundled = pi_agent_dir.join("bin").join(&executable_name);
+    if bundled.is_file() {
+        return bundled;
+    }
+
+    if let Some(bun_install) = env::var("BUN_INSTALL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        let bun_pi = PathBuf::from(bun_install)
+            .join("bin")
+            .join(&executable_name);
+        if bun_pi.is_file() {
+            return bun_pi;
+        }
+    }
+
+    if let Some(home) = env::var("HOME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        let bun_pi = PathBuf::from(home)
+            .join(".bun")
+            .join("bin")
+            .join(&executable_name);
+        if bun_pi.is_file() {
+            return bun_pi;
+        }
+    }
+
+    PathBuf::from(executable_name)
+}
+
 const SUMMARY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub struct Config {
@@ -1374,6 +1412,8 @@ async fn debounce_changes(rx: &mut UnboundedReceiver<()>) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
     use chrono::{Duration as ChronoDuration, Local, Utc};
 
     use super::*;
@@ -1498,6 +1538,56 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["live", "a", "b", "stale"]
         );
+    }
+
+    #[test]
+    fn resolve_pi_executable_prefers_agent_bin() {
+        let base = temp_test_dir("pi-agent-bin");
+        let pi_agent_dir = base.join("agent");
+        let pi_path = pi_agent_dir
+            .join("bin")
+            .join(format!("pi{}", env::consts::EXE_SUFFIX));
+        fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+        fs::write(&pi_path, b"#!/bin/sh\n").unwrap();
+
+        assert_eq!(resolve_pi_executable(&pi_agent_dir), pi_path);
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn resolve_pi_executable_falls_back_to_bun_install_bin() {
+        let _guard = env_lock().lock().unwrap();
+        let original_bun_install = env::var("BUN_INSTALL").ok();
+
+        let base = temp_test_dir("pi-bun-install-bin");
+        let pi_agent_dir = base.join("agent");
+        let bun_install = base.join("bun");
+        let pi_path = bun_install
+            .join("bin")
+            .join(format!("pi{}", env::consts::EXE_SUFFIX));
+        fs::create_dir_all(pi_path.parent().unwrap()).unwrap();
+        fs::write(&pi_path, b"#!/bin/sh\n").unwrap();
+
+        unsafe {
+            env::set_var("BUN_INSTALL", &bun_install);
+        }
+        assert_eq!(resolve_pi_executable(&pi_agent_dir), pi_path);
+
+        match original_bun_install {
+            Some(value) => unsafe {
+                env::set_var("BUN_INSTALL", value);
+            },
+            None => unsafe {
+                env::remove_var("BUN_INSTALL");
+            },
+        }
+        let _ = fs::remove_dir_all(base);
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn sample_active_session(
