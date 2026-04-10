@@ -1,52 +1,29 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>pimux reports</title>
-  <link rel="stylesheet" href="/static/reset.css">
-  <link rel="stylesheet" href="/static/pimux.css">
-</head>
-<body>
-  <main>
-    <header class="page-header">
-      <div>
-        <p class="eyebrow">pimux</p>
-        <h1>Daily reports</h1>
-        <p class="muted">Timezone <code><%= timezone %></code> · showing <code><%= day_count %></code> recent days · saved in <code><%= reports_dir %></code></p>
-      </div>
-      <nav class="nav">
-        <a href="/">status</a>
-        <a href="/hosts">/hosts</a>
-        <a href="/sessions">/sessions</a>
-        <a href="/ui/sessions">archive</a>
-      </nav>
-    </header>
+<% include!("_layout_start.stpl"); %>
+<% include!("_page_header.stpl"); %>
 
-    <section class="card list-card">
-      <% if days.is_empty() { %>
-        <p class="empty">No report days are available.</p>
-      <% } else { %>
-        <ul class="archive-list">
-          <% for day in &days { %>
-            <li class="archive-item">
-              <div class="row-header">
-                <div>
-                  <h2><a href="<%= day.report_url %>"><%= day.date %></a></h2>
-                  <span class="status-pill <%= day.status_class %>"><%= day.status_label %></span>
-                  <% if let Some(saved_at) = &day.saved_at { %>
-                    <span class="meta">saved: <%= saved_at %></span>
-                  <% } %>
-                </div>
-                <div class="actions">
-                  <a href="<%= day.report_url %>">open report</a>
-                </div>
-              </div>
-            </li>
-          <% } %>
-        </ul>
+<section class="card list-card">
+  <% if days.is_empty() { %>
+    <p class="empty">No report days are available.</p>
+  <% } else { %>
+    <ul class="archive-list">
+      <% for day in &days { %>
+        <li class="archive-item">
+          <div class="row-header">
+            <div>
+              <h2><a href="<%= day.report_url %>"><%= day.date %></a></h2>
+              <span class="status-pill <%= day.status_class %>"><%= day.status_label %></span>
+              <% if let Some(saved_at) = &day.saved_at { %>
+                <span class="meta">saved: <%= saved_at %></span>
+              <% } %>
+            </div>
+            <div class="actions">
+              <a href="<%= day.report_url %>">open report</a>
+            </div>
+          </div>
+        </li>
       <% } %>
-    </section>
-  </main>
-</body>
-</html>
+    </ul>
+  <% } %>
+</section>
+
+<% include!("_layout_end.stpl"); %>

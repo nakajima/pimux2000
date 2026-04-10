@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><%= chrome.page_title %></title>
+  <% if let Some(seconds) = chrome.auto_refresh_seconds { %>
+    <meta http-equiv="refresh" content="<%= seconds %>">
+  <% } %>
+  <link rel="stylesheet" href="/static/reset.css">
+  <link rel="stylesheet" href="/static/pimux.css">
+</head>
+<body>
+  <main>

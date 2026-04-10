@@ -4037,15 +4037,22 @@ mod tests {
             response.headers().get(header::CONTENT_TYPE).unwrap(),
             "text/css; charset=utf-8"
         );
-        assert_eq!(
-            response.headers().get(header::CONTENT_ENCODING).unwrap(),
-            "gzip"
-        );
+        let content_encoding = response
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .map(|value| value.to_str().unwrap().to_string());
 
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let mut decoder = GzDecoder::new(bytes.as_ref());
-        let mut body = String::new();
-        decoder.read_to_string(&mut body).unwrap();
+        let body = if cfg!(debug_assertions) {
+            assert!(content_encoding.is_none());
+            String::from_utf8(bytes.to_vec()).unwrap()
+        } else {
+            assert_eq!(content_encoding.as_deref(), Some("gzip"));
+            let mut decoder = GzDecoder::new(bytes.as_ref());
+            let mut body = String::new();
+            decoder.read_to_string(&mut body).unwrap();
+            body
+        };
         assert!(body.contains(":root"));
         assert!(body.contains(".container"));
         assert!(body.contains(".page-header"));

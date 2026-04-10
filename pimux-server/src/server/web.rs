@@ -9,6 +9,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+#[cfg(not(debug_assertions))]
 use bytes::Bytes;
 use chrono::{DateTime, Days, NaiveDate, Utc};
 use pulldown_cmark::{Options, Parser};
@@ -32,13 +33,30 @@ const DEFAULT_REPORT_DAY_COUNT: u32 = 14;
 const MAX_REPORT_DAY_COUNT: u32 = 90;
 const REPORTS_DIR_ENV: &str = "PIMUX_REPORTS_DIR";
 const WEB_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+#[cfg(not(debug_assertions))]
 const RESET_CSS_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/reset.css.gz"));
+#[cfg(not(debug_assertions))]
 const PIMUX_CSS_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pimux.css.gz"));
+
+#[derive(Debug, Clone)]
+struct NavLinkView {
+    href: String,
+    label: String,
+}
+
+#[derive(Debug, Clone)]
+struct PageChromeView {
+    page_title: String,
+    heading: String,
+    subtitle_html: Option<String>,
+    nav_links: Vec<NavLinkView>,
+    auto_refresh_seconds: Option<u32>,
+}
 
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/status.stpl")]
 struct StatusPageTemplate {
-    server_version: String,
+    chrome: PageChromeView,
     postgres_enabled: bool,
     tracked_hosts: usize,
     connected_hosts: usize,
@@ -72,7 +90,7 @@ struct StatusSessionView {
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/archive_sessions.stpl")]
 struct ArchiveSessionsPageTemplate {
-    total_sessions: usize,
+    chrome: PageChromeView,
     sessions: Vec<ArchiveSessionListItemView>,
 }
 
@@ -91,9 +109,7 @@ struct ArchiveSessionListItemView {
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/archive_session.stpl")]
 struct ArchiveSessionPageTemplate {
-    host_location: String,
-    session_id: String,
-    summary: String,
+    chrome: PageChromeView,
     host_auth: String,
     created_at: String,
     updated_at: String,
@@ -151,9 +167,7 @@ struct ParsedArchiveMessage {
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/reports.stpl")]
 struct ReportsPageTemplate {
-    timezone: String,
-    day_count: usize,
-    reports_dir: String,
+    chrome: PageChromeView,
     days: Vec<ReportDayListItemView>,
 }
 
@@ -169,11 +183,10 @@ struct ReportDayListItemView {
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/report.stpl")]
 struct ReportPageTemplate {
+    chrome: PageChromeView,
     date: String,
-    timezone: String,
     source_label: String,
     saved_at: Option<String>,
-    auto_refresh_seconds: Option<u32>,
     generation: Option<ReportGenerationView>,
     warning: Option<ReportWarningView>,
     report_html: Option<String>,
@@ -219,8 +232,7 @@ struct RenderedMessageBody {
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/error.stpl")]
 struct ErrorPageTemplate {
-    title: String,
-    headline: String,
+    chrome: PageChromeView,
     message: String,
     back_url: String,
     back_label: String,
@@ -283,11 +295,25 @@ struct ArchiveMessageRecord {
 }
 
 pub(super) async fn static_reset_css() -> Response {
-    css_response(RESET_CSS_GZ)
+    #[cfg(debug_assertions)]
+    {
+        css_response("reset.css")
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        css_response(RESET_CSS_GZ)
+    }
 }
 
 pub(super) async fn static_pimux_css() -> Response {
-    css_response(PIMUX_CSS_GZ)
+    #[cfg(debug_assertions)]
+    {
+        css_response("pimux.css")
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        css_response(PIMUX_CSS_GZ)
+    }
 }
 
 pub(super) async fn dashboard(State(state): State<AppState>) -> Response {
@@ -303,7 +329,23 @@ pub(super) async fn dashboard(State(state): State<AppState>) -> Response {
 
     render_html(
         StatusPageTemplate {
-            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            chrome: page_chrome(
+                "pimux status".to_string(),
+                "Server status".to_string(),
+                Some(format!("Version {}", code_html(env!("CARGO_PKG_VERSION")))),
+                {
+                    let mut nav_links = vec![
+                        nav_link("/hosts", "/hosts"),
+                        nav_link("/sessions", "/sessions"),
+                    ];
+                    if postgres_enabled {
+                        nav_links.push(nav_link("/ui/sessions", "archive"));
+                        nav_links.push(nav_link("/ui/reports", "reports"));
+                    }
+                    nav_links
+                },
+                None,
+            ),
             postgres_enabled,
             tracked_hosts,
             connected_hosts,
@@ -356,7 +398,21 @@ pub(super) async fn archive_sessions(Query(query): Query<ArchiveSessionsQuery>) 
 
     render_html(
         ArchiveSessionsPageTemplate {
-            total_sessions,
+            chrome: page_chrome(
+                "pimux archive".to_string(),
+                "Archived sessions".to_string(),
+                Some(format!(
+                    "Showing up to {} archived sessions from Postgres.",
+                    code_html(&total_sessions.to_string())
+                )),
+                vec![
+                    nav_link("/", "status"),
+                    nav_link("/hosts", "/hosts"),
+                    nav_link("/sessions", "/sessions"),
+                    nav_link("/ui/reports", "reports"),
+                ],
+                None,
+            ),
             sessions: views,
         },
         StatusCode::OK,
@@ -428,9 +484,23 @@ pub(super) async fn reports(
 
     render_html(
         ReportsPageTemplate {
-            timezone: report::DEFAULT_REPORT_TIMEZONE.to_string(),
-            day_count: days.len(),
-            reports_dir: reports_dir.display().to_string(),
+            chrome: page_chrome(
+                "pimux reports".to_string(),
+                "Daily reports".to_string(),
+                Some(format!(
+                    "Timezone {} · showing {} recent days · saved in {}",
+                    code_html(report::DEFAULT_REPORT_TIMEZONE),
+                    code_html(&days.len().to_string()),
+                    code_html(&reports_dir.display().to_string())
+                )),
+                vec![
+                    nav_link("/", "status"),
+                    nav_link("/hosts", "/hosts"),
+                    nav_link("/sessions", "/sessions"),
+                    nav_link("/ui/sessions", "archive"),
+                ],
+                None,
+            ),
             days,
         },
         StatusCode::OK,
@@ -498,13 +568,29 @@ pub(super) async fn report(
         .map(|metadata| metadata.timezone.clone())
         .unwrap_or_else(|| report::DEFAULT_REPORT_TIMEZONE.to_string());
 
+    let source_label = report_source_label(has_saved_report, generation_status.as_ref());
+    let auto_refresh_seconds = report_auto_refresh_seconds(generation_status.as_ref());
+
     render_html(
         ReportPageTemplate {
+            chrome: page_chrome(
+                format!("{} · pimux report", report_date),
+                format!("Daily report for {}", report_date),
+                Some(format!(
+                    "Timezone {} · {}",
+                    code_html(&timezone),
+                    escape_html(&source_label)
+                )),
+                vec![
+                    nav_link("/", "status"),
+                    nav_link("/ui/sessions", "archive"),
+                    nav_link("/ui/reports", "reports"),
+                ],
+                auto_refresh_seconds,
+            ),
             date: report_date.to_string(),
-            timezone,
-            source_label: report_source_label(has_saved_report, generation_status.as_ref()),
+            source_label,
             saved_at: report_saved_at(&report_path),
-            auto_refresh_seconds: report_auto_refresh_seconds(generation_status.as_ref()),
             generation: report_generation_view(generation_status.as_ref(), has_saved_report),
             warning: report_warning(metadata.as_ref(), has_saved_report),
             report_html,
@@ -792,11 +878,24 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
         })
         .collect::<Vec<_>>();
 
+    let summary = display_summary(session.summary.as_deref(), &session.session_id);
     render_html(
         ArchiveSessionPageTemplate {
-            host_location: session.host_location,
-            session_id: session.session_id.clone(),
-            summary: display_summary(session.summary.as_deref(), &session.session_id),
+            chrome: page_chrome(
+                format!("{} · pimux archive", summary),
+                summary.clone(),
+                Some(format!(
+                    "{} · {}",
+                    code_html(&session.host_location),
+                    code_html(&session.session_id)
+                )),
+                vec![
+                    nav_link("/", "status"),
+                    nav_link("/ui/sessions", "archive sessions"),
+                    nav_link("/ui/reports", "reports"),
+                ],
+                None,
+            ),
             host_auth: session.host_auth,
             created_at: format_optional_timestamp(session.created_at),
             updated_at: format_optional_timestamp(session.updated_at),
@@ -1067,6 +1166,33 @@ fn archive_session_url(host_location: &str, session_id: &str, message_key: Optio
         url.push_str(&message_anchor_id(message_key));
     }
     url
+}
+
+fn nav_link(href: &str, label: &str) -> NavLinkView {
+    NavLinkView {
+        href: href.to_string(),
+        label: label.to_string(),
+    }
+}
+
+fn page_chrome(
+    page_title: String,
+    heading: String,
+    subtitle_html: Option<String>,
+    nav_links: Vec<NavLinkView>,
+    auto_refresh_seconds: Option<u32>,
+) -> PageChromeView {
+    PageChromeView {
+        page_title,
+        heading,
+        subtitle_html,
+        nav_links,
+        auto_refresh_seconds,
+    }
+}
+
+fn code_html(text: &str) -> String {
+    format!("<code>{}</code>", escape_html(text))
 }
 
 fn report_url(date: NaiveDate) -> String {
@@ -1605,6 +1731,28 @@ async fn load_archive_messages(
         .collect())
 }
 
+#[cfg(debug_assertions)]
+fn css_response(file_name: &str) -> Response {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("static")
+        .join(file_name);
+
+    match fs::read(&path) {
+        Ok(contents) => (
+            [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+            contents,
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("failed to read CSS asset `{}`: {error}", path.display()),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(not(debug_assertions))]
 fn css_response(compressed: &'static [u8]) -> Response {
     (
         [
@@ -1638,8 +1786,13 @@ fn error_response(
 ) -> Response {
     render_html(
         ErrorPageTemplate {
-            title: format!("{headline} · pimux"),
-            headline: headline.to_string(),
+            chrome: page_chrome(
+                format!("{headline} · pimux"),
+                headline.to_string(),
+                None,
+                vec![nav_link("/", "status")],
+                None,
+            ),
             message: message.to_string(),
             back_url: back_url.to_string(),
             back_label: back_label.to_string(),

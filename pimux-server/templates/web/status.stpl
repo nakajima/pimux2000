@@ -1,97 +1,72 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>pimux status</title>
-  <link rel="stylesheet" href="/static/reset.css">
-  <link rel="stylesheet" href="/static/pimux.css">
-</head>
-<body>
-  <main>
-    <header class="page-header">
-      <div>
-        <p class="eyebrow">pimux</p>
-        <h1>Server status</h1>
-        <p class="muted">Version <code><%= server_version %></code></p>
-      </div>
-      <nav class="nav">
-        <a href="/hosts">/hosts</a>
-        <a href="/sessions">/sessions</a>
-        <% if postgres_enabled { %>
-          <a href="/ui/sessions">archive</a>
-          <a href="/ui/reports">reports</a>
-        <% } %>
-      </nav>
-    </header>
+<% include!("_layout_start.stpl"); %>
+<% include!("_page_header.stpl"); %>
 
-    <section class="stats">
-      <article class="card stat-card">
-        <span class="stat-label">Tracked hosts</span>
-        <span class="stat-value"><%= tracked_hosts %></span>
-      </article>
-      <article class="card stat-card">
-        <span class="stat-label">Connected hosts</span>
-        <span class="stat-value"><%= connected_hosts %></span>
-      </article>
-      <article class="card stat-card">
-        <span class="stat-label">Missing hosts</span>
-        <span class="stat-value"><%= missing_hosts %></span>
-      </article>
-      <article class="card stat-card">
-        <span class="stat-label">Tracked sessions</span>
-        <span class="stat-value"><%= tracked_sessions %></span>
-      </article>
-      <article class="card stat-card">
-        <span class="stat-label">Archive</span>
-        <span class="stat-value"><% if postgres_enabled { %>on<% } else { %>off<% } %></span>
-      </article>
+<section class="stats">
+  <article class="card stat-card">
+    <span class="stat-label">Tracked hosts</span>
+    <span class="stat-value"><%= tracked_hosts %></span>
+  </article>
+  <article class="card stat-card">
+    <span class="stat-label">Connected hosts</span>
+    <span class="stat-value"><%= connected_hosts %></span>
+  </article>
+  <article class="card stat-card">
+    <span class="stat-label">Missing hosts</span>
+    <span class="stat-value"><%= missing_hosts %></span>
+  </article>
+  <article class="card stat-card">
+    <span class="stat-label">Tracked sessions</span>
+    <span class="stat-value"><%= tracked_sessions %></span>
+  </article>
+  <article class="card stat-card">
+    <span class="stat-label">Archive</span>
+    <span class="stat-value"><% if postgres_enabled { %>on<% } else { %>off<% } %></span>
+  </article>
+</section>
+
+<div class="stack">
+  <% if hosts.is_empty() { %>
+    <section class="card host-card">
+      <p class="empty">No hosts have reported in yet.</p>
     </section>
+  <% } else { %>
+    <% for host in &hosts { %>
+      <section class="card host-card">
+        <div class="host-header">
+          <div>
+            <h2><%= host.location %></h2>
+            <span class="meta">auth: <%= host.auth_label %> · last seen: <%= host.last_seen_at %> · sessions: <%= host.session_count %></span>
+          </div>
+          <span class="status-pill <%= host.status_class %>"><%= host.status_label %></span>
+        </div>
 
-    <div class="stack">
-      <% if hosts.is_empty() { %>
-        <section class="card host-card">
-          <p class="empty">No hosts have reported in yet.</p>
-        </section>
-      <% } else { %>
-        <% for host in &hosts { %>
-          <section class="card host-card">
-            <div class="host-header">
-              <div>
-                <h2><%= host.location %></h2>
-                <span class="meta">auth: <%= host.auth_label %> · last seen: <%= host.last_seen_at %> · sessions: <%= host.session_count %></span>
-              </div>
-              <span class="status-pill <%= host.status_class %>"><%= host.status_label %></span>
-            </div>
-
-            <% if host.sessions.is_empty() { %>
-              <p class="empty">No tracked sessions for this host.</p>
-            <% } else { %>
-              <ul class="session-list">
-                <% for session in &host.sessions { %>
-                  <li class="session-item">
-                    <div class="row-header">
-                      <div>
-                        <strong><%= session.summary %></strong>
-                        <span class="meta"><code><%= session.id %></code></span>
-                        <span class="meta"><%= session.updated_at %></span>
-                        <span class="meta"><%= session.cwd %> · <%= session.model %></span>
-                      </div>
-                      <div class="actions">
-                        <a href="<%= session.json_url %>">messages json</a>
-                        <% if let Some(archive_url) = &session.archive_url { %>
-                          <a href="<%= archive_url %>">archive</a>
-                        <% } %>
-                      </div>
-                    </div>
-                  </li>
-                <% } %>
-              </ul>
+        <% if host.sessions.is_empty() { %>
+          <p class="empty">No tracked sessions for this host.</p>
+        <% } else { %>
+          <ul class="session-list">
+            <% for session in &host.sessions { %>
+              <li class="session-item">
+                <div class="row-header">
+                  <div>
+                    <strong><%= session.summary %></strong>
+                    <span class="meta"><code><%= session.id %></code></span>
+                    <span class="meta"><%= session.updated_at %></span>
+                    <span class="meta"><%= session.cwd %> · <%= session.model %></span>
+                  </div>
+                  <div class="actions">
+                    <a href="<%= session.json_url %>">messages json</a>
+                    <% if let Some(archive_url) = &session.archive_url { %>
+                      <a href="<%= archive_url %>">archive</a>
+                    <% } %>
+                  </div>
+                </div>
+              </li>
             <% } %>
-          </section>
+          </ul>
         <% } %>
-      <% } %>
-    </div>
-  </main>
-</body>
-</html>
+      </section>
+    <% } %>
+  <% } %>
+</div>
+
+<% include!("_layout_end.stpl"); %>

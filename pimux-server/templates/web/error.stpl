@@ -1,28 +1,9 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><%= title %></title>
-<link rel="stylesheet" href="/static/reset.css">
-  <link rel="stylesheet" href="/static/pimux.css">
-</head>
-<body>
-  <main>
-    <header class="page-header">
-      <div>
-        <p class="eyebrow">pimux</p>
-        <h1><%= headline %></h1>
-      </div>
-      <nav class="nav">
-        <a href="/">status</a>
-      </nav>
-    </header>
+<% include!("_layout_start.stpl"); %>
+<% include!("_page_header.stpl"); %>
 
-    <section class="card error-card">
-      <p><%= message %></p>
-      <p><a href="<%= back_url %>"><%= back_label %></a></p>
-    </section>
-  </main>
-</body>
-</html>
+<section class="card error-card">
+  <p><%= message %></p>
+  <p><a href="<%= back_url %>"><%= back_label %></a></p>
+</section>
+
+<% include!("_layout_end.stpl"); %>

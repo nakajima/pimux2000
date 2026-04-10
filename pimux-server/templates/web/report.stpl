@@ -1,67 +1,42 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><%= date %> · pimux report</title>
-  <% if let Some(seconds) = auto_refresh_seconds { %>
-    <meta http-equiv="refresh" content="<%= seconds %>">
+<% include!("_layout_start.stpl"); %>
+<% include!("_page_header.stpl"); %>
+
+<section class="card report-card">
+  <div class="row-header">
+    <div>
+      <span class="meta">source: <%= source_label %></span>
+      <% if let Some(saved_at) = &saved_at { %>
+        <span class="meta">saved: <%= saved_at %></span>
+      <% } %>
+    </div>
+    <div class="actions">
+      <a href="/ui/report?date=<%= date %>">permalink</a>
+      <form class="action-form" method="post" action="/ui/report/regenerate">
+        <input type="hidden" name="date" value="<%= date %>">
+        <button class="action-button" type="submit">regenerate</button>
+      </form>
+    </div>
+  </div>
+
+  <% if let Some(generation) = &generation { %>
+    <div class="<%= generation.status_class %>">
+      <strong><%= generation.title %></strong>
+      <p><%= generation.message %></p>
+    </div>
   <% } %>
-  <link rel="stylesheet" href="/static/reset.css">
-  <link rel="stylesheet" href="/static/pimux.css">
-</head>
-<body>
-  <main>
-    <header class="page-header">
-      <div>
-        <p class="eyebrow">pimux</p>
-        <h1>Daily report for <%= date %></h1>
-        <p class="muted">Timezone <code><%= timezone %></code> · <%= source_label %></p>
-      </div>
-      <nav class="nav">
-        <a href="/">status</a>
-        <a href="/ui/sessions">archive</a>
-        <a href="/ui/reports">reports</a>
-      </nav>
-    </header>
 
-    <section class="card report-card">
-      <div class="row-header">
-        <div>
-          <span class="meta">source: <%= source_label %></span>
-          <% if let Some(saved_at) = &saved_at { %>
-            <span class="meta">saved: <%= saved_at %></span>
-          <% } %>
-        </div>
-        <div class="actions">
-          <a href="/ui/report?date=<%= date %>">permalink</a>
-          <form class="action-form" method="post" action="/ui/report/regenerate">
-            <input type="hidden" name="date" value="<%= date %>">
-            <button class="action-button" type="submit">regenerate</button>
-          </form>
-        </div>
-      </div>
+  <% if let Some(warning) = &warning { %>
+    <div class="warning-callout">
+      <strong><%= warning.title %></strong>
+      <p><%= warning.message %></p>
+    </div>
+  <% } %>
 
-      <% if let Some(generation) = &generation { %>
-        <div class="<%= generation.status_class %>">
-          <strong><%= generation.title %></strong>
-          <p><%= generation.message %></p>
-        </div>
-      <% } %>
+  <% if let Some(report_html) = &report_html { %>
+    <article class="message-body message-body-markdown"><%- report_html %></article>
+  <% } else { %>
+    <p class="empty">No saved report is available yet.</p>
+  <% } %>
+</section>
 
-      <% if let Some(warning) = &warning { %>
-        <div class="warning-callout">
-          <strong><%= warning.title %></strong>
-          <p><%= warning.message %></p>
-        </div>
-      <% } %>
-
-      <% if let Some(report_html) = &report_html { %>
-        <article class="message-body message-body-markdown"><%- report_html %></article>
-      <% } else { %>
-        <p class="empty">No saved report is available yet.</p>
-      <% } %>
-    </section>
-  </main>
-</body>
-</html>
+<% include!("_layout_end.stpl"); %>

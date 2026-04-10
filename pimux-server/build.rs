@@ -8,11 +8,19 @@ use flate2::{Compression, write::GzEncoder};
 
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
 
     for asset in ["reset.css", "pimux.css"] {
         let source = manifest_dir.join("static").join(asset);
         println!("cargo:rerun-if-changed={}", source.display());
+    }
+
+    if env::var("PROFILE").ok().as_deref() != Some("release") {
+        return;
+    }
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    for asset in ["reset.css", "pimux.css"] {
+        let source = manifest_dir.join("static").join(asset);
         write_gzipped_asset(&source, &out_dir.join(format!("{asset}.gz")));
     }
 }
