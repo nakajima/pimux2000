@@ -647,12 +647,10 @@ mod tests {
         let mut message = Message::from_blocks(
             Utc.timestamp_opt(1_000, 0).unwrap(),
             Role::Assistant,
-            vec![MessageContentBlock::tool_call_with_id(
-                Some("call-123"),
-                "read",
-                Some("foo.txt"),
-            )
-            .unwrap()],
+            vec![
+                MessageContentBlock::tool_call_with_id(Some("call-123"), "read", Some("foo.txt"))
+                    .unwrap(),
+            ],
         )
         .unwrap();
         let baseline = message_dedupe_key(&message).unwrap();

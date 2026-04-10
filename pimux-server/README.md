@@ -630,6 +630,8 @@ Daily report UI behavior:
 - stores generated reports under `PIMUX_REPORTS_DIR` when set
 - otherwise stores them in the pimux server state directory under `reports/daily`
 - generates missing reports on first open, then reuses the saved markdown on later visits
+- saves sidecar metadata so the web UI can warn when a report was generated with heuristic fallback instead of Pi summarization
+- shows a caution banner for legacy saved reports that predate fallback tracking because their generation quality is unknown
 
 When the server starts, it also advertises itself on the local network via Bonjour / DNS-SD as `_pimux._tcp.local.` so the iOS app can discover nearby servers automatically.
 If you want to disable that advertisement, set:

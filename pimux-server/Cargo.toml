@@ -1,6 +1,6 @@
 [package]
 name = "pimux-server"
-version = "0.2.46"
+version = "0.2.48"
 edition = "2024"
 default-run = "pimux"
 
@@ -49,3 +49,6 @@ walkdir = "2.5"
 
 [dev-dependencies]
 tower = "0.5"
+
+[build-dependencies]
+flate2 = "1.1"

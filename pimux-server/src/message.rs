@@ -133,7 +133,11 @@ pub struct Message {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "toolCallId")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "toolCallId"
+    )]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<MessageContentBlock>,
@@ -580,7 +584,10 @@ fn normalize_block(mut block: MessageContentBlock) -> Option<MessageContentBlock
                 return None;
             }
             block.text = block.text.as_deref().and_then(normalized_display_text);
-            block.tool_call_id = block.tool_call_id.as_deref().and_then(normalized_display_text);
+            block.tool_call_id = block
+                .tool_call_id
+                .as_deref()
+                .and_then(normalized_display_text);
             block.mime_type = None;
             block.data = None;
             block.attachment_id = None;
@@ -743,12 +750,10 @@ mod tests {
         let message = Message::from_blocks(
             Utc::now(),
             Role::Assistant,
-            vec![MessageContentBlock::tool_call_with_id(
-                Some("call-123"),
-                "read",
-                Some("foo.txt"),
-            )
-            .unwrap()],
+            vec![
+                MessageContentBlock::tool_call_with_id(Some("call-123"), "read", Some("foo.txt"))
+                    .unwrap(),
+            ],
         )
         .unwrap();
 

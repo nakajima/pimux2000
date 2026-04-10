@@ -14,7 +14,7 @@ use std::{
     },
 };
 
-use tower_http::{services::ServeDir, trace::TraceLayer};
+use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use axum::{
@@ -399,14 +399,11 @@ fn app(state: AppState) -> Router {
         .route("/ui/session", get(web::archive_session))
         .route("/ui/reports", get(web::reports))
         .route("/ui/report", get(web::report))
-        .nest_service("/static", ServeDir::new(static_assets_dir()))
+        .route("/static/reset.css", get(web::static_reset_css))
+        .route("/static/pimux.css", get(web::static_pimux_css))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-fn static_assets_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static")
 }
 
 fn port_from_env() -> Result<u16, BoxError> {
@@ -3873,12 +3870,15 @@ fn run_command(command: &str, args: &[&str]) -> Result<String, BoxError> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use axum::{
         body::{Body, to_bytes},
         extract::Query,
         http::{Method, Request, header},
     };
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use flate2::read::GzDecoder;
     use serde::{Serialize, de::DeserializeOwned};
     use tower::util::ServiceExt;
 
@@ -4032,10 +4032,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "text/css"
+            "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "gzip"
         );
 
-        let body = text_response(response).await;
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let mut decoder = GzDecoder::new(bytes.as_ref());
+        let mut body = String::new();
+        decoder.read_to_string(&mut body).unwrap();
         assert!(body.contains(":root"));
         assert!(body.contains(".container"));
         assert!(body.contains(".page-header"));

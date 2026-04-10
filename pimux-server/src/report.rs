@@ -55,6 +55,8 @@ pub(crate) struct GeneratedDayReport {
     pub report_date: NaiveDate,
     pub timezone: String,
     pub markdown: String,
+    pub used_heuristic_fallback: bool,
+    pub heuristic_project_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +215,8 @@ pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDa
             markdown: format!(
                 "# Daily report for {report_date}\n\nNo archived project activity found.\n"
             ),
+            used_heuristic_fallback: false,
+            heuristic_project_keys: Vec::new(),
         });
     }
 
@@ -231,6 +235,7 @@ pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDa
     );
 
     let mut rendered_projects = Vec::with_capacity(projects.len());
+    let mut heuristic_project_keys = Vec::new();
     for (index, project) in projects.iter().enumerate() {
         eprintln!(
             "[{}/{}] summarizing {}",
@@ -258,6 +263,7 @@ pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDa
                     "report summary failed for project {}: {error}",
                     project.project_key
                 );
+                heuristic_project_keys.push(project.project_key.clone());
                 heuristic_project_report(project, &excerpts, &misses, &ui_base_url)
             }
         };
@@ -268,6 +274,8 @@ pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDa
         report_date,
         timezone,
         markdown: render_day_report(report_date, &rendered_projects),
+        used_heuristic_fallback: !heuristic_project_keys.is_empty(),
+        heuristic_project_keys,
     })
 }
 

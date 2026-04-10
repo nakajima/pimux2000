@@ -172,6 +172,22 @@ dd {
   padding-top: 1rem;
 }
 
+.warning-callout {
+  border: 1px solid var(--yellow-border);
+  background: var(--yellow-soft);
+  margin-top: 1rem;
+  padding: 0.875rem 1rem;
+}
+
+.warning-callout strong {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+.warning-callout p {
+  margin: 0;
+}
+
 .status-pill {
   display: inline-flex;
   padding: 0.15rem 0.5rem;

@@ -35,6 +35,13 @@
         </div>
       </div>
 
+      <% if let Some(warning) = &warning { %>
+        <div class="warning-callout">
+          <strong><%= warning.title %></strong>
+          <p><%= warning.message %></p>
+        </div>
+      <% } %>
+
       <article class="message-body message-body-markdown"><%- report_html %></article>
     </section>
   </main>

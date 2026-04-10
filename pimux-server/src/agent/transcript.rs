@@ -251,13 +251,11 @@ fn content_blocks(content: Option<&Value>, include_tool_calls: bool) -> Vec<Mess
                     let name = block.get("name").and_then(Value::as_str)?;
                     let summary = tool_call_summary(name, block.get("arguments"));
                     match block.get("id").and_then(Value::as_str) {
-                        Some(tool_call_id) => {
-                            MessageContentBlock::tool_call_with_id(
-                                Some(tool_call_id),
-                                name,
-                                summary.as_deref(),
-                            )
-                        }
+                        Some(tool_call_id) => MessageContentBlock::tool_call_with_id(
+                            Some(tool_call_id),
+                            name,
+                            summary.as_deref(),
+                        ),
                         None => MessageContentBlock::tool_call(name, summary.as_deref()),
                     }
                 }

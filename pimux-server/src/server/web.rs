@@ -5,14 +5,15 @@ use std::{
 
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use bytes::Bytes;
 use chrono::{DateTime, Days, NaiveDate, Utc};
 use pulldown_cmark::{Options, Parser};
 use sailfish::{TemplateSimple, runtime::escape::escape_to_string};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_postgres::{Client, NoTls};
 use tracing::warn;
@@ -31,6 +32,8 @@ const DEFAULT_REPORT_DAY_COUNT: u32 = 14;
 const MAX_REPORT_DAY_COUNT: u32 = 90;
 const REPORTS_DIR_ENV: &str = "PIMUX_REPORTS_DIR";
 const WEB_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+const RESET_CSS_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/reset.css.gz"));
+const PIMUX_CSS_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pimux.css.gz"));
 
 #[derive(Debug, TemplateSimple)]
 #[template(path = "web/status.stpl")]
@@ -170,7 +173,21 @@ struct ReportPageTemplate {
     timezone: String,
     source_label: String,
     saved_at: Option<String>,
+    warning: Option<ReportWarningView>,
     report_html: String,
+}
+
+#[derive(Debug, Clone)]
+struct ReportWarningView {
+    title: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SavedReportMetadata {
+    timezone: String,
+    used_heuristic_fallback: bool,
+    heuristic_project_keys: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -238,6 +255,14 @@ struct ArchiveMessageRecord {
     tool_name: Option<String>,
     body: String,
     message_json: Value,
+}
+
+pub(super) async fn static_reset_css() -> Response {
+    css_response(RESET_CSS_GZ)
+}
+
+pub(super) async fn static_pimux_css() -> Response {
+    css_response(PIMUX_CSS_GZ)
 }
 
 pub(super) async fn dashboard(State(state): State<AppState>) -> Response {
@@ -428,8 +453,10 @@ pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
         }
     };
     let report_path = daily_report_path(&reports_dir, report_date);
+    let metadata_path = report_metadata_path(&report_path);
+    let loaded_from_saved_report = report_path.is_file();
 
-    let (markdown, source_label, timezone) = if report_path.is_file() {
+    let (markdown, source_label, metadata) = if loaded_from_saved_report {
         let markdown = match fs::read_to_string(&report_path) {
             Ok(markdown) => markdown,
             Err(error) => {
@@ -445,11 +472,22 @@ pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
                 );
             }
         };
-        (
-            markdown,
-            "loaded from saved report".to_string(),
-            report::DEFAULT_REPORT_TIMEZONE.to_string(),
-        )
+        let metadata = match load_report_metadata(&metadata_path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "report metadata read failed",
+                    &format!(
+                        "could not read report metadata `{}`: {error}",
+                        metadata_path.display()
+                    ),
+                    "/ui/reports",
+                    "Back to reports",
+                );
+            }
+        };
+        (markdown, "loaded from saved report".to_string(), metadata)
     } else {
         let generated = match report::generate_day_report(DayConfig {
             date: Some(report_date.to_string()),
@@ -485,12 +523,35 @@ pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
             );
         }
 
+        let metadata = SavedReportMetadata {
+            timezone: generated.timezone.clone(),
+            used_heuristic_fallback: generated.used_heuristic_fallback,
+            heuristic_project_keys: generated.heuristic_project_keys,
+        };
+        if let Err(error) = save_report_metadata(&metadata_path, &metadata) {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "report metadata save failed",
+                &format!(
+                    "could not save report metadata `{}`: {error}",
+                    metadata_path.display()
+                ),
+                "/ui/reports",
+                "Back to reports",
+            );
+        }
+
         (
             generated.markdown,
             "generated on demand".to_string(),
-            generated.timezone,
+            Some(metadata),
         )
     };
+
+    let timezone = metadata
+        .as_ref()
+        .map(|metadata| metadata.timezone.clone())
+        .unwrap_or_else(|| report::DEFAULT_REPORT_TIMEZONE.to_string());
 
     render_html(
         ReportPageTemplate {
@@ -498,6 +559,7 @@ pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
             timezone,
             source_label,
             saved_at: report_saved_at(&report_path),
+            warning: report_warning(metadata.as_ref(), loaded_from_saved_report),
             report_html: markdown_to_html(&markdown),
         },
         StatusCode::OK,
@@ -597,24 +659,31 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
                 .as_ref()
                 .into_iter()
                 .flat_map(move |normalized| {
-                    normalized.blocks.iter().enumerate().filter_map(move |(index, block)| {
-                        (block.kind == MessageContentBlockKind::ToolCall)
-                            .then_some(())
-                            .and(block.tool_call_id.as_ref())
-                            .map(|tool_call_id| {
-                                (
-                                    tool_call_id.clone(),
+                    normalized
+                        .blocks
+                        .iter()
+                        .enumerate()
+                        .filter_map(move |(index, block)| {
+                            (block.kind == MessageContentBlockKind::ToolCall)
+                                .then_some(())
+                                .and(block.tool_call_id.as_ref())
+                                .map(|tool_call_id| {
                                     (
-                                        message.record.message_key.clone(),
-                                        tool_call_block_anchor_id(&message.record.message_key, index),
-                                        block
-                                            .tool_call_name
-                                            .clone()
-                                            .unwrap_or_else(|| "unknown tool".to_string()),
-                                    ),
-                                )
-                            })
-                    })
+                                        tool_call_id.clone(),
+                                        (
+                                            message.record.message_key.clone(),
+                                            tool_call_block_anchor_id(
+                                                &message.record.message_key,
+                                                index,
+                                            ),
+                                            block
+                                                .tool_call_name
+                                                .clone()
+                                                .unwrap_or_else(|| "unknown tool".to_string()),
+                                        ),
+                                    )
+                                })
+                        })
                 })
         })
         .collect::<std::collections::HashMap<_, _>>();
@@ -662,8 +731,8 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
                 .as_ref()
                 .and_then(|normalized| normalized.tool_call_id.as_ref())
                 .and_then(|tool_call_id| {
-                    tool_calls_by_id.get(tool_call_id).map(|(call_message_key, anchor_id, tool_name)| {
-                        ArchiveToolLinkView {
+                    tool_calls_by_id.get(tool_call_id).map(
+                        |(call_message_key, anchor_id, tool_name)| ArchiveToolLinkView {
                             label: format!(
                                 "for call: {tool_name} · {}",
                                 short_tool_call_id(tool_call_id)
@@ -674,8 +743,8 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
                                 call_message_key,
                                 anchor_id,
                             ),
-                        }
-                    })
+                        },
+                    )
                 });
             let tool_call_badge = message
                 .normalized
@@ -695,12 +764,10 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
                                 return None;
                             }
 
-                            let result_link = block
-                                .tool_call_id
-                                .as_ref()
-                                .and_then(|tool_call_id| {
-                                    tool_results_by_id.get(tool_call_id).map(|(result_message_key, tool_name)| {
-                                        ArchiveToolLinkView {
+                            let result_link =
+                                block.tool_call_id.as_ref().and_then(|tool_call_id| {
+                                    tool_results_by_id.get(tool_call_id).map(
+                                        |(result_message_key, tool_name)| ArchiveToolLinkView {
                                             label: format!(
                                                 "result: {tool_name} · {}",
                                                 short_tool_call_id(tool_call_id)
@@ -711,8 +778,8 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
                                                 result_message_key,
                                                 &message_anchor_id(result_message_key),
                                             ),
-                                        }
-                                    })
+                                        },
+                                    )
                                 });
 
                             Some(ArchiveToolCallBlockView {
@@ -1061,6 +1128,69 @@ fn daily_report_path(reports_dir: &Path, date: NaiveDate) -> PathBuf {
     reports_dir.join(format!("{date}.md"))
 }
 
+fn report_metadata_path(report_path: &Path) -> PathBuf {
+    report_path.with_extension("meta.json")
+}
+
+fn load_report_metadata(path: &Path) -> Result<Option<SavedReportMetadata>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let metadata = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&metadata)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn save_report_metadata(path: &Path, metadata: &SavedReportMetadata) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Err(format!(
+            "report metadata path `{}` has no parent directory",
+            path.display()
+        ));
+    };
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let serialized = serde_json::to_string_pretty(metadata).map_err(|error| error.to_string())?;
+    fs::write(path, serialized).map_err(|error| error.to_string())
+}
+
+fn report_warning(
+    metadata: Option<&SavedReportMetadata>,
+    loaded_from_saved_report: bool,
+) -> Option<ReportWarningView> {
+    match metadata {
+        Some(metadata) if metadata.used_heuristic_fallback => Some(ReportWarningView {
+            title: "Generated with heuristic fallback".to_string(),
+            message: heuristic_fallback_warning_message(&metadata.heuristic_project_keys),
+        }),
+        Some(_) => None,
+        None if loaded_from_saved_report => Some(ReportWarningView {
+            title: "Saved report predates fallback tracking".to_string(),
+            message: "This saved report was created before pimux started recording whether Pi summarization succeeded, so it may have been generated heuristically. If it looks wrong, fix the server's Pi auth/settings and regenerate it.".to_string(),
+        }),
+        None => None,
+    }
+}
+
+fn heuristic_fallback_warning_message(project_keys: &[String]) -> String {
+    if project_keys.is_empty() {
+        return "Pi summarization failed and pimux fell back to heuristic report generation, so this report may contain raw requests, generic confirmations, or low-quality LLM miss summaries. Fix the server's Pi auth/settings and regenerate it.".to_string();
+    }
+
+    let preview = project_keys
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if project_keys.len() > 3 { "…" } else { "" };
+    format!(
+        "Pi summarization failed for {} project(s) ({preview}{suffix}), so pimux fell back to heuristic report generation. This report may contain raw requests, generic confirmations, or low-quality LLM miss summaries. Fix the server's Pi auth/settings and regenerate it.",
+        project_keys.len()
+    )
+}
+
 fn report_saved_at(path: &Path) -> Option<String> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
     let modified: DateTime<Utc> = modified.into();
@@ -1105,7 +1235,11 @@ fn archive_session_anchor_url(
 }
 
 fn short_tool_call_id(tool_call_id: &str) -> String {
-    let trimmed = tool_call_id.split('|').next().unwrap_or(tool_call_id).trim();
+    let trimmed = tool_call_id
+        .split('|')
+        .next()
+        .unwrap_or(tool_call_id)
+        .trim();
     if trimmed.chars().count() <= 18 {
         trimmed.to_string()
     } else {
@@ -1266,6 +1400,17 @@ async fn load_archive_messages(
         .collect())
 }
 
+fn css_response(compressed: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CONTENT_ENCODING, "gzip"),
+        ],
+        Bytes::from_static(compressed),
+    )
+        .into_response()
+}
+
 fn render_html<T: TemplateSimple>(template: T, status: StatusCode) -> Response {
     match template.render_once() {
         Ok(body) => (status, Html(body)).into_response(),
@@ -1304,9 +1449,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        archive_session_url, display_message_body_text, format_timestamp, markdown_to_html,
-        message_anchor_id, percent_encode_component, recent_report_dates, render_message_body,
-        short_tool_call_id, transcript_freshness_label,
+        SavedReportMetadata, archive_session_url, display_message_body_text, format_timestamp,
+        markdown_to_html, message_anchor_id, percent_encode_component, recent_report_dates,
+        render_message_body, report_warning, short_tool_call_id, transcript_freshness_label,
     };
 
     #[test]
@@ -1398,7 +1543,8 @@ mod tests {
 
     #[test]
     fn keeps_bash_output_as_plain_escaped_text() {
-        let rendered = render_message_body("bashExecution", None, &Value::Null, "echo <ok>\nline 2");
+        let rendered =
+            render_message_body("bashExecution", None, &Value::Null, "echo <ok>\nline 2");
 
         assert_eq!(rendered.format_class, "message-body-plain");
         assert_eq!(rendered.html, "echo &lt;ok&gt;\nline 2");
@@ -1432,5 +1578,37 @@ mod tests {
         assert!(html.contains("<sup"));
         assert!(html.contains("footnote text"));
         assert!(!html.contains("[^1]"));
+    }
+
+    #[test]
+    fn report_warning_flags_saved_reports_with_heuristic_fallback() {
+        let warning = report_warning(
+            Some(&SavedReportMetadata {
+                timezone: "America/Los_Angeles".to_string(),
+                used_heuristic_fallback: true,
+                heuristic_project_keys: vec![
+                    "~/apps/mi".to_string(),
+                    "~/apps/pimux2000".to_string(),
+                ],
+            }),
+            true,
+        )
+        .unwrap();
+
+        assert!(warning.title.contains("heuristic fallback"));
+        assert!(warning.message.contains("~/apps/mi"));
+        assert!(warning.message.contains("regenerate"));
+    }
+
+    #[test]
+    fn report_warning_flags_legacy_saved_reports_without_metadata() {
+        let warning = report_warning(None, true).unwrap();
+
+        assert!(warning.title.contains("predates fallback tracking"));
+        assert!(
+            warning
+                .message
+                .contains("may have been generated heuristically")
+        );
     }
 }
