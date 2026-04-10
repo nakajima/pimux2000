@@ -172,19 +172,34 @@ dd {
   padding-top: 1rem;
 }
 
-.warning-callout {
-  border: 1px solid var(--yellow-border);
-  background: var(--yellow-soft);
+.info-callout,
+.warning-callout,
+.error-callout {
   margin-top: 1rem;
   padding: 0.875rem 1rem;
 }
 
-.warning-callout strong {
+.info-callout {
+  border: 1px solid var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.warning-callout,
+.error-callout {
+  border: 1px solid var(--yellow-border);
+  background: var(--yellow-soft);
+}
+
+.info-callout strong,
+.warning-callout strong,
+.error-callout strong {
   display: block;
   margin-bottom: 0.5rem;
 }
 
-.warning-callout p {
+.info-callout p,
+.warning-callout p,
+.error-callout p {
   margin: 0;
 }
 
@@ -217,6 +232,12 @@ dd {
   background: var(--green-soft);
 }
 
+.status-pending {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.status-warning,
 .status-missing {
   border-color: var(--yellow-border);
   background: var(--yellow-soft);

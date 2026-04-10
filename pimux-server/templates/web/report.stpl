@@ -4,6 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title><%= date %> · pimux report</title>
+  <% if let Some(seconds) = auto_refresh_seconds { %>
+    <meta http-equiv="refresh" content="<%= seconds %>">
+  <% } %>
   <link rel="stylesheet" href="/static/reset.css">
   <link rel="stylesheet" href="/static/pimux.css">
 </head>
@@ -39,6 +42,13 @@
         </div>
       </div>
 
+      <% if let Some(generation) = &generation { %>
+        <div class="<%= generation.status_class %>">
+          <strong><%= generation.title %></strong>
+          <p><%= generation.message %></p>
+        </div>
+      <% } %>
+
       <% if let Some(warning) = &warning { %>
         <div class="warning-callout">
           <strong><%= warning.title %></strong>
@@ -46,7 +56,11 @@
         </div>
       <% } %>
 
-      <article class="message-body message-body-markdown"><%- report_html %></article>
+      <% if let Some(report_html) = &report_html { %>
+        <article class="message-body message-body-markdown"><%- report_html %></article>
+      <% } else { %>
+        <p class="empty">No saved report is available yet.</p>
+      <% } %>
     </section>
   </main>
 </body>

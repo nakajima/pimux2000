@@ -161,7 +161,7 @@ struct ReportsPageTemplate {
 struct ReportDayListItemView {
     date: String,
     report_url: String,
-    status_label: &'static str,
+    status_label: String,
     status_class: &'static str,
     saved_at: Option<String>,
 }
@@ -173,14 +173,34 @@ struct ReportPageTemplate {
     timezone: String,
     source_label: String,
     saved_at: Option<String>,
+    auto_refresh_seconds: Option<u32>,
+    generation: Option<ReportGenerationView>,
     warning: Option<ReportWarningView>,
-    report_html: String,
+    report_html: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ReportGenerationView {
+    title: String,
+    message: String,
+    status_class: &'static str,
 }
 
 #[derive(Debug, Clone)]
 struct ReportWarningView {
     title: String,
     message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ReportGenerationStatus {
+    Running {
+        started_at: DateTime<Utc>,
+    },
+    Failed {
+        failed_at: DateTime<Utc>,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,7 +246,6 @@ pub(super) struct ReportsQuery {
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct ReportQuery {
     date: Option<String>,
-    regenerated: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -344,7 +363,10 @@ pub(super) async fn archive_sessions(Query(query): Query<ArchiveSessionsQuery>) 
     )
 }
 
-pub(super) async fn reports(Query(query): Query<ReportsQuery>) -> Response {
+pub(super) async fn reports(
+    State(state): State<AppState>,
+    Query(query): Query<ReportsQuery>,
+) -> Response {
     let count = query
         .count
         .unwrap_or(DEFAULT_REPORT_DAY_COUNT)
@@ -382,25 +404,23 @@ pub(super) async fn reports(Query(query): Query<ReportsQuery>) -> Response {
             }
         };
 
-    let days = recent_report_dates(today, count)
+    let report_dates = recent_report_dates(today, count);
+    let generation_statuses = report_generation_statuses(&state, &report_dates).await;
+    let days = report_dates
         .into_iter()
         .map(|date| {
             let path = daily_report_path(&reports_dir, date);
-            let exists = path.is_file();
+            let has_saved_report = path.is_file();
             let saved_at = report_saved_at(&path);
+            let (status_label, status_class) = report_list_status(
+                has_saved_report,
+                generation_statuses.get(&report_generation_key(date)),
+            );
             ReportDayListItemView {
                 date: date.to_string(),
                 report_url: report_url(date),
-                status_label: if exists {
-                    "available"
-                } else {
-                    "missing · generate on open"
-                },
-                status_class: if exists {
-                    "status-connected"
-                } else {
-                    "status-missing"
-                },
+                status_label,
+                status_class,
                 saved_at,
             }
         })
@@ -417,7 +437,10 @@ pub(super) async fn reports(Query(query): Query<ReportsQuery>) -> Response {
     )
 }
 
-pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
+pub(super) async fn report(
+    State(state): State<AppState>,
+    Query(query): Query<ReportQuery>,
+) -> Response {
     let report_date = match parse_report_date_param(query.date.as_deref()) {
         Ok(date) => date,
         Err(response) => return response,
@@ -436,11 +459,26 @@ pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
         }
     };
     let report_path = daily_report_path(&reports_dir, report_date);
-    let loaded_from_saved_report = report_path.is_file();
+    let mut generation_status = report_generation_status(&state, report_date).await;
+    let mut has_saved_report = report_path.is_file();
 
-    let (markdown, metadata) = if loaded_from_saved_report {
+    if !has_saved_report && generation_status.is_none() {
+        if let Err(error) = start_report_generation(state.clone(), report_date, false).await {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "report generation failed",
+                &error,
+                "/ui/reports",
+                "Back to reports",
+            );
+        }
+        generation_status = report_generation_status(&state, report_date).await;
+        has_saved_report = report_path.is_file();
+    }
+
+    let (report_html, metadata) = if has_saved_report {
         match load_saved_report(&report_path) {
-            Ok(loaded) => loaded,
+            Ok((markdown, metadata)) => (Some(markdown_to_html(&markdown)), metadata),
             Err(error) => {
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -452,18 +490,7 @@ pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
             }
         }
     } else {
-        match generate_and_save_report(report_date, &reports_dir).await {
-            Ok(generated) => generated,
-            Err(error) => {
-                return error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "report generation failed",
-                    &error,
-                    "/ui/reports",
-                    "Back to reports",
-                );
-            }
-        }
+        (None, None)
     };
 
     let timezone = metadata
@@ -475,38 +502,27 @@ pub(super) async fn report(Query(query): Query<ReportQuery>) -> Response {
         ReportPageTemplate {
             date: report_date.to_string(),
             timezone,
-            source_label: report_source_label(
-                loaded_from_saved_report,
-                query.regenerated.is_some(),
-            ),
+            source_label: report_source_label(has_saved_report, generation_status.as_ref()),
             saved_at: report_saved_at(&report_path),
-            warning: report_warning(metadata.as_ref(), loaded_from_saved_report),
-            report_html: markdown_to_html(&markdown),
+            auto_refresh_seconds: report_auto_refresh_seconds(generation_status.as_ref()),
+            generation: report_generation_view(generation_status.as_ref(), has_saved_report),
+            warning: report_warning(metadata.as_ref(), has_saved_report),
+            report_html,
         },
         StatusCode::OK,
     )
 }
 
-pub(super) async fn report_regenerate(Form(form): Form<ReportRegenerateForm>) -> Response {
+pub(super) async fn report_regenerate(
+    State(state): State<AppState>,
+    Form(form): Form<ReportRegenerateForm>,
+) -> Response {
     let report_date = match parse_report_date_param(form.date.as_deref()) {
         Ok(date) => date,
         Err(response) => return response,
     };
 
-    let reports_dir = match resolve_reports_dir() {
-        Ok(path) => path,
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "reports directory unavailable",
-                &error,
-                &report_url(report_date),
-                "Back to report",
-            );
-        }
-    };
-
-    if let Err(error) = generate_and_save_report(report_date, &reports_dir).await {
+    if let Err(error) = start_report_generation(state, report_date, true).await {
         return error_response(
             StatusCode::BAD_GATEWAY,
             "report regeneration failed",
@@ -516,7 +532,7 @@ pub(super) async fn report_regenerate(Form(form): Form<ReportRegenerateForm>) ->
         );
     }
 
-    Redirect::to(&format!("{}&regenerated=1", report_url(report_date))).into_response()
+    Redirect::to(&report_url(report_date)).into_response()
 }
 
 pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) -> Response {
@@ -1057,6 +1073,83 @@ fn report_url(date: NaiveDate) -> String {
     format!("/ui/report?date={date}")
 }
 
+fn report_generation_key(date: NaiveDate) -> String {
+    date.to_string()
+}
+
+async fn report_generation_status(
+    state: &AppState,
+    date: NaiveDate,
+) -> Option<ReportGenerationStatus> {
+    state
+        .report_generations
+        .lock()
+        .await
+        .get(&report_generation_key(date))
+        .cloned()
+}
+
+async fn report_generation_statuses(
+    state: &AppState,
+    dates: &[NaiveDate],
+) -> std::collections::HashMap<String, ReportGenerationStatus> {
+    let generations = state.report_generations.lock().await;
+    dates
+        .iter()
+        .filter_map(|date| {
+            let key = report_generation_key(*date);
+            generations.get(&key).cloned().map(|status| (key, status))
+        })
+        .collect()
+}
+
+async fn start_report_generation(
+    state: AppState,
+    report_date: NaiveDate,
+    force: bool,
+) -> Result<(), String> {
+    let reports_dir = resolve_reports_dir()?;
+    let key = report_generation_key(report_date);
+
+    {
+        let mut generations = state.report_generations.lock().await;
+        match generations.get(&key) {
+            Some(ReportGenerationStatus::Running { .. }) => return Ok(()),
+            Some(ReportGenerationStatus::Failed { .. }) if !force => return Ok(()),
+            _ => {
+                generations.insert(
+                    key.clone(),
+                    ReportGenerationStatus::Running {
+                        started_at: Utc::now(),
+                    },
+                );
+            }
+        }
+    }
+
+    tokio::spawn(async move {
+        let result = generate_and_save_report(report_date, &reports_dir).await;
+        let mut generations = state.report_generations.lock().await;
+        match result {
+            Ok(()) => {
+                generations.remove(&key);
+            }
+            Err(error) => {
+                warn!(date = %report_date, %error, "report generation failed");
+                generations.insert(
+                    key,
+                    ReportGenerationStatus::Failed {
+                        failed_at: Utc::now(),
+                        message: error,
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(())
+}
+
 fn parse_report_date_param(value: Option<&str>) -> Result<NaiveDate, Response> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Err(error_response(
@@ -1123,7 +1216,7 @@ fn load_saved_report(report_path: &Path) -> Result<(String, Option<SavedReportMe
 async fn generate_and_save_report(
     report_date: NaiveDate,
     reports_dir: &Path,
-) -> Result<(String, Option<SavedReportMetadata>), String> {
+) -> Result<(), String> {
     let report_path = daily_report_path(reports_dir, report_date);
     let metadata_path = report_metadata_path(&report_path);
     let generated = report::generate_day_report(DayConfig {
@@ -1155,16 +1248,88 @@ async fn generate_and_save_report(
         )
     })?;
 
-    Ok((generated.markdown, Some(metadata)))
+    Ok(())
 }
 
-fn report_source_label(loaded_from_saved_report: bool, regenerated: bool) -> String {
-    if regenerated {
-        "regenerated just now".to_string()
-    } else if loaded_from_saved_report {
-        "loaded from saved report".to_string()
-    } else {
-        "generated on demand".to_string()
+fn report_source_label(
+    has_saved_report: bool,
+    generation_status: Option<&ReportGenerationStatus>,
+) -> String {
+    match (has_saved_report, generation_status) {
+        (true, Some(ReportGenerationStatus::Running { .. })) => {
+            "loaded from saved report while regenerating".to_string()
+        }
+        (true, Some(ReportGenerationStatus::Failed { .. })) => {
+            "loaded from saved report after a failed regeneration".to_string()
+        }
+        (true, None) => "loaded from saved report".to_string(),
+        (false, Some(ReportGenerationStatus::Running { .. })) => {
+            "generation in progress".to_string()
+        }
+        (false, Some(ReportGenerationStatus::Failed { .. })) => "generation failed".to_string(),
+        (false, None) => "generation queued".to_string(),
+    }
+}
+
+fn report_auto_refresh_seconds(generation_status: Option<&ReportGenerationStatus>) -> Option<u32> {
+    matches!(
+        generation_status,
+        Some(ReportGenerationStatus::Running { .. })
+    )
+    .then_some(2)
+}
+
+fn report_generation_view(
+    generation_status: Option<&ReportGenerationStatus>,
+    has_saved_report: bool,
+) -> Option<ReportGenerationView> {
+    match generation_status {
+        Some(ReportGenerationStatus::Running { .. }) => Some(ReportGenerationView {
+            title: "Generating report in background".to_string(),
+            message: if has_saved_report {
+                "Showing the last saved report while pimux regenerates a fresh version. This page will refresh automatically when it finishes.".to_string()
+            } else {
+                "No saved report exists yet. Pimux is generating it now in the background, and this page will refresh automatically when it finishes.".to_string()
+            },
+            status_class: "info-callout",
+        }),
+        Some(ReportGenerationStatus::Failed { message, .. }) => Some(ReportGenerationView {
+            title: "Report generation failed".to_string(),
+            message: if has_saved_report {
+                format!(
+                    "Pimux could not finish regenerating this report: {message}. Showing the last saved report instead."
+                )
+            } else {
+                format!(
+                    "Pimux could not generate this report: {message}. Use regenerate to try again."
+                )
+            },
+            status_class: "error-callout",
+        }),
+        None => None,
+    }
+}
+
+fn report_list_status(
+    has_saved_report: bool,
+    generation_status: Option<&ReportGenerationStatus>,
+) -> (String, &'static str) {
+    match (has_saved_report, generation_status) {
+        (true, Some(ReportGenerationStatus::Running { .. })) => {
+            ("available · regenerating".to_string(), "status-pending")
+        }
+        (true, Some(ReportGenerationStatus::Failed { .. })) => (
+            "available · last regenerate failed".to_string(),
+            "status-warning",
+        ),
+        (true, None) => ("available".to_string(), "status-connected"),
+        (false, Some(ReportGenerationStatus::Running { .. })) => {
+            ("generating in background".to_string(), "status-pending")
+        }
+        (false, Some(ReportGenerationStatus::Failed { .. })) => {
+            ("generation failed".to_string(), "status-missing")
+        }
+        (false, None) => ("missing · generate on open".to_string(), "status-missing"),
     }
 }
 
@@ -1489,9 +1654,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        SavedReportMetadata, archive_session_url, display_message_body_text, format_timestamp,
-        markdown_to_html, message_anchor_id, percent_encode_component, recent_report_dates,
-        render_message_body, report_warning, short_tool_call_id, transcript_freshness_label,
+        ReportGenerationStatus, SavedReportMetadata, archive_session_url,
+        display_message_body_text, format_timestamp, markdown_to_html, message_anchor_id,
+        percent_encode_component, recent_report_dates, render_message_body, report_generation_view,
+        report_list_status, report_warning, short_tool_call_id, transcript_freshness_label,
     };
 
     #[test]
@@ -1650,5 +1816,33 @@ mod tests {
                 .message
                 .contains("may have been generated heuristically")
         );
+    }
+
+    #[test]
+    fn report_list_status_marks_missing_running_reports_as_pending() {
+        let (label, class_name) = report_list_status(
+            false,
+            Some(&ReportGenerationStatus::Running {
+                started_at: Utc::now(),
+            }),
+        );
+
+        assert_eq!(label, "generating in background");
+        assert_eq!(class_name, "status-pending");
+    }
+
+    #[test]
+    fn report_generation_view_describes_background_generation() {
+        let view = report_generation_view(
+            Some(&ReportGenerationStatus::Running {
+                started_at: Utc::now(),
+            }),
+            false,
+        )
+        .unwrap();
+
+        assert!(view.title.contains("Generating report"));
+        assert!(view.message.contains("refresh automatically"));
+        assert_eq!(view.status_class, "info-callout");
     }
 }
