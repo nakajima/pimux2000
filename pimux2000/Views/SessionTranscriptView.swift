@@ -50,6 +50,7 @@ enum TranscriptEmptyState: Equatable {
 		var onRetry: (() -> Void)? = nil
 		var onOpenMessageContext: ((MessageContextRoute) -> Void)? = nil
 		var onScrollOffsetChanged: ((CGFloat) -> Void)? = nil
+		var onReachOldestVisibleMessage: (() -> Void)? = nil
 
 		func makeCoordinator() -> Coordinator {
 			Coordinator(parent: self)
@@ -291,6 +292,9 @@ enum TranscriptEmptyState: Equatable {
 			func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
 				guard let messageID = dataSource.itemIdentifier(for: indexPath) else { return }
 				measuredHeights[messageID] = cell.bounds.height
+				if indexPath.row == dataSource.snapshot().numberOfItems - 1 {
+					parent.onReachOldestVisibleMessage?()
+				}
 			}
 
 			func tableView(_ tableView: UITableView, estimatedHeightForRowAt indexPath: IndexPath) -> CGFloat {

@@ -36,6 +36,7 @@ struct PiSessionView: View {
 	@Environment(\.appDatabase) private var appDatabase
 	@Environment(\.pimuxServerClient) var pimuxServerClient
 	@Query<MessagesRequest> var storedMessages: [MessageInfo]
+	@Query<SessionMessageStatsRequest> var storedMessageStats: SessionMessageStats
 
 	// MARK: - Live Transcript
 
@@ -115,10 +116,26 @@ struct PiSessionView: View {
 	@Binding var columnVisibility: NavigationSplitViewVisibility
 	@Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
+	private static var initialStoredMessageCount: Int? {
+		#if canImport(UIKit) && !os(macOS)
+			100
+		#else
+			nil
+		#endif
+	}
+
+	private static let storedMessagePageIncrement = 100
+
 	init(session: PiSession, columnVisibility: Binding<NavigationSplitViewVisibility>) {
 		self.session = session
 		self._columnVisibility = columnVisibility
-		self._storedMessages = Query(MessagesRequest(sessionID: session.sessionID))
+		self._storedMessages = Query(
+			MessagesRequest(
+				sessionID: session.sessionID,
+				latestMessageCount: Self.initialStoredMessageCount
+			)
+		)
+		self._storedMessageStats = Query(SessionMessageStatsRequest(sessionID: session.sessionID))
 	}
 
 	var body: some View {
@@ -339,6 +356,29 @@ struct PiSessionView: View {
 		storedMessages.map(TranscriptMessage.confirmed) + pendingMessages.map(TranscriptMessage.pending)
 	}
 
+	private var hasOlderStoredMessages: Bool {
+		guard let firstPosition = storedMessages.first?.message.position else { return false }
+		return firstPosition > 0
+	}
+
+	@MainActor
+	private func loadOlderStoredMessagesIfNeeded() {
+		guard let firstPosition = storedMessages.first?.message.position, firstPosition > 0 else { return }
+
+		let targetOldestPosition = max(0, firstPosition - Self.storedMessagePageIncrement)
+		var request = $storedMessages.request.wrappedValue
+		if request.latestMessageCount == nil,
+		   let existingOldestPosition = request.oldestIncludedPosition,
+		   existingOldestPosition <= targetOldestPosition
+		{
+			return
+		}
+
+		request.latestMessageCount = nil
+		request.oldestIncludedPosition = targetOldestPosition
+		$storedMessages.request.wrappedValue = request
+	}
+
 	private var transcriptEmptyState: TranscriptEmptyState? {
 		guard transcriptMessages.isEmpty else { return nil }
 		if isLoadingMessages {
@@ -372,6 +412,10 @@ struct PiSessionView: View {
 								isScrolledUp = scrolledUp
 							}
 						}
+					},
+					onReachOldestVisibleMessage: {
+						guard hasOlderStoredMessages else { return }
+						loadOlderStoredMessagesIfNeeded()
 					}
 				)
 
@@ -425,11 +469,7 @@ struct PiSessionView: View {
 	}
 
 	private var confirmedUserMessageCount: Int {
-		storedMessages.reduce(into: 0) { count, messageInfo in
-			if messageInfo.message.role == .user {
-				count += 1
-			}
-		}
+		storedMessageStats.confirmedUserMessageCount
 	}
 
 	private var transcriptMessagesScrollSignature: String {

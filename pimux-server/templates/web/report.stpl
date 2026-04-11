@@ -22,6 +22,9 @@
     <div class="<%= generation.status_class %>">
       <strong><%= generation.title %></strong>
       <p><%= generation.message %></p>
+      <% if let Some(log_text) = &generation.log_text { %>
+        <pre class="generation-log"><%= log_text %></pre>
+      <% } %>
     </div>
   <% } %>
 

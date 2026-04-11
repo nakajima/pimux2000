@@ -1,16 +1,14 @@
 <header class="page-header">
   <div>
-    <p class="eyebrow">pimux</p>
+    <nav class="nav">
+      <p class="eyebrow">pimux</p>
+      <a href="/">status</a>
+      <a href="/ui/sessions">sessions</a>
+      <a href="/ui/reports">reports</a>
+    </nav>
     <h1><%= chrome.heading %></h1>
     <% if let Some(subtitle_html) = &chrome.subtitle_html { %>
       <p class="muted"><%- subtitle_html %></p>
     <% } %>
   </div>
-  <% if !chrome.nav_links.is_empty() { %>
-    <nav class="nav">
-      <% for link in &chrome.nav_links { %>
-        <a href="<%= link.href %>"><%= link.label %></a>
-      <% } %>
-    </nav>
-  <% } %>
 </header>

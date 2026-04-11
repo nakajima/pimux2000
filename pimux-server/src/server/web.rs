@@ -1,6 +1,10 @@
 use std::{
-    env, fs,
+    collections::HashMap,
+    env,
+    fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex as StdMutex},
 };
 
 use axum::{
@@ -12,7 +16,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(not(debug_assertions))]
 use bytes::Bytes;
 use chrono::{DateTime, Days, NaiveDate, Utc};
-use pulldown_cmark::{Options, Parser};
+use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, html};
 use sailfish::{TemplateSimple, runtime::escape::escape_to_string};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,17 +43,10 @@ const RESET_CSS_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/reset.css.
 const PIMUX_CSS_GZ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pimux.css.gz"));
 
 #[derive(Debug, Clone)]
-struct NavLinkView {
-    href: String,
-    label: String,
-}
-
-#[derive(Debug, Clone)]
 struct PageChromeView {
     page_title: String,
     heading: String,
     subtitle_html: Option<String>,
-    nav_links: Vec<NavLinkView>,
     auto_refresh_seconds: Option<u32>,
 }
 
@@ -197,6 +194,7 @@ struct ReportGenerationView {
     title: String,
     message: String,
     status_class: &'static str,
+    log_text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -205,14 +203,16 @@ struct ReportWarningView {
     message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(super) enum ReportGenerationStatus {
     Running {
         started_at: DateTime<Utc>,
+        logs: Arc<StdMutex<Vec<String>>>,
     },
     Failed {
         failed_at: DateTime<Utc>,
         message: String,
+        logs: Vec<String>,
     },
 }
 
@@ -333,17 +333,6 @@ pub(super) async fn dashboard(State(state): State<AppState>) -> Response {
                 "pimux status".to_string(),
                 "Server status".to_string(),
                 Some(format!("Version {}", code_html(env!("CARGO_PKG_VERSION")))),
-                {
-                    let mut nav_links = vec![
-                        nav_link("/hosts", "/hosts"),
-                        nav_link("/sessions", "/sessions"),
-                    ];
-                    if postgres_enabled {
-                        nav_links.push(nav_link("/ui/sessions", "archive"));
-                        nav_links.push(nav_link("/ui/reports", "reports"));
-                    }
-                    nav_links
-                },
                 None,
             ),
             postgres_enabled,
@@ -405,12 +394,6 @@ pub(super) async fn archive_sessions(Query(query): Query<ArchiveSessionsQuery>) 
                     "Showing up to {} archived sessions from Postgres.",
                     code_html(&total_sessions.to_string())
                 )),
-                vec![
-                    nav_link("/", "status"),
-                    nav_link("/hosts", "/hosts"),
-                    nav_link("/sessions", "/sessions"),
-                    nav_link("/ui/reports", "reports"),
-                ],
                 None,
             ),
             sessions: views,
@@ -493,12 +476,6 @@ pub(super) async fn reports(
                     code_html(&days.len().to_string()),
                     code_html(&reports_dir.display().to_string())
                 )),
-                vec![
-                    nav_link("/", "status"),
-                    nav_link("/hosts", "/hosts"),
-                    nav_link("/sessions", "/sessions"),
-                    nav_link("/ui/sessions", "archive"),
-                ],
                 None,
             ),
             days,
@@ -548,7 +525,13 @@ pub(super) async fn report(
 
     let (report_html, metadata) = if has_saved_report {
         match load_saved_report(&report_path) {
-            Ok((markdown, metadata)) => (Some(markdown_to_html(&markdown)), metadata),
+            Ok((markdown, metadata)) => (
+                Some(markdown_to_html_with_scope(
+                    &markdown,
+                    &format!("report-{report_date}"),
+                )),
+                metadata,
+            ),
             Err(error) => {
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -576,16 +559,7 @@ pub(super) async fn report(
             chrome: page_chrome(
                 format!("{} · pimux report", report_date),
                 format!("Daily report for {}", report_date),
-                Some(format!(
-                    "Timezone {} · {}",
-                    code_html(&timezone),
-                    escape_html(&source_label)
-                )),
-                vec![
-                    nav_link("/", "status"),
-                    nav_link("/ui/sessions", "archive"),
-                    nav_link("/ui/reports", "reports"),
-                ],
+                None,
                 auto_refresh_seconds,
             ),
             date: report_date.to_string(),
@@ -776,6 +750,7 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
 
             let rendered_body = render_message_body(
                 &message.record.role,
+                &message.record.message_key,
                 message.normalized.as_ref(),
                 &message.record.message_json,
                 &message.record.body,
@@ -889,11 +864,6 @@ pub(super) async fn archive_session(Query(query): Query<ArchiveSessionQuery>) ->
                     code_html(&session.host_location),
                     code_html(&session.session_id)
                 )),
-                vec![
-                    nav_link("/", "status"),
-                    nav_link("/ui/sessions", "archive sessions"),
-                    nav_link("/ui/reports", "reports"),
-                ],
                 None,
             ),
             host_auth: session.host_auth,
@@ -997,6 +967,7 @@ fn display_optional_text(value: Option<&str>, fallback: &str) -> String {
 
 fn render_message_body(
     role: &str,
+    markdown_scope: &str,
     normalized_message: Option<&Message>,
     message_json: &Value,
     body: &str,
@@ -1011,7 +982,7 @@ fn render_message_body(
 
     if renders_markdown(role) {
         RenderedMessageBody {
-            html: markdown_to_html(&body_text),
+            html: markdown_to_html_with_scope(&body_text, markdown_scope),
             format_class: "message-body-markdown",
         }
     } else {
@@ -1060,16 +1031,198 @@ fn renders_markdown(role: &str) -> bool {
     !matches!(role, "toolResult" | "bashExecution")
 }
 
-fn markdown_to_html(markdown: &str) -> String {
+fn markdown_to_html_with_scope(markdown: &str, scope: &str) -> String {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_FOOTNOTES);
 
-    let parser = Parser::new_ext(markdown, options);
+    let scope = sanitize_html_id_fragment(scope);
+    let mut footnotes = Vec::new();
+    let mut in_footnote = Vec::new();
+    let mut footnote_numbers: HashMap<CowStr<'_>, (usize, usize)> = HashMap::new();
+
+    let parser = Parser::new_ext(markdown, options).filter_map(|event| match event {
+        Event::Start(Tag::FootnoteDefinition(_)) => {
+            in_footnote.push(vec![event]);
+            None
+        }
+        Event::End(TagEnd::FootnoteDefinition) => {
+            let Some(mut footnote) = in_footnote.pop() else {
+                return None;
+            };
+            footnote.push(event);
+            footnotes.push(footnote);
+            None
+        }
+        Event::FootnoteReference(name) => {
+            let next_number = footnote_numbers.len() + 1;
+            let (footnote_number, usage_count) = footnote_numbers
+                .entry(name.clone())
+                .or_insert((next_number, 0usize));
+            *usage_count += 1;
+            let html = Event::Html(
+                format!(
+                    r##"<sup><a id="{}" href="#{}">{}</a></sup>"##,
+                    footnote_reference_id(&scope, *footnote_number, *usage_count),
+                    footnote_definition_id(&scope, *footnote_number),
+                    footnote_number,
+                )
+                .into(),
+            );
+            if in_footnote.is_empty() {
+                Some(html)
+            } else {
+                in_footnote.last_mut().unwrap().push(html);
+                None
+            }
+        }
+        _ if !in_footnote.is_empty() => {
+            in_footnote.last_mut().unwrap().push(event);
+            None
+        }
+        _ => Some(event),
+    });
+
     let mut rendered = String::new();
-    pulldown_cmark::html::push_html(&mut rendered, parser);
-    ammonia::clean(&rendered)
+    html::push_html(&mut rendered, parser);
+    append_markdown_footnotes(&mut rendered, footnotes, &footnote_numbers, &scope);
+    sanitize_markdown_html(&rendered)
+}
+
+fn append_markdown_footnotes<'a>(
+    rendered: &mut String,
+    mut footnotes: Vec<Vec<Event<'a>>>,
+    footnote_numbers: &HashMap<CowStr<'a>, (usize, usize)>,
+    scope: &str,
+) {
+    footnotes.retain(|footnote| match footnote.first() {
+        Some(Event::Start(Tag::FootnoteDefinition(name))) => footnote_numbers
+            .get(name)
+            .map(|(_, usage_count)| *usage_count > 0)
+            .unwrap_or(false),
+        _ => false,
+    });
+    if footnotes.is_empty() {
+        return;
+    }
+
+    footnotes.sort_by_key(|footnote| match footnote.first() {
+        Some(Event::Start(Tag::FootnoteDefinition(name))) => footnote_numbers
+            .get(name)
+            .map(|(footnote_number, _)| *footnote_number)
+            .unwrap_or(usize::MAX),
+        _ => usize::MAX,
+    });
+
+    rendered.push_str("<hr>\n<ol id=\"");
+    rendered.push_str(&footnotes_list_id(scope));
+    rendered.push_str("\">\n");
+    html::push_html(
+        rendered,
+        footnotes.into_iter().flat_map(|footnote| {
+            let mut current_name = CowStr::from("");
+            let mut has_written_backrefs = false;
+            let footnote_len = footnote.len();
+            footnote
+                .into_iter()
+                .enumerate()
+                .map(move |(index, event)| match event {
+                    Event::Start(Tag::FootnoteDefinition(name)) => {
+                        current_name = name;
+                        has_written_backrefs = false;
+                        let footnote_number = footnote_numbers
+                            .get(&current_name)
+                            .map(|(footnote_number, _)| *footnote_number)
+                            .unwrap_or(0);
+                        Event::Html(
+                            format!(
+                                r#"<li id="{}">"#,
+                                footnote_definition_id(scope, footnote_number)
+                            )
+                            .into(),
+                        )
+                    }
+                    Event::End(TagEnd::FootnoteDefinition) | Event::End(TagEnd::Paragraph)
+                        if !has_written_backrefs && index >= footnote_len.saturating_sub(2) =>
+                    {
+                        let (footnote_number, usage_count) = footnote_numbers
+                            .get(&current_name)
+                            .copied()
+                            .unwrap_or((0, 0));
+                        let mut suffix = String::new();
+                        for usage in 1..=usage_count {
+                            write!(
+                                &mut suffix,
+                                r##" <a href="#{}">↩</a>"##,
+                                footnote_reference_id(scope, footnote_number, usage),
+                            )
+                            .unwrap();
+                        }
+                        has_written_backrefs = true;
+                        if matches!(event, Event::End(TagEnd::FootnoteDefinition)) {
+                            suffix.push_str("</li>\n");
+                        } else {
+                            suffix.push_str("</p>\n");
+                        }
+                        Event::Html(suffix.into())
+                    }
+                    Event::End(TagEnd::FootnoteDefinition) => Event::Html("</li>\n".into()),
+                    Event::FootnoteReference(_) => unreachable!("converted to HTML earlier"),
+                    other => other,
+                })
+        }),
+    );
+    rendered.push_str("</ol>\n");
+}
+
+fn sanitize_markdown_html(rendered: &str) -> String {
+    let mut builder = ammonia::Builder::default();
+    builder.add_tag_attributes("a", &["id"]);
+    builder.add_tag_attributes("ol", &["id"]);
+    builder.add_tag_attributes("li", &["id"]);
+    builder.clean(rendered).to_string()
+}
+
+fn footnotes_list_id(scope: &str) -> String {
+    format!("footnotes-{scope}")
+}
+
+fn footnote_definition_id(scope: &str, footnote_number: usize) -> String {
+    format!("fn-{scope}-{footnote_number}")
+}
+
+fn footnote_reference_id(scope: &str, footnote_number: usize, usage: usize) -> String {
+    format!("fnref-{scope}-{footnote_number}-{usage}")
+}
+
+fn sanitize_html_id_fragment(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    let mut just_pushed_dash = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            sanitized.push(character.to_ascii_lowercase());
+            just_pushed_dash = false;
+        } else if !just_pushed_dash {
+            sanitized.push('-');
+            just_pushed_dash = true;
+        }
+    }
+
+    let sanitized = sanitized.trim_matches('-');
+    if sanitized.is_empty() {
+        return "md".to_string();
+    }
+    if sanitized
+        .chars()
+        .next()
+        .map(|character| character.is_ascii_digit())
+        .unwrap_or(false)
+    {
+        format!("md-{sanitized}")
+    } else {
+        sanitized.to_string()
+    }
 }
 
 fn escape_html(text: &str) -> String {
@@ -1168,25 +1321,16 @@ fn archive_session_url(host_location: &str, session_id: &str, message_key: Optio
     url
 }
 
-fn nav_link(href: &str, label: &str) -> NavLinkView {
-    NavLinkView {
-        href: href.to_string(),
-        label: label.to_string(),
-    }
-}
-
 fn page_chrome(
     page_title: String,
     heading: String,
     subtitle_html: Option<String>,
-    nav_links: Vec<NavLinkView>,
     auto_refresh_seconds: Option<u32>,
 ) -> PageChromeView {
     PageChromeView {
         page_title,
         heading,
         subtitle_html,
-        nav_links,
         auto_refresh_seconds,
     }
 }
@@ -1236,6 +1380,7 @@ async fn start_report_generation(
 ) -> Result<(), String> {
     let reports_dir = resolve_reports_dir()?;
     let key = report_generation_key(report_date);
+    let logs = Arc::new(StdMutex::new(Vec::new()));
 
     {
         let mut generations = state.report_generations.lock().await;
@@ -1247,6 +1392,7 @@ async fn start_report_generation(
                     key.clone(),
                     ReportGenerationStatus::Running {
                         started_at: Utc::now(),
+                        logs: Arc::clone(&logs),
                     },
                 );
             }
@@ -1254,7 +1400,15 @@ async fn start_report_generation(
     }
 
     tokio::spawn(async move {
-        let result = generate_and_save_report(report_date, &reports_dir).await;
+        let result = generate_and_save_report(report_date, &reports_dir, {
+            let logs = Arc::clone(&logs);
+            move |line| {
+                eprintln!("{line}");
+                let mut captured = logs.lock().unwrap();
+                captured.push(line);
+            }
+        })
+        .await;
         let mut generations = state.report_generations.lock().await;
         match result {
             Ok(()) => {
@@ -1262,11 +1416,13 @@ async fn start_report_generation(
             }
             Err(error) => {
                 warn!(date = %report_date, %error, "report generation failed");
+                let captured_logs = logs.lock().unwrap().clone();
                 generations.insert(
                     key,
                     ReportGenerationStatus::Failed {
                         failed_at: Utc::now(),
                         message: error,
+                        logs: captured_logs,
                     },
                 );
             }
@@ -1339,19 +1495,26 @@ fn load_saved_report(report_path: &Path) -> Result<(String, Option<SavedReportMe
     Ok((markdown, metadata))
 }
 
-async fn generate_and_save_report(
+async fn generate_and_save_report<F>(
     report_date: NaiveDate,
     reports_dir: &Path,
-) -> Result<(), String> {
+    logger: F,
+) -> Result<(), String>
+where
+    F: FnMut(String),
+{
     let report_path = daily_report_path(reports_dir, report_date);
     let metadata_path = report_metadata_path(&report_path);
-    let generated = report::generate_day_report(DayConfig {
-        date: Some(report_date.to_string()),
-        timezone: Some(report::DEFAULT_REPORT_TIMEZONE.to_string()),
-        pi_agent_dir: None,
-        summary_model: None,
-        ui_base_url: Some("/".to_string()),
-    })
+    let generated = report::generate_day_report_with_logger(
+        DayConfig {
+            date: Some(report_date.to_string()),
+            timezone: Some(report::DEFAULT_REPORT_TIMEZONE.to_string()),
+            pi_agent_dir: None,
+            summary_model: None,
+            ui_base_url: Some("/".to_string()),
+        },
+        logger,
+    )
     .await
     .map_err(|error| error.to_string())?;
 
@@ -1410,30 +1573,48 @@ fn report_generation_view(
     has_saved_report: bool,
 ) -> Option<ReportGenerationView> {
     match generation_status {
-        Some(ReportGenerationStatus::Running { .. }) => Some(ReportGenerationView {
+        Some(ReportGenerationStatus::Running { started_at, logs }) => Some(ReportGenerationView {
             title: "Generating report in background".to_string(),
             message: if has_saved_report {
-                "Showing the last saved report while pimux regenerates a fresh version. This page will refresh automatically when it finishes.".to_string()
+                format!(
+                    "Showing the last saved report while pimux regenerates a fresh version. Started at {}. This page will refresh automatically when it finishes.",
+                    format_timestamp(*started_at)
+                )
             } else {
-                "No saved report exists yet. Pimux is generating it now in the background, and this page will refresh automatically when it finishes.".to_string()
+                format!(
+                    "No saved report exists yet. Pimux is generating it now in the background. Started at {}. This page will refresh automatically when it finishes.",
+                    format_timestamp(*started_at)
+                )
             },
             status_class: "info-callout",
+            log_text: generation_log_text(&logs.lock().unwrap()),
         }),
-        Some(ReportGenerationStatus::Failed { message, .. }) => Some(ReportGenerationView {
+        Some(ReportGenerationStatus::Failed {
+            failed_at,
+            message,
+            logs,
+        }) => Some(ReportGenerationView {
             title: "Report generation failed".to_string(),
             message: if has_saved_report {
                 format!(
-                    "Pimux could not finish regenerating this report: {message}. Showing the last saved report instead."
+                    "Pimux could not finish regenerating this report at {}: {message}. Showing the last saved report instead.",
+                    format_timestamp(*failed_at)
                 )
             } else {
                 format!(
-                    "Pimux could not generate this report: {message}. Use regenerate to try again."
+                    "Pimux could not generate this report at {}: {message}. Use regenerate to try again.",
+                    format_timestamp(*failed_at)
                 )
             },
             status_class: "error-callout",
+            log_text: generation_log_text(logs),
         }),
         None => None,
     }
+}
+
+fn generation_log_text(lines: &[String]) -> Option<String> {
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn report_list_status(
@@ -1790,7 +1971,6 @@ fn error_response(
                 format!("{headline} · pimux"),
                 headline.to_string(),
                 None,
-                vec![nav_link("/", "status")],
                 None,
             ),
             message: message.to_string(),
@@ -1803,14 +1983,17 @@ fn error_response(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex as StdMutex};
+
     use chrono::{NaiveDate, TimeZone, Utc};
     use serde_json::{Value, json};
 
     use super::{
         ReportGenerationStatus, SavedReportMetadata, archive_session_url,
-        display_message_body_text, format_timestamp, markdown_to_html, message_anchor_id,
-        percent_encode_component, recent_report_dates, render_message_body, report_generation_view,
-        report_list_status, report_warning, short_tool_call_id, transcript_freshness_label,
+        display_message_body_text, format_timestamp, markdown_to_html_with_scope,
+        message_anchor_id, percent_encode_component, recent_report_dates, render_message_body,
+        report_generation_view, report_list_status, report_warning, short_tool_call_id,
+        transcript_freshness_label,
     };
 
     #[test]
@@ -1889,6 +2072,7 @@ mod tests {
     fn renders_markdown_for_assistant_messages() {
         let rendered = render_message_body(
             "assistant",
+            "message-1",
             None,
             &Value::Null,
             "# Hello\n\n- one\n- two\n\n<script>alert('xss')</script>",
@@ -1902,8 +2086,13 @@ mod tests {
 
     #[test]
     fn keeps_bash_output_as_plain_escaped_text() {
-        let rendered =
-            render_message_body("bashExecution", None, &Value::Null, "echo <ok>\nline 2");
+        let rendered = render_message_body(
+            "bashExecution",
+            "message-2",
+            None,
+            &Value::Null,
+            "echo <ok>\nline 2",
+        );
 
         assert_eq!(rendered.format_class, "message-body-plain");
         assert_eq!(rendered.html, "echo &lt;ok&gt;\nline 2");
@@ -1932,11 +2121,22 @@ mod tests {
 
     #[test]
     fn markdown_renderer_supports_footnotes() {
-        let html = markdown_to_html("hello[^1]\n\n[^1]: footnote text");
+        let html = markdown_to_html_with_scope(
+            "hello[^1] again[^1]\n\n[^1]: footnote text",
+            "report:2026-04-10",
+        );
 
-        assert!(html.contains("<sup"));
+        assert!(html.contains("id=\"fnref-report-2026-04-10-1-1\""));
+        assert!(html.contains("id=\"fnref-report-2026-04-10-1-2\""));
+        assert!(html.contains("href=\"#fn-report-2026-04-10-1\""));
+        assert!(html.contains("id=\"fn-report-2026-04-10-1\""));
+        assert!(html.contains("href=\"#fnref-report-2026-04-10-1-1\""));
+        assert!(html.contains("href=\"#fnref-report-2026-04-10-1-2\""));
+        assert!(html.matches(">↩</a>").count() >= 2);
         assert!(html.contains("footnote text"));
         assert!(!html.contains("[^1]"));
+        assert!(!html.contains("footnote-reference"));
+        assert!(!html.contains("footnote-definition"));
     }
 
     #[test]
@@ -1977,6 +2177,7 @@ mod tests {
             false,
             Some(&ReportGenerationStatus::Running {
                 started_at: Utc::now(),
+                logs: Arc::new(StdMutex::new(Vec::new())),
             }),
         );
 
@@ -1989,6 +2190,10 @@ mod tests {
         let view = report_generation_view(
             Some(&ReportGenerationStatus::Running {
                 started_at: Utc::now(),
+                logs: Arc::new(StdMutex::new(vec![
+                    "loading archived activity".to_string(),
+                    "[1/6] summarizing ~/apps/mi".to_string(),
+                ])),
             }),
             false,
         )
@@ -1997,5 +2202,6 @@ mod tests {
         assert!(view.title.contains("Generating report"));
         assert!(view.message.contains("refresh automatically"));
         assert_eq!(view.status_class, "info-callout");
+        assert!(view.log_text.unwrap().contains("summarizing ~/apps/mi"));
     }
 }

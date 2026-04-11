@@ -188,6 +188,16 @@ pub async fn day(config: DayConfig) -> Result<(), BoxError> {
 }
 
 pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDayReport, BoxError> {
+    generate_day_report_with_logger(config, |line| eprintln!("{line}")).await
+}
+
+pub(crate) async fn generate_day_report_with_logger<F>(
+    config: DayConfig,
+    mut logger: F,
+) -> Result<GeneratedDayReport, BoxError>
+where
+    F: FnMut(String),
+{
     let Some(postgres_url) = postgres_url_from_env() else {
         return Err(format!("{POSTGRES_BACKUP_URL_ENV} is not set").into());
     };
@@ -202,13 +212,14 @@ pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDa
     let report_date = resolve_report_date(&client, config.date.as_deref(), &timezone).await?;
     let (start, end) = utc_range_for_report_date(&client, report_date, &timezone).await?;
 
-    eprintln!(
+    logger(format!(
         "loading archived activity for {} in {} from {}...",
         report_date, timezone, POSTGRES_BACKUP_URL_ENV
-    );
+    ));
     let messages = load_archived_messages(&client, start, end).await?;
 
     if messages.is_empty() {
+        logger("no archived project activity found for that day".to_string());
         return Ok(GeneratedDayReport {
             report_date,
             timezone,
@@ -228,21 +239,21 @@ pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDa
             .then_with(|| left.project_key.cmp(&right.project_key))
     });
 
-    eprintln!(
+    logger(format!(
         "generating report for {} project(s) using {}...",
         projects.len(),
         summary_model
-    );
+    ));
 
     let mut rendered_projects = Vec::with_capacity(projects.len());
     let mut heuristic_project_keys = Vec::new();
     for (index, project) in projects.iter().enumerate() {
-        eprintln!(
+        logger(format!(
             "[{}/{}] summarizing {}",
             index + 1,
             projects.len(),
             project.project_key
-        );
+        ));
 
         let excerpts = build_candidate_excerpts(project);
         let misses = build_miss_candidates(project);
@@ -259,10 +270,10 @@ pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDa
         {
             Ok(rendered) => rendered,
             Err(error) => {
-                eprintln!(
+                logger(format!(
                     "report summary failed for project {}: {error}",
                     project.project_key
-                );
+                ));
                 heuristic_project_keys.push(project.project_key.clone());
                 heuristic_project_report(project, &excerpts, &misses, &ui_base_url)
             }
@@ -270,6 +281,7 @@ pub(crate) async fn generate_day_report(config: DayConfig) -> Result<GeneratedDa
         rendered_projects.push(rendered);
     }
 
+    logger("finished generating daily report".to_string());
     Ok(GeneratedDayReport {
         report_date,
         timezone,

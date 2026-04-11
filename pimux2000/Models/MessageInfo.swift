@@ -39,9 +39,12 @@ struct MessageInfo: Identifiable {
 }
 
 struct MessagesRequest: ValueObservationQueryable {
+	static let queryableOptions = QueryableOptions.async
 	static var defaultValue: [MessageInfo] { [] }
 
-	let sessionID: String
+	var sessionID: String
+	var latestMessageCount: Int? = nil
+	var oldestIncludedPosition: Int? = nil
 
 	func fetch(_ db: Database) throws -> [MessageInfo] {
 		guard let currentSession = try PiSession
@@ -49,10 +52,28 @@ struct MessagesRequest: ValueObservationQueryable {
 			.fetchOne(db),
 			let piSessionID = currentSession.id else { return [] }
 
-		let messages = try Message
+		let baseRequest = Message
 			.filter(Column("piSessionID") == piSessionID)
-			.order(Column("position").asc)
-			.fetchAll(db)
+
+		let messages: [Message]
+		if let oldestIncludedPosition {
+			messages = try baseRequest
+				.filter(Column("position") >= oldestIncludedPosition)
+				.order(Column("position").asc)
+				.fetchAll(db)
+		} else if let latestMessageCount {
+			messages = try Array(
+				baseRequest
+					.order(Column("position").desc)
+					.limit(latestMessageCount)
+					.fetchAll(db)
+					.reversed()
+			)
+		} else {
+			messages = try baseRequest
+				.order(Column("position").asc)
+				.fetchAll(db)
+		}
 
 		let messageIDs = messages.compactMap(\.id)
 		guard !messageIDs.isEmpty else { return [] }
@@ -69,5 +90,40 @@ struct MessagesRequest: ValueObservationQueryable {
 				contentBlocks: blocksByMessage[message.id ?? -1] ?? []
 			)
 		}
+	}
+}
+
+struct SessionMessageStats: Equatable {
+	let totalCount: Int
+	let confirmedUserMessageCount: Int
+}
+
+struct SessionMessageStatsRequest: ValueObservationQueryable {
+	static var defaultValue: SessionMessageStats {
+		SessionMessageStats(totalCount: 0, confirmedUserMessageCount: 0)
+	}
+
+	let sessionID: String
+
+	func fetch(_ db: Database) throws -> SessionMessageStats {
+		guard let currentSession = try PiSession
+			.filter(Column("sessionID") == sessionID)
+			.fetchOne(db),
+			let piSessionID = currentSession.id else {
+			return SessionMessageStats(totalCount: 0, confirmedUserMessageCount: 0)
+		}
+
+		let totalCount = try Message
+			.filter(Column("piSessionID") == piSessionID)
+			.fetchCount(db)
+		let confirmedUserMessageCount = try Message
+			.filter(Column("piSessionID") == piSessionID)
+			.filter(Column("role") == Message.Role.user)
+			.fetchCount(db)
+
+		return SessionMessageStats(
+			totalCount: totalCount,
+			confirmedUserMessageCount: confirmedUserMessageCount
+		)
 	}
 }
