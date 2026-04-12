@@ -1370,12 +1370,7 @@ fn create_watcher(
     let mut watcher =
         notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
             Ok(event) => {
-                if event.paths.is_empty()
-                    || event
-                        .paths
-                        .iter()
-                        .any(|path| path.starts_with(&session_root))
-                {
+                if should_refresh_for_event(&event, &session_root) {
                     let _ = tx.send(());
                 }
             }
@@ -1384,6 +1379,22 @@ fn create_watcher(
 
     watcher.watch(&watched_path, RecursiveMode::Recursive)?;
     Ok(watcher)
+}
+
+fn should_refresh_for_event(event: &notify::Event, session_root: &Path) -> bool {
+    if event.need_rescan() {
+        return true;
+    }
+
+    if matches!(event.kind, notify::EventKind::Access(_)) {
+        return false;
+    }
+
+    event.paths.is_empty()
+        || event
+            .paths
+            .iter()
+            .any(|path| path.starts_with(session_root))
 }
 
 fn watch_path_for_session_root(session_root: &Path) -> Result<PathBuf, BoxError> {
@@ -1469,6 +1480,37 @@ mod tests {
         assert!(!session_root.exists());
 
         let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn watcher_ignores_access_events_under_session_root() {
+        let session_root = PathBuf::from("/tmp/pimux-sessions");
+        let event = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Read))
+            .add_path(session_root.join("session.jsonl"));
+
+        assert!(!should_refresh_for_event(&event, &session_root));
+    }
+
+    #[test]
+    fn watcher_refreshes_modify_events_under_session_root() {
+        let session_root = PathBuf::from("/tmp/pimux-sessions");
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(session_root.join("session.jsonl"));
+
+        assert!(should_refresh_for_event(&event, &session_root));
+    }
+
+    #[test]
+    fn watcher_ignores_events_outside_session_root() {
+        let session_root = PathBuf::from("/tmp/pimux-sessions");
+        let event = notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(PathBuf::from("/tmp/elsewhere/session.jsonl"));
+
+        assert!(!should_refresh_for_event(&event, &session_root));
     }
 
     #[test]
