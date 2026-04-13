@@ -69,7 +69,9 @@ const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SEND_MESSAGE_IMAGES: usize = 8;
 const MAX_SEND_MESSAGE_IMAGE_BASE64_CHARS: usize = 8 * 1024 * 1024;
 const MAX_SEND_MESSAGE_TOTAL_IMAGE_BASE64_CHARS: usize = 12 * 1024 * 1024;
-const MAX_AGENT_WEBSOCKET_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+// Live transcript snapshots and transcript fetch results can legitimately exceed 16 MiB
+// for long-running sessions, especially on hosts with many active sessions.
+const MAX_AGENT_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const SYSTEMD_UNIT_NAME: &str = "pimux-server.service";
 const LAUNCH_AGENT_LABEL: &str = "dev.pimux.server";
 const LAUNCH_AGENT_FILE_NAME: &str = "dev.pimux.server.plist";
