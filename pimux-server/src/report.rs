@@ -840,9 +840,11 @@ fn build_miss_candidates(project: &ProjectDayData) -> Vec<MissCandidate> {
 
 fn looks_like_user_correction(text: &str) -> bool {
     let lower = text.trim().to_ascii_lowercase();
+    if lower == "no" || lower.starts_with("no ") || lower.starts_with("no,") {
+        return true;
+    }
+
     let strong_prefixes = [
-        "no ",
-        "no,",
         "sorry but ",
         "i meant ",
         "i mean ",
@@ -867,6 +869,7 @@ fn looks_like_user_correction(text: &str) -> bool {
     }
 
     let strong_contains = [
+        "idiot",
         "not talking about",
         "should be",
         "instead of",
