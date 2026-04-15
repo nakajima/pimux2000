@@ -1,0 +1,260 @@
+[
+  {
+    "content": "can we get a readme going?",
+    "role": "user",
+    "timestamp": 1776181537994
+  },
+  {
+    "api": "openai-codex-responses",
+    "content": [
+      {
+        "text": "Task mode: plan. I’ll quickly inspect the repo to infer the right README scope, then I can draft one with minimal assumptions.",
+        "type": "text"
+      },
+      {
+        "arguments": {
+          "command": "find . -maxdepth 2 -type f | sort | sed 's#^./##' | head -200",
+          "timeout": 10
+        },
+        "id": "call_6cNm5sKObbCEhIRuz7OjWOrB|fc_0904efc50d3498b20169de612570b88199aaa4403acb5668dc",
+        "name": "bash",
+        "type": "toolCall"
+      },
+      {
+        "arguments": {
+          "limit": 200,
+          "offset": 1,
+          "path": "package.json"
+        },
+        "id": "call_jhupT4Tlq3Uiz4gtNCpF5p9n|fc_0904efc50d3498b20169de612570c48199bdfa784288a8953c",
+        "name": "read",
+        "type": "toolCall"
+      },
+      {
+        "arguments": {
+          "limit": 200,
+          "offset": 1,
+          "path": "README.md"
+        },
+        "id": "call_meLxzFQ3HnuG3oBXIvH0gsD3|fc_0904efc50d3498b20169de612570cc8199b615dadac353bf4c",
+        "name": "read",
+        "type": "toolCall"
+      }
+    ],
+    "model": "gpt-5.4",
+    "provider": "openai-codex",
+    "role": "assistant",
+    "stopReason": "toolUse",
+    "timestamp": 1776181538892,
+    "usage": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "cost": {
+        "cacheRead": 0.0,
+        "cacheWrite": 0.0,
+        "input": 0.0033825,
+        "output": 0.0021,
+        "total": 0.0054824999999999995
+      },
+      "input": 1353,
+      "output": 140,
+      "totalTokens": 1493
+    }
+  },
+  {
+    "content": [
+      {
+        "text": ".claude/settings.local.json\n.DS_Store\n.git/COMMIT_EDITMSG\n.git/COMMIT_EDITMSG~\n.git/config\n.git/description\n.git/HEAD\n.git/index\n.git/ORIG_HEAD\n.swiftformat\nbuildServer.json\ncompact-handoff.md\nConfig/pimux2000-Info.plist\ndocs/CURRENT_SESSION_STATUS.md\ndocs/IMPLEMENTATION_REVIEW.md\ndocs/README_DOCUMENTATION.md\ndocs/SESSION_COMPLETION_SUMMARY.md\npimux-server/.gitignore\npimux-server/build.rs\npimux-server/Cargo.lock\npimux-server/Cargo.toml\npimux-server/README.md\npimux-server/releasor2000.toml\npimux-server/todo.txt\npimux2000.xcodeproj/project.pbxproj\npimux2000/pimux2000.entitlements\npimux2000/pimux2000App.swift\npimux2000/PreviewAttachmentFixture.swift\npimux2000Tests/AppDatabaseTests.swift\npimux2000Tests/ImageAttachmentIDTests.swift\npimux2000Tests/MessageMarkdownRendererTests.swift\npimux2000Tests/MessagesRequestTests.swift\npimux2000Tests/OptimisticMessageTests.swift\npimux2000Tests/PiSessionReadStatusTests.swift\npimux2000Tests/PiSessionsRequestTests.swift\npimux2000Tests/PiSessionSyncTests.swift\npimux2000Tests/SessionTranscriptUpdatePlannerTests.swift\npimux2000Tests/SidebarSessionGroupingTests.swift\npimux2000UITests/pimux2000UITests.swift\npimux2000UITests/pimux2000UITestsLaunchTests.swift\npimux2000UITests/ScreenshotTests.swift\nscripts/generate-screenshots.sh\nscripts/list-active-pi-sessions.py\ntodo.txt\n",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "role": "toolResult",
+    "timestamp": 1776181541470,
+    "toolCallId": "call_6cNm5sKObbCEhIRuz7OjWOrB|fc_0904efc50d3498b20169de612570b88199aaa4403acb5668dc",
+    "toolName": "bash"
+  },
+  {
+    "content": [
+      {
+        "text": "failed to read package.json: No such file or directory (os error 2)",
+        "type": "text"
+      }
+    ],
+    "isError": true,
+    "role": "toolResult",
+    "timestamp": 1776181541471,
+    "toolCallId": "call_jhupT4Tlq3Uiz4gtNCpF5p9n|fc_0904efc50d3498b20169de612570c48199bdfa784288a8953c",
+    "toolName": "read"
+  },
+  {
+    "content": [
+      {
+        "text": "failed to read README.md: No such file or directory (os error 2)",
+        "type": "text"
+      }
+    ],
+    "isError": true,
+    "role": "toolResult",
+    "timestamp": 1776181541472,
+    "toolCallId": "call_meLxzFQ3HnuG3oBXIvH0gsD3|fc_0904efc50d3498b20169de612570cc8199b615dadac353bf4c",
+    "toolName": "read"
+  },
+  {
+    "api": "openai-codex-responses",
+    "content": [
+      {
+        "text": "No top-level README yet. I’ll inspect a few key files to infer stack, purpose, and runnable setup before drafting one.",
+        "type": "text"
+      },
+      {
+        "arguments": {
+          "limit": 220,
+          "offset": 1,
+          "path": "pimux-server/README.md"
+        },
+        "id": "call_5shSUOQ4PBPvYQ6isdT5LUpH|fc_0904efc50d3498b20169de612aae5c8199b48577b9f4546709",
+        "name": "read",
+        "type": "toolCall"
+      },
+      {
+        "arguments": {
+          "limit": 220,
+          "offset": 1,
+          "path": "pimux-server/Cargo.toml"
+        },
+        "id": "call_S3FPMpiEyXKlbwl43XcnMaXU|fc_0904efc50d3498b20169de612aae748199aee7da7649957c1f",
+        "name": "read",
+        "type": "toolCall"
+      },
+      {
+        "arguments": {
+          "limit": 220,
+          "offset": 1,
+          "path": "pimux2000/pimux2000App.swift"
+        },
+        "id": "call_YMNYfbk4VUtnMbAVbK2Tnic2|fc_0904efc50d3498b20169de612aae7c81998d159a48b66ef1cc",
+        "name": "read",
+        "type": "toolCall"
+      },
+      {
+        "arguments": {
+          "limit": 220,
+          "offset": 1,
+          "path": "docs/README_DOCUMENTATION.md"
+        },
+        "id": "call_SlMktXRHVi2yUqA7IFPFxm4P|fc_0904efc50d3498b20169de612aae848199992a77260cb5a187",
+        "name": "read",
+        "type": "toolCall"
+      }
+    ],
+    "model": "gpt-5.4",
+    "provider": "openai-codex",
+    "role": "assistant",
+    "stopReason": "toolUse",
+    "timestamp": 1776181542661,
+    "usage": {
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "cost": {
+        "cacheRead": 0.0,
+        "cacheWrite": 0.0,
+        "input": 0.004897499999999999,
+        "output": 0.00249,
+        "total": 0.007387499999999999
+      },
+      "input": 1959,
+      "output": 166,
+      "totalTokens": 2125
+    }
+  },
+  {
+    "content": [
+      {
+        "text": "# pimux\n\nA companion for the [`pi`](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent#readme) coding agent.\n\n`pimux` has two runtime pieces:\n- a single **server** that the app talks to over HTTP\n- one **agent** per host running `pi`\n\nFor the iOS app, the important part is the HTTP API documented below.\n\n## Quick start\n\nRun the server:\n\n```sh\npimux server\n```\n\nFor normal background use, install the server as a per-user service:\n\n```sh\npimux server install\n```\n\nTo remove it later:\n\n```sh\npimux server uninstall\n```\n\nTo inspect a running server and see which agents are connected:\n\n```sh\npimux server status\npimux server status https://pimux.example.com\n```\n\nFor ad-hoc foreground use on a host that has `pi` sessions:\n\n```sh\npimux agent run http://location-of-server\n```\n\nIf you omit the scheme, `http://` is assumed, so `pimux agent run localhost:3000` also works.\nOn startup, the agent:\n- checks whether the server is reachable and responds like a pimux server\n- if the server is unavailable at startup, stays running and keeps retrying the server websocket connection in the background\n- reconciles `~/.pi/agent/extensions/pimux-live.ts` with the bundled extension and updates it if needed\n- logs when it had to install/update the on-disk extension\n- auto-requests `/reload` for an attached live pi session if it detects that session is still using an older command-capable `pimux-live.ts` runtime that is missing newer live payload fields\n- warns if a running pi session is still sending **legacy body-only live payloads**, which usually means that pi session loaded an older extension before the update\n\nFor normal background use, install the agent as a per-user service:\n\n```sh\npimux agent install http://location-of-server\n```\n\nThat now also installs the bundled `pimux-live.ts` extension automatically.\n\nTo inspect the installed service:\n\n```sh\npimux agent status\npimux agent logs\n```\n\nTo restart installed managed services:\n\n```sh\npimux restart\npimux restart --server\npimux restart --agent\n```\n\nTo remove the service later:\n\n```sh\npimux agent uninstall\n```\n\nPlatform behavior:\n- on **macOS**, `pimux agent install` installs a per-user `launchctl` LaunchAgent\n- on **Linux**, `pimux agent install` installs a per-user `systemd --user` service\n\nIf you want to install or update only the live extension manually, you can still run:\n\n```sh\npimux install-extension\n```\n\nThat writes:\n\n```text\n~/.pi/agent/extensions/pimux-live.ts\n```\n\nYou can override the pi agent root with `PI_CODING_AGENT_DIR` or `--pi-agent-dir`.\n\nTo update the installed binary itself from the latest GitHub release:\n\n```sh\npimux update\npimux update --check\n```\n\nBehavior:\n- checks `nakajima/pimux2000` for the latest GitHub release\n- downloads the matching macOS/Linux release archive for the current CPU architecture\n- replaces the currently running executable in place\n- automatically restarts any installed `pimux server` / `pimux agent` per-user service it finds\n- reminds you to restart any additional foreground server or agent process manually\n\n## Client API for the iOS app\n\n### General notes\n\n- All timestamps are RFC 3339 / ISO 8601 strings in UTC.\n- Responses are JSON, except the live transcript stream which uses **chunked NDJSON**.\n- `GET /sessions/{id}/messages` returns a **full snapshot**, not a delta.\n- `GET /sessions/{id}/stream` is the client-facing live stream for an open session.\n- The server talks to host agents over a **single persistent outbound WebSocket connection** from each agent.\n- Transcript messages include both:\n  - `body` — display-oriented plain text for compatibility\n  - `blocks` — structured display blocks for the app, including thinking text and tool calls\n- Live-cached message bodies and blocks may be capped.\n- Field naming is mixed on purpose:\n  - session summary models use camelCase like `createdAt`\n  - transcript messages use `created_at`\n\n### Common error response\n\nNon-2xx responses use this shape:\n\n```json\n{\n  \"error\": \"human readable message\"\n}\n```\n\n### GET /health\n\nSimple liveness probe.\n\nResponse:\n\n```text\nOK\n```\n\n### GET /version\n\nResponse:\n\n```json\n{\n  \"version\": \"0.2.0\"\n}\n```\n\n### GET /hosts\n\nReturns the hosts the server currently knows about, grouped by host location.\n\nResponse shape:\n\n```json\n[\n  {\n    \"location\": \"nakajima@macbook\",\n    \"auth\": \"none\",\n    \"connected\": true,\n    \"missing\": false,\n    \"lastSeenAt\": \"2026-03-28T06:20:00.000Z\",\n    \"sessions\": [\n      {\n        \"id\": \"4047b693-44a1-4917-884b-f7d8f2d5882a\",\n        \"summary\": \"Build live transcript support for pimux\",\n        \"createdAt\": \"2026-03-27T19:58:53.288Z\",\n        \"updatedAt\": \"2026-03-27T20:10:02.000Z\",\n        \"lastUserMessageAt\": \"2026-03-27T20:10:00.000Z\",\n        \"lastAssistantMessageAt\": \"2026-03-27T20:10:02.000Z\",\n        \"cwd\": \"/Users/nakajima/apps/pimux2000/pimux-server\",\n        \"model\": \"anthropic/claude-sonnet-4-5\",\n        \"contextUsage\": {\n          \"usedTokens\": 48676,\n          \"maxTokens\": 200000\n        }\n      }\n    ]\n  }\n]\n```\n\nNotes:\n- Hosts are currently sorted by `location`.\n- Treat session ordering as non-contractual; sort explicitly in the app if you care.\n- Host locations are canonicalized so a trailing `.local` hostname suffix is stripped, for example `nakajima@macstudio.local` becomes `nakajima@macstudio`.\n- Hosts are now persisted as an expected-host registry, so a host can still appear here as `missing: true` even when it is currently offline.\n- When a host is missing, `sessions` is its last known snapshot from the most recent successful host report.\n\n#### `GET /hosts` model\n\nEach host object has:\n\n- `location: string`\n- `auth: \"none\" | \"pk\"`\n- `connected: boolean` — whether the server currently has a live WebSocket to that host agent\n- `missing: boolean` — convenience inverse of `connected` for UI purposes\n- `lastSeenAt: string | null` — last successful host contact persisted by the server\n- `sessions: Session[]` — last known session snapshot for that host\n\nEach session object has:\n\n- `id: string` — pi session id\n- `summary: string` — one-line summary/title\n- `createdAt: string`\n- `updatedAt: string` — current session file modified time, used for recent-session filtering\n- `lastUserMessageAt: string`\n- `lastAssistantMessageAt: string`\n\n[654 more lines in file. Use offset=221 to continue.]",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "role": "toolResult",
+    "timestamp": 1776181546696,
+    "toolCallId": "call_5shSUOQ4PBPvYQ6isdT5LUpH|fc_0904efc50d3498b20169de612aae5c8199b48577b9f4546709",
+    "toolName": "read"
+  },
+  {
+    "content": [
+      {
+        "text": "[package]\nname = \"pimux-server\"\nversion = \"0.2.56\"\nedition = \"2024\"\ndefault-run = \"pimux\"\n\n[[bin]]\nname = \"pimux\"\npath = \"src/main.rs\"\n\n[dependencies]\naxum = { version = \"0.8\", features = [\"ws\"] }\nammonia = \"4.1.2\"\nbase64 = \"0.22\"\nchrono = { version = \"0.4.44\", features = [\"serde\"] }\nclap = { version = \"4.5\", features = [\"derive\", \"env\"] }\nflate2 = \"1.1\"\nfutures-util = \"0.3\"\nhostname = \"0.4\"\nmdns-sd = \"0.18.2\"\nnotify = \"8\"\npulldown-cmark = \"0.13.3\"\nreqwest = { version = \"0.12\", default-features = false, features = [\n  \"json\",\n  \"rustls-tls\",\n] }\nsailfish = \"0.10\"\nserde = { version = \"1.0.228\", features = [\"serde_derive\"] }\nserde_json = \"1.0.149\"\ntar = \"0.4\"\nbytes = \"1.10\"\ntokio = { version = \"1\", features = [\n  \"io-util\",\n  \"macros\",\n  \"net\",\n  \"process\",\n  \"rt-multi-thread\",\n  \"signal\",\n  \"sync\",\n  \"time\",\n] }\ntokio-tungstenite = { version = \"0.24\", features = [\"rustls-tls-webpki-roots\"] }\ntokio-stream = \"0.1\"\ntokio-postgres = { version = \"0.7\", features = [\"with-chrono-0_4\", \"with-serde_json-1\"] }\ntower-http = { version = \"0.6\", features = [\"fs\", \"trace\"] }\ntracing = \"0.1\"\ntracing-subscriber = { version = \"0.3\", features = [\"env-filter\"] }\nwalkdir = \"2.5\"\n\n[dev-dependencies]\ntower = \"0.5\"\n\n[build-dependencies]\nflate2 = \"1.1\"\n",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "role": "toolResult",
+    "timestamp": 1776181546699,
+    "toolCallId": "call_S3FPMpiEyXKlbwl43XcnMaXU|fc_0904efc50d3498b20169de612aae748199aee7da7649957c1f",
+    "toolName": "read"
+  },
+  {
+    "content": [
+      {
+        "text": "import Foundation\nimport GRDB\nimport GRDBQuery\nimport SwiftUI\n#if canImport(UIKit)\n\timport UIKit\n#endif\n\n@main\nstruct pimux2000App: App {\n\t#if canImport(UIKit)\n\t\t@UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate\n\t#endif\n\tlet appDatabase: AppDatabase\n\n\tinit() {\n\t\tPimuxImageLoading.configureSharedPipeline()\n\t\tlet processInfo = ProcessInfo.processInfo\n\t\tlet screenshotScenario = ScreenshotScenario.current(from: processInfo)\n\n\t\tif Self.isRunningForPreviews {\n\t\t\tself.appDatabase = AppDatabase.preview()\n\t\t\treturn\n\t\t}\n\n\t\tlet databaseURL = Self.databaseURL\n\n\t\tif processInfo.arguments.contains(\"--uitesting-reset-db\") {\n\t\t\ttry? FileManager.default.removeItem(at: databaseURL)\n\t\t\ttry? AttachmentStore.removeAll()\n\t\t}\n\n\t\ttry! FileManager.default.createDirectory(\n\t\t\tat: databaseURL.deletingLastPathComponent(),\n\t\t\twithIntermediateDirectories: true\n\t\t)\n\n\t\tself.appDatabase = try! AppDatabase(\n\t\t\tdbQueue: DatabaseQueue(path: databaseURL.path())\n\t\t)\n\n\t\tif let screenshotScenario {\n\t\t\ttry! UITestFixtures.installScreenshotScenario(screenshotScenario, in: appDatabase)\n\t\t} else if processInfo.arguments.contains(\"--uitesting-use-fixtures\") {\n\t\t\ttry! UITestFixtures.install(in: appDatabase)\n\t\t}\n\t}\n\n\tvar body: some Scene {\n\t\tWindowGroup {\n\t\t\tAppRootView(appDatabase: appDatabase)\n\t\t}\n\t}\n\n\tprivate static var isRunningForPreviews: Bool {\n\t\tProcessInfo.processInfo.environment[\"XCODE_RUNNING_FOR_PREVIEWS\"] == \"1\"\n\t}\n\n\tprivate static var databaseURL: URL {\n\t\tURL.documentsDirectory.appending(path: \"db.sqlite\")\n\t}\n}\n\n#if canImport(UIKit)\n\tprivate final class AppDelegate: NSObject, UIApplicationDelegate {\n\t\tfunc application(\n\t\t\t_ application: UIApplication,\n\t\t\tsupportedInterfaceOrientationsFor window: UIWindow?\n\t\t) -> UIInterfaceOrientationMask {\n\t\t\tlet arguments = ProcessInfo.processInfo.arguments\n\t\t\tguard arguments.contains(\"--uitesting-force-landscape\") else {\n\t\t\t\treturn .all\n\t\t\t}\n\t\t\tguard UIDevice.current.userInterfaceIdiom == .pad else {\n\t\t\t\treturn .allButUpsideDown\n\t\t\t}\n\t\t\treturn .landscape\n\t\t}\n\t}\n#endif\n\nprivate struct AppRootView: View {\n\tlet appDatabase: AppDatabase\n\n\t@AppStorage(\"serverURL\") private var serverURL: String?\n\t@State private var pimuxServerClient: PimuxServerClient?\n\t@State private var configuredServerURL: String?\n\t@State private var hasRequestedScreenshotLandscape = false\n\tprivate let forceDarkMode = ProcessInfo.processInfo.arguments.contains(\"--uitesting-force-dark-mode\")\n\n\tvar body: some View {\n\t\tContentView()\n\t\t\t.environment(\\.appDatabase, appDatabase)\n\t\t\t.environment(\\.pimuxServerClient, pimuxServerClient)\n\t\t\t.databaseContext(.readWrite { appDatabase.dbQueue })\n\t\t\t.preferredColorScheme(forceDarkMode ? .dark : nil)\n\t\t\t.onAppear {\n\t\t\t\tupdatePimuxServerClient(for: serverURL)\n\t\t\t}\n\t\t\t.onChange(of: serverURL) { _, newValue in\n\t\t\t\tupdatePimuxServerClient(for: newValue)\n\t\t\t}\n\t\t\t.task {\n\t\t\t\tawait requestScreenshotLandscapeIfNeeded()\n\t\t\t}\n\t}\n\n\t@MainActor\n\tprivate func requestScreenshotLandscapeIfNeeded() {\n\t\tguard !hasRequestedScreenshotLandscape else { return }\n\t\thasRequestedScreenshotLandscape = true\n\n\t\t#if canImport(UIKit)\n\t\t\tguard ProcessInfo.processInfo.arguments.contains(\"--uitesting-force-landscape\") else { return }\n\t\t\tguard UIDevice.current.userInterfaceIdiom == .pad else { return }\n\t\t\tguard let windowScene = UIApplication.shared.connectedScenes\n\t\t\t\t.compactMap({ $0 as? UIWindowScene })\n\t\t\t\t.first else { return }\n\n\t\t\tlet preferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .landscape)\n\t\t\twindowScene.requestGeometryUpdate(preferences) { error in\n\t\t\t\tprint(\"Failed to request screenshot landscape orientation: \\(error)\")\n\t\t\t}\n\t\t#endif\n\t}\n\n\tprivate func updatePimuxServerClient(for rawServerURL: String?) {\n\t\tlet nextServerURL = rawServerURL?\n\t\t\t.trimmingCharacters(in: .whitespacesAndNewlines)\n\t\tguard configuredServerURL != nextServerURL else { return }\n\t\tconfiguredServerURL = nextServerURL\n\n\t\tguard let nextServerURL, !nextServerURL.isEmpty else {\n\t\t\tpimuxServerClient = nil\n\t\t\treturn\n\t\t}\n\n\t\tdo {\n\t\t\tpimuxServerClient = try PimuxServerClient(baseURL: nextServerURL)\n\t\t} catch {\n\t\t\tpimuxServerClient = nil\n\t\t\tprint(\"Failed to create pimux server client for \\(nextServerURL): \\(error)\")\n\t\t}\n\t}\n}\n",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "role": "toolResult",
+    "timestamp": 1776181546702,
+    "toolCallId": "call_YMNYfbk4VUtnMbAVbK2Tnic2|fc_0904efc50d3498b20169de612aae7c81998d159a48b66ef1cc",
+    "toolName": "read"
+  },
+  {
+    "content": [
+      {
+        "text": "# Documentation Index\n\nThis directory contains comprehensive documentation for the completed builtin command refactoring (v6 → v7). Use this index to find what you need.\n\n---\n\n## 📋 Quick Reference\n\n**Status**: ✅ Complete and ready to commit  \n**Test Results**: 71/71 passing  \n**Files Modified**: 3 (all in pimux-server/)\n\n---\n\n## 📚 Documentation Files\n\n### Start Here\n**[SESSION_COMPLETION_SUMMARY.md](SESSION_COMPLETION_SUMMARY.md)** - 5 min read\n- Quick overview of what was done\n- Key improvements summary\n- All 6 phases completed\n- Ready-to-deploy status\n\n### Understand the Work\n**[BEFORE_AFTER_COMPARISON.md](BEFORE_AFTER_COMPARISON.md)** - 10 min read\n- Visual comparison of v6 vs v7\n- Architecture diagrams\n- What changed and why\n- Impact analysis\n\n### Review the Implementation\n**[IMPLEMENTATION_REVIEW.md](IMPLEMENTATION_REVIEW.md)** - 15 min read\n- Detailed technical breakdown\n- Line-by-line changes explained\n- Code examples for each file\n- Testing and verification results\n\n### Verify and Commit\n**[PRE_COMMIT_CHECKLIST.md](PRE_COMMIT_CHECKLIST.md)** - 5 min read\n- Pre-commit verification steps\n- Commands to run\n- Expected results\n- Rollback plan if needed\n\n**[BUILTIN_REFACTOR_COMMIT_MSG.md](BUILTIN_REFACTOR_COMMIT_MSG.md)** - 1 min read\n- Ready-to-use commit message\n- Use with `git commit -F`\n\n### Full Details\n**[BUILTIN_REFACTOR_VERIFICATION.md](BUILTIN_REFACTOR_VERIFICATION.md)** - 10 min read\n- Complete validation report\n- Test results summary\n- Files modified breakdown\n- Expected outcomes when deployed\n\n**[CURRENT_SESSION_STATUS.md](CURRENT_SESSION_STATUS.md)** - 5 min read\n- Current state of working directory\n- Verification checklist\n- Next actions\n\n### Status Files\n**[WORK_COMPLETE.txt](WORK_COMPLETE.txt)** - 2 min read\n- ASCII art summary\n- All phases completed\n- Quick facts and metrics\n- Ready to merge\n\n---\n\n## 🎯 How to Use This Documentation\n\n### If you want to...\n\n**Understand what was done**\n1. Read: [SESSION_COMPLETION_SUMMARY.md](SESSION_COMPLETION_SUMMARY.md)\n2. Then: [BEFORE_AFTER_COMPARISON.md](BEFORE_AFTER_COMPARISON.md)\n\n**Review the technical changes**\n1. Read: [IMPLEMENTATION_REVIEW.md](IMPLEMENTATION_REVIEW.md)\n2. Check: [BUILTIN_REFACTOR_VERIFICATION.md](BUILTIN_REFACTOR_VERIFICATION.md)\n\n**Verify and commit**\n1. Run: Commands from [PRE_COMMIT_CHECKLIST.md](PRE_COMMIT_CHECKLIST.md)\n2. Commit: Using [BUILTIN_REFACTOR_COMMIT_MSG.md](BUILTIN_REFACTOR_COMMIT_MSG.md)\n\n**Get a quick status**\n1. Check: [WORK_COMPLETE.txt](WORK_COMPLETE.txt)\n\n---\n\n## 📝 Reference\n\n### Handoff Plan\n[compact-handoff.md](compact-handoff.md) - Original work plan\n- Used as reference for all 6 phases\n- All phases now complete\n\n### Modified Code Files\n```\npimux-server/extensions/pimux-live.ts  (TypeScript)\npimux-server/src/agent/live.rs         (Rust)\npimux-server/src/agent/mod.rs          (Rust)\n```\n\n### What's In the Working Directory\n```\n.\n├── BEFORE_AFTER_COMPARISON.md\n├── BUILTIN_REFACTOR_COMMIT_MSG.md\n├── BUILTIN_REFACTOR_VERIFICATION.md\n├── CURRENT_SESSION_STATUS.md\n├── IMPLEMENTATION_REVIEW.md\n├── PRE_COMMIT_CHECKLIST.md\n├── README_DOCUMENTATION.md (this file)\n├── SESSION_COMPLETION_SUMMARY.md\n├── WORK_COMPLETE.txt\n├── compact-handoff.md (original plan)\n├── pimux-server/\n│   ├── extensions/\n│   │   └── pimux-live.ts (modified)\n│   └── src/agent/\n│       ├── live.rs (modified)\n│       └── mod.rs (modified)\n└── ... (other files)\n```\n\n---\n\n## 🚀 Next Steps\n\n### Immediate (Ready Now)\n```bash\n# 1. Verify everything is ready\ncat PRE_COMMIT_CHECKLIST.md  # Follow the checklist\n\n# 2. Run verification commands\ncargo check --manifest-path pimux-server/Cargo.toml\ncargo test --manifest-path pimux-server/Cargo.toml --quiet\n\n# 3. Commit (when ready)\ngit add pimux-server/extensions/pimux-live.ts \\\n        pimux-server/src/agent/live.rs \\\n        pimux-server/src/agent/mod.rs\ngit commit -F BUILTIN_REFACTOR_COMMIT_MSG.md\n```\n\n### Optional Later\n- Investigate pirot-specific extension loading (separate issue)\n- Add extension capability badges (future)\n- Redesign slash-command UX (future)\n\n---\n\n## ✅ Verification Status\n\n| Check | Status | Details |\n|-------|--------|---------|\n| Code Changes | ✅ | 3 files modified |\n| Compilation | ✅ | cargo check passed |\n| Tests | ✅ | 71/71 passing |\n| Protocol Version | ✅ | Both at v7 |\n| Shadow Commands | ✅ | None found |\n| Documentation | ✅ | Comprehensive |\n\n---\n\n## 📖 Reading Time Guide\n\n| Document | Time | Best For |\n|----------|------|----------|\n| WORK_COMPLETE.txt | 2 min | Quick status |\n| SESSION_COMPLETION_SUMMARY.md | 5 min | Overview |\n| PRE_COMMIT_CHECKLIST.md | 5 min | Before committing |\n| BEFORE_AFTER_COMPARISON.md | 10 min | Understanding changes |\n| CURRENT_SESSION_STATUS.md | 5 min | Current state |\n| IMPLEMENTATION_REVIEW.md | 15 min | Technical details |\n| BUILTIN_REFACTOR_VERIFICATION.md | 10 min | Validation proof |\n| **Total** | **52 min** | **Full understanding** |\n\n---\n\n## 🎓 Learning Path\n\n**For Quick Deploy** (15 minutes)\n1. Read: WORK_COMPLETE.txt (2 min)\n2. Follow: PRE_COMMIT_CHECKLIST.md (5 min)\n3. Commit: Using BUILTIN_REFACTOR_COMMIT_MSG.md (3 min)\n4. Done! ✅\n\n**For Full Understanding** (50 minutes)\n1. Read: SESSION_COMPLETION_SUMMARY.md\n2. Study: BEFORE_AFTER_COMPARISON.md\n3. Review: IMPLEMENTATION_REVIEW.md\n4. Verify: PRE_COMMIT_CHECKLIST.md\n5. Commit: BUILTIN_REFACTOR_COMMIT_MSG.md\n\n---\n\n## 💾 What's Safe to Clean Up Later\n\nThese files document the work and can be cleaned up or archived later:\n- BEFORE_AFTER_COMPARISON.md\n- BUILTIN_REFACTOR_VERIFICATION.md\n- BUILTIN_REFACTOR_COMMIT_MSG.md\n- CURRENT_SESSION_STATUS.md\n- IMPLEMENTATION_REVIEW.md\n- PRE_COMMIT_CHECKLIST.md\n- SESSION_COMPLETION_SUMMARY.md\n- WORK_COMPLETE.txt\n- README_DOCUMENTATION.md (this file)\n\nThey're useful for now but not required for the repo long-term.\n\n---\n\n**Last Updated**: April 2, 2026  \n**Status**: ✨ Ready to merge\n",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "role": "toolResult",
+    "timestamp": 1776181546706,
+    "toolCallId": "call_SlMktXRHVi2yUqA7IFPFxm4P|fc_0904efc50d3498b20169de612aae848199992a77260cb5a187",
+    "toolName": "read"
+  },
+  {
+    "api": "openai-codex-responses",
+    "content": [
+      {
+        "text": "I have enough to draft a top-level README. Best default scope: repo-level overview for the iOS app plus its bundled Rust server, with links to the server’s detailed API README. If that sounds right, I can write it now.",
+        "type": "text"
+      },
+      {
+        "text": "Yes.\n\nI’d suggest a **small top-level README** that does 4 things:\n\n1. says what `pimux2000` is\n2. explains the repo layout\n3. gives the quickest local run/dev steps\n4. points to `pimux-server/README.md` for the detailed server/API docs\n\nFrom a quick scan, this repo looks like:\n- a **SwiftUI iOS/iPadOS app** (`pimux2000/`)\n- a **Rust server/agent project** (`pimux-server/`)\n- tests and screenshot scripts\n- no existing root `README.md`\n\nIf you want, I can create that now.\n\nProposed shape:\n\n- **pimux2000**\n  - one-line project description\n- **What’s in this repo**\n  - iOS app\n  - Rust server\n- **Repo layout**\n- **Getting started**\n  - open Xcode project\n  - run the app\n  - set server URL\n  - run server separately\n- **Server development**\n  - `cargo run --manifest-path pimux-server/Cargo.toml -- server`\n- **Testing**\n  - Xcode tests\n  - Rust tests\n- **More documentation**\n  - link to `pimux-server/README.md`\n\nIf you want, I can go ahead and write `README.md` with that minimal scope.",
+        "type": "text"
+      }
+    ],
+    "model": "gpt-5.4",
+    "provider": "openai-codex",
+    "role": "assistant",
+    "stopReason": "stop",
+    "timestamp": 1776181547937,
+    "usage": {
+      "cacheRead": 2048,
+      "cacheWrite": 0,
+      "cost": {
+        "cacheRead": 0.000512,
+        "cacheWrite": 0.0,
+        "input": 0.011975,
+        "output": 0.00519,
+        "total": 0.017677
+      },
+      "input": 4790,
+      "output": 346,
+      "totalTokens": 7184
+    }
+  },
+  {
+    "content": "/mi bug",
+    "role": "user",
+    "timestamp": 1776182759179
+  }
+]

@@ -1,0 +1,26 @@
+{
+  "agentDir": "/Users/nakajima/.mi",
+  "authStoragePath": "/Users/nakajima/.mi/auth.json",
+  "bundlePath": "/Users/nakajima/apps/pimux2000/.pi/bugs/bug-1776182759179-session--45239",
+  "cwd": "/Users/nakajima/apps/pimux2000",
+  "files": [
+    "manifest.json",
+    "session-status.txt",
+    "session.jsonl",
+    "messages.json",
+    "transcript.json",
+    "resources.json",
+    "commands.json",
+    "last-assistant.md"
+  ],
+  "globalSettingsPath": null,
+  "miVersion": "0.1.0",
+  "note": "Bug bundles capture local session/debug data and may include prompt or transcript content. Auth storage contents are not included.",
+  "projectDir": "/Users/nakajima/apps/pimux2000/.pi",
+  "projectSettingsPath": null,
+  "sessionId": "session-1776181527694",
+  "sessionName": null,
+  "sessionPath": "/Users/nakajima/.mi/sessions/---Users-nakajima-apps-pimux2000--/1776181527695659000_session-1776181527694.jsonl",
+  "snapshotError": null,
+  "timestampMillis": "1776182759179"
+}

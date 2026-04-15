@@ -1601,70 +1601,85 @@ export default function (pi: ExtensionAPI) {
 		return content;
 	}
 
+	function reportSendInvocationError(sessionId: string, error: unknown) {
+		const message = error instanceof Error ? error.message : String(error);
+		const ctx = state.currentSessionContext;
+		if (ctx && ctx.sessionManager.getSessionId() === sessionId) {
+			ctx.ui.notify(`Failed to submit input: ${message}`, "error");
+			return;
+		}
+		console.error(`pimux live send failed for session ${sessionId}: ${message}`);
+	}
+
+	function observeSendInvocationResult(sessionId: string, result: unknown) {
+		void Promise.resolve(result).catch((error: unknown) => {
+			reportSendInvocationError(sessionId, error);
+		});
+	}
+
 	function dispatchUserMessage(sessionId: string, body: string, images: PimuxInputImage[] = []): string | undefined {
-		const extensionRunner = currentExtensionRunner();
-		const agentSession = currentAgentSession();
-		const activeSessionId =
-			state.currentSessionContext?.sessionManager.getSessionId() ||
-			agentSession?.sessionManager.getSessionId() ||
-			state.currentSessionId;
-		if (!activeSessionId || activeSessionId !== sessionId) {
-			return `session ${sessionId} is not currently attached in this pi runtime`;
-		}
-
-		const trimmedBody = body.trim();
-		const spaceIndex = trimmedBody.indexOf(" ");
-		const commandName =
-			trimmedBody.startsWith("/") && trimmedBody.length > 1
-				? (spaceIndex === -1 ? trimmedBody.slice(1) : trimmedBody.slice(1, spaceIndex))
-				: undefined;
-		const slashCommand = commandName ? pi.getCommands().find((command) => command.name === commandName) : undefined;
-		if (commandName && !slashCommand) {
-			return `unknown slash command /${commandName}`;
-		}
-
-		const extensionCommand = commandName ? extensionRunner?.getCommand(commandName) : undefined;
-		if (extensionCommand) {
-			const ctx = extensionRunner?.createCommandContext();
-			if (!ctx) {
-				return "no live pi command context is available";
+		try {
+			const extensionRunner = currentExtensionRunner();
+			const agentSession = currentAgentSession();
+			const activeSessionId =
+				state.currentSessionContext?.sessionManager.getSessionId() ||
+				agentSession?.sessionManager.getSessionId() ||
+				state.currentSessionId;
+			if (!activeSessionId || activeSessionId !== sessionId) {
+				return `session ${sessionId} is not currently attached in this pi runtime`;
 			}
 
-			const args = spaceIndex === -1 ? "" : trimmedBody.slice(spaceIndex + 1);
-			void Promise.resolve(extensionCommand.handler(args, ctx)).catch((error: unknown) => {
-				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Failed to execute /${commandName}: ${message}`, "error");
-			});
-			return;
-		}
+			const trimmedBody = body.trim();
+			const spaceIndex = trimmedBody.indexOf(" ");
+			const commandName =
+				trimmedBody.startsWith("/") && trimmedBody.length > 1
+					? (spaceIndex === -1 ? trimmedBody.slice(1) : trimmedBody.slice(1, spaceIndex))
+					: undefined;
+			const slashCommand = commandName
+				? pi.getCommands().find((command) => command.name === commandName)
+				: undefined;
+			if (commandName && !slashCommand) {
+				return `unknown slash command /${commandName}`;
+			}
 
-		if (agentSession && agentSession.sessionManager.getSessionId() === sessionId) {
-			void agentSession
-				.prompt(body, {
-					images: images.length > 0 ? images : undefined,
-					streamingBehavior: state.isAgentBusy ? "followUp" : undefined,
-				})
-				.catch((error: unknown) => {
+			const extensionCommand = commandName ? extensionRunner?.getCommand(commandName) : undefined;
+			if (extensionCommand) {
+				const ctx = extensionRunner?.createCommandContext();
+				if (!ctx) {
+					return "no live pi command context is available";
+				}
+
+				const args = spaceIndex === -1 ? "" : trimmedBody.slice(spaceIndex + 1);
+				void Promise.resolve(extensionCommand.handler(args, ctx)).catch((error: unknown) => {
 					const message = error instanceof Error ? error.message : String(error);
-					const ctx = state.currentSessionContext;
-					if (ctx && ctx.sessionManager.getSessionId() === sessionId) {
-						ctx.ui.notify(`Failed to submit input: ${message}`, "error");
-						return;
-					}
-					console.error(`pimux live send failed for session ${sessionId}: ${message}`);
+					ctx.ui.notify(`Failed to execute /${commandName}: ${message}`, "error");
 				});
+				return;
+			}
+
+			if (agentSession && agentSession.sessionManager.getSessionId() === sessionId) {
+				observeSendInvocationResult(
+					sessionId,
+					agentSession.prompt(body, {
+						images: images.length > 0 ? images : undefined,
+						streamingBehavior: state.isAgentBusy ? "followUp" : undefined,
+					})
+				);
+				return;
+			}
+
+			if (trimmedBody.startsWith("/")) {
+				return "no live pi agent session is available";
+			}
+
+			const content = userMessageContent(body, images);
+			const sendResult: unknown = state.isAgentBusy
+				? pi.sendUserMessage(content, { deliverAs: "followUp" })
+				: pi.sendUserMessage(content);
+			observeSendInvocationResult(sessionId, sendResult);
 			return;
-		}
-
-		if (trimmedBody.startsWith("/")) {
-			return "no live pi agent session is available";
-		}
-
-		const content = userMessageContent(body, images);
-		if (state.isAgentBusy) {
-			pi.sendUserMessage(content, { deliverAs: "followUp" });
-		} else {
-			pi.sendUserMessage(content);
+		} catch (error) {
+			return error instanceof Error ? error.message : String(error);
 		}
 	}
 

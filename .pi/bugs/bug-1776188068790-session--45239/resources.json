@@ -1,0 +1,86 @@
+{
+  "agentsFiles": [],
+  "extensions": [
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/bump.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/convo.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/ignore-gs.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/memory.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/pimux-live.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/pimux2000.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/pirot.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/planning-mode.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/reload-all.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/reload-coordinator.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/todo.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/repo-lsp/index.ts",
+      "scope": "global",
+      "viaSettings": false
+    },
+    {
+      "kind": "extension",
+      "path": "/Users/nakajima/.pi/agent/extensions/web-docs/index.ts",
+      "scope": "global",
+      "viaSettings": false
+    }
+  ],
+  "prompts": [],
+  "skills": [],
+  "themes": []
+}

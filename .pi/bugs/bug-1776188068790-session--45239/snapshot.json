@@ -1,0 +1,45 @@
+{
+  "activeToolNames": [
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "go_to_definition",
+    "find_references",
+    "symbol_search",
+    "workspace_diagnostics"
+  ],
+  "autoCompactionEnabled": true,
+  "contextUsage": {
+    "contextWindow": 272000,
+    "percent": 3.349264705882353,
+    "tokens": 9110
+  },
+  "currentModel": {
+    "api": "openai-responses",
+    "contextWindow": 272000,
+    "id": "gpt-5.4",
+    "input": [
+      "text",
+      "image"
+    ],
+    "maxTokens": 128000,
+    "name": "GPT-5.4",
+    "provider": "openai-codex",
+    "reasoning": true
+  },
+  "latestCompaction": null,
+  "messageCount": 22,
+  "pendingInputPrompt": null,
+  "queue": {
+    "followUpCount": 0,
+    "followUpMode": "oneAtATime",
+    "steeringCount": 0,
+    "steeringMode": "oneAtATime"
+  },
+  "recordedEntryCount": 23,
+  "sessionId": "session-1776181527694",
+  "sessionName": null,
+  "sessionPath": "/Users/nakajima/.mi/sessions/---Users-nakajima-apps-pimux2000--/1776181527695659000_session-1776181527694.jsonl",
+  "thinkingLevel": "off"
+}

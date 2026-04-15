@@ -457,7 +457,7 @@ fn group_messages_by_project(messages: Vec<ArchivedMessage>) -> Vec<ProjectDayDa
     let mut projects = Vec::<ProjectDayData>::new();
 
     for message in messages {
-        let project_key = normalized_project_key(message.project_cwd.as_deref());
+        let project_key = report_project_key(message.project_cwd.as_deref(), &message.host_location);
         let index = match project_indexes.get(&project_key) {
             Some(index) => *index,
             None => {
@@ -478,6 +478,15 @@ fn group_messages_by_project(messages: Vec<ArchivedMessage>) -> Vec<ProjectDayDa
     }
 
     projects
+}
+
+fn report_project_key(cwd: Option<&str>, host_location: &str) -> String {
+    let project_key = normalized_project_key(cwd);
+    if project_key == "~" {
+        format!("~ ({})", host_location.trim())
+    } else {
+        project_key
+    }
 }
 
 fn normalized_project_key(cwd: Option<&str>) -> String {
@@ -1473,7 +1482,7 @@ fn render_day_report(report_date: NaiveDate, projects: &[RenderedProjectReport])
             lines.push(String::new());
         }
 
-        lines.push(format!("## {}", project.project_key));
+        lines.push(format!("## {}", markdown_heading_text(&project.project_key)));
         lines.push(String::new());
 
         if !project.worked_on.is_empty() {
@@ -1522,6 +1531,12 @@ fn render_day_report(report_date: NaiveDate, projects: &[RenderedProjectReport])
 
     lines.push(String::new());
     lines.join("\n")
+}
+
+fn markdown_heading_text(text: &str) -> String {
+    text.strip_prefix('~')
+        .map(|rest| format!(r#"\~{}"#, rest))
+        .unwrap_or_else(|| text.to_string())
 }
 
 fn render_footnote_text(note: &FootnoteEvidence) -> Option<String> {
@@ -1886,6 +1901,22 @@ mod tests {
     }
 
     #[test]
+    fn report_project_key_includes_host_for_bare_home_directory() {
+        assert_eq!(
+            report_project_key(Some("/Users/nakajima"), "dev@mac"),
+            "~ (dev@mac)"
+        );
+        assert_eq!(
+            report_project_key(Some("/home/nakajima"), "prod@box"),
+            "~ (prod@box)"
+        );
+        assert_eq!(
+            report_project_key(Some("/Users/nakajima/apps/pimux2000"), "dev@mac"),
+            "~/apps/pimux2000"
+        );
+    }
+
+    #[test]
     fn extracts_text_blocks_without_tool_call_noise() {
         let message_json = json!({
             "created_at": "2026-04-08T00:00:00Z",
@@ -1978,6 +2009,22 @@ mod tests {
             misses[0].correction_text,
             "it should be project-based, not session based"
         );
+    }
+
+    #[test]
+    #[test]
+    fn render_day_report_escapes_leading_tilde_in_project_heading() {
+        let rendered = render_day_report(
+            NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+            &[RenderedProjectReport {
+                project_key: "~ (dev@mac)".to_string(),
+                worked_on: vec!["Shell setup".to_string()],
+                accomplishments: vec![],
+                llm_misses: vec![],
+            }],
+        );
+
+        assert!(rendered.contains(r#"## \~ (dev@mac)"#));
     }
 
     #[test]

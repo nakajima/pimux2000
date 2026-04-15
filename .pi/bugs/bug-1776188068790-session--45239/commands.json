@@ -1,0 +1,170 @@
+[
+  {
+    "description": "Show available slash commands",
+    "insertText": "/help",
+    "name": "help",
+    "source": "builtin",
+    "usage": "/help"
+  },
+  {
+    "description": "Show current session file and runtime details",
+    "insertText": "/session",
+    "name": "session",
+    "source": "builtin",
+    "usage": "/session"
+  },
+  {
+    "description": "List discovered agents, prompts, themes, and skills",
+    "insertText": "/resources",
+    "name": "resources",
+    "source": "builtin",
+    "usage": "/resources"
+  },
+  {
+    "description": "Log in to a subscription provider",
+    "insertText": "/login anthropic",
+    "name": "login",
+    "source": "builtin",
+    "usage": "/login [anthropic|openai-codex|github-copilot]"
+  },
+  {
+    "description": "Remove saved provider credentials",
+    "insertText": "/logout anthropic",
+    "name": "logout",
+    "source": "builtin",
+    "usage": "/logout [anthropic|openai-codex|github-copilot]"
+  },
+  {
+    "description": "Reload settings, extensions, skills, prompts, and themes",
+    "insertText": "/reload",
+    "name": "reload",
+    "source": "builtin",
+    "usage": "/reload"
+  },
+  {
+    "description": "mi runtime utilities",
+    "insertText": "/mi ",
+    "name": "mi",
+    "source": "builtin",
+    "usage": "/mi bug"
+  },
+  {
+    "description": "Set the current thinking level",
+    "insertText": "/thinking ",
+    "name": "thinking",
+    "source": "builtin",
+    "usage": "/thinking <off|minimal|low|medium|high|xhigh>"
+  },
+  {
+    "description": "Read a file with optional offset and limit",
+    "insertText": "/read ",
+    "name": "read",
+    "source": "builtin",
+    "usage": "/read <path> [offset] [limit]"
+  },
+  {
+    "description": "Run a shell command in the current workspace",
+    "insertText": "/bash ",
+    "name": "bash",
+    "source": "builtin",
+    "usage": "/bash <command>"
+  },
+  {
+    "description": "Write a file, using -- to separate content",
+    "insertText": "/write ",
+    "name": "write",
+    "source": "builtin",
+    "usage": "/write <path> -- <content>"
+  },
+  {
+    "description": "Replace exact text in a file",
+    "insertText": "/edit ",
+    "name": "edit",
+    "source": "builtin",
+    "usage": "/edit <path> -- <oldText> -- <newText>"
+  },
+  {
+    "description": "Exit interactive mode",
+    "insertText": "/quit",
+    "name": "quit",
+    "source": "builtin",
+    "usage": "/quit"
+  },
+  {
+    "description": "Exit interactive mode",
+    "insertText": "/exit",
+    "name": "exit",
+    "source": "builtin",
+    "usage": "/exit"
+  },
+  {
+    "description": "Bump a package.json or Cargo.toml version, refresh lockfiles, commit, and push",
+    "insertText": "/bump",
+    "name": "bump",
+    "source": "extension",
+    "usage": "/bump"
+  },
+  {
+    "description": "Same as /bump, but skips confirmation prompts and commits immediately",
+    "insertText": "/bump!",
+    "name": "bump!",
+    "source": "extension",
+    "usage": "/bump!"
+  },
+  {
+    "description": "Stage all changes, generate a commit message, and commit locally",
+    "insertText": "/commit",
+    "name": "commit",
+    "source": "extension",
+    "usage": "/commit"
+  },
+  {
+    "description": "Same as /commit, but skips confirmation prompts and commits immediately",
+    "insertText": "/commit!",
+    "name": "commit!",
+    "source": "extension",
+    "usage": "/commit!"
+  },
+  {
+    "description": "Run /bump, then releasor2000 release when a releasor2000.toml exists",
+    "insertText": "/release",
+    "name": "release",
+    "source": "extension",
+    "usage": "/release"
+  },
+  {
+    "description": "Same as /release, but skips confirmation prompts and runs immediately",
+    "insertText": "/release!",
+    "name": "release!",
+    "source": "extension",
+    "usage": "/release!"
+  },
+  {
+    "description": "Save a global memory preference",
+    "insertText": "/remember",
+    "name": "remember",
+    "source": "extension",
+    "usage": "/remember"
+  },
+  {
+    "description": "Delete a saved memory or candidate by text",
+    "insertText": "/forget",
+    "name": "forget",
+    "source": "extension",
+    "usage": "/forget"
+  },
+  {
+    "description": "Show saved global memories",
+    "insertText": "/memories",
+    "name": "memories",
+    "source": "extension",
+    "usage": "/memories"
+  },
+  {
+    "description": "Append to ./todo.txt, or choose a todo to start a new session",
+    "insertText": "/todo",
+    "name": "todo",
+    "source": "extension",
+    "usage": "/todo"
+  }
+]

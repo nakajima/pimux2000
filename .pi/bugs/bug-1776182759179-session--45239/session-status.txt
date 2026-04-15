@@ -1,0 +1,10 @@
+Session file: /Users/nakajima/.mi/sessions/---Users-nakajima-apps-pimux2000--/1776181527695659000_session-1776181527694.jsonl
+Auth file: /Users/nakajima/.mi/auth.json
+System prompt bytes: 1595
+Recorded entries: 13
+Session name: (none)
+Active model: openai-codex/gpt-5.4
+Thinking level: off
+Context estimate: 7186/272000 tokens (2.6%)
+Latest compaction: none
+Queued input: steer=0 (OneAtATime), follow_up=0 (OneAtATime)
