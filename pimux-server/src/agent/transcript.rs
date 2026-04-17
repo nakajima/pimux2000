@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-use super::discovery::DiscoveredSession;
+use super::discovery::{DiscoveredSession, SessionSource};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -71,11 +71,19 @@ pub fn build_persisted_snapshot(
         }
     }
 
+    let (freshness_state, warnings) = match discovered_session.source {
+        SessionSource::Pi => (
+            TranscriptFreshnessState::LiveUnknown,
+            vec![PERSISTED_WARNING.to_string()],
+        ),
+        SessionSource::Mi => (TranscriptFreshnessState::Persisted, Vec::new()),
+    };
+
     Ok(SessionMessagesResponse {
         session_id: discovered_session.id.clone(),
         messages,
         freshness: TranscriptFreshness {
-            state: TranscriptFreshnessState::LiveUnknown,
+            state: freshness_state,
             source: TranscriptSource::File,
             as_of: last_timestamp,
         },
@@ -83,7 +91,7 @@ pub fn build_persisted_snapshot(
             active: false,
             attached: false,
         },
-        warnings: vec![PERSISTED_WARNING.to_string()],
+        warnings,
     })
 }
 
@@ -342,10 +350,17 @@ struct ParsedEntry {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use chrono::Utc;
     use serde_json::json;
 
-    use super::{content_blocks, flatten_bash_execution};
-    use crate::message::MessageContentBlockKind;
+    use super::{build_persisted_snapshot, content_blocks, flatten_bash_execution};
+    use crate::{
+        agent::discovery::{DiscoveredSession, SessionFingerprint, SessionSource},
+        message::MessageContentBlockKind,
+        transcript::TranscriptFreshnessState,
+    };
 
     #[test]
     fn content_blocks_preserve_multiline_text() {
@@ -422,5 +437,55 @@ mod tests {
             flattened,
             "$ printf 'hi\\nthere'\n\nhi\nthere\n\nexit code: 0\ntruncated\nfull output: /tmp/bash-output.txt"
         );
+    }
+
+    #[test]
+    fn mi_persisted_snapshots_report_persisted_freshness_without_warnings() {
+        let root = std::env::temp_dir().join(format!(
+            "pimux-transcript-mi-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        fs::write(
+            &path,
+            [
+                r#"{"type":"session","version":3,"id":"session-1","timestamp":"2026-04-08T00:00:00.000Z","cwd":"/tmp/project"}"#,
+                r#"{"type":"message","id":"00000001","parentId":null,"timestamp":"2026-04-08T00:00:01.000Z","message":{"role":"user","content":"Hello","timestamp":1712534401000}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let discovered_session = DiscoveredSession {
+            source: SessionSource::Mi,
+            session_file: path,
+            fingerprint: SessionFingerprint {
+                file_size: 1,
+                modified_at_millis: 1,
+            },
+            id: "mi:session-1".to_string(),
+            explicit_summary: None,
+            heuristic_summary: "session-1".to_string(),
+            summary_input: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_user_message_at: Utc::now(),
+            last_assistant_message_at: Utc::now(),
+            cwd: "/tmp/project".to_string(),
+            model: "unknown".to_string(),
+            context_usage: None,
+            supports_images: None,
+        };
+
+        let snapshot = build_persisted_snapshot(&discovered_session).unwrap();
+        assert_eq!(
+            snapshot.freshness.state,
+            TranscriptFreshnessState::Persisted
+        );
+        assert!(snapshot.warnings.is_empty());
+
+        let _ = fs::remove_dir_all(root);
     }
 }

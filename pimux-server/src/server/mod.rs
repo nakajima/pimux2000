@@ -2,7 +2,7 @@ mod postgres_backup;
 mod web;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     fmt::Write as _,
     fs,
@@ -320,8 +320,13 @@ struct SendMessageRequest {
 pub async fn start() -> Result<(), BoxError> {
     crate::self_update::spawn_auto_update_task();
 
-    let postgres_backup = postgres_backup::start_from_env().await?;
-    let app = app(AppState::with_persistent_hosts()?.with_postgres_backup(postgres_backup));
+    let postgres_backup = postgres_backup::start_from_env().await?.ok_or_else(|| {
+        format!(
+            "{} is required to start the server because the iOS app reads server state from Postgres",
+            postgres_backup::POSTGRES_BACKUP_URL_ENV
+        )
+    })?;
+    let app = app(AppState::with_persistent_hosts()?.with_postgres_backup(Some(postgres_backup)));
     let port = port_from_env()?;
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
@@ -940,29 +945,31 @@ async fn version() -> Json<VersionResponse> {
     })
 }
 
-async fn hosts(State(state): State<AppState>) -> Json<Vec<HostSessions>> {
-    let hosts = state.hosts.read().await;
-    let mut response = hosts
-        .values()
-        .map(|record| HostSessions {
-            location: record.host.location.clone(),
-            auth: record.host.auth,
-            connected: record.connected,
-            missing: !record.connected,
-            last_seen_at: record.last_seen_at.clone(),
-            sessions: record.sessions.clone(),
-        })
-        .collect::<Vec<_>>();
+async fn hosts(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<HostSessions>>, (StatusCode, Json<ErrorResponse>)> {
+    let response = if state.postgres_backup.is_some() {
+        postgres_host_sessions(&state)
+            .await
+            .map_err(|error| bad_gateway(format!("postgres hosts query failed: {error}")))?
+    } else {
+        state_host_sessions(&state).await
+    };
 
-    response.sort_by(|left, right| left.location.cmp(&right.location));
-    Json(response)
+    Ok(Json(response))
 }
 
 async fn sessions(
     State(state): State<AppState>,
     Query(query): Query<SessionsQuery>,
 ) -> Result<Json<Vec<ListedSession>>, (StatusCode, Json<ErrorResponse>)> {
-    let mut sessions = listed_sessions(&state).await;
+    let mut sessions = if state.postgres_backup.is_some() {
+        postgres_listed_sessions(&state)
+            .await
+            .map_err(|error| bad_gateway(format!("postgres sessions query failed: {error}")))?
+    } else {
+        listed_sessions(&state).await
+    };
 
     sessions.sort_by(|left, right| {
         right
@@ -985,6 +992,293 @@ async fn sessions(
     sessions.truncate(count);
 
     Ok(Json(sessions))
+}
+
+async fn state_host_sessions(state: &AppState) -> Vec<HostSessions> {
+    let hosts = state.hosts.read().await;
+    let mut response = hosts
+        .values()
+        .map(|record| HostSessions {
+            location: record.host.location.clone(),
+            auth: record.host.auth,
+            connected: record.connected,
+            missing: !record.connected,
+            last_seen_at: record.last_seen_at.clone(),
+            sessions: record.sessions.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    response.sort_by(|left, right| left.location.cmp(&right.location));
+    response
+}
+
+async fn postgres_host_sessions(state: &AppState) -> Result<Vec<HostSessions>, BoxError> {
+    let live_hosts = state.hosts.read().await.clone();
+    let client = postgres_backup::connect_read_client_from_env_required().await?;
+    let archived_sessions = postgres_backup::load_sessions(&client).await?;
+    Ok(merged_postgres_host_sessions(
+        &live_hosts,
+        archived_sessions,
+    ))
+}
+
+async fn postgres_listed_sessions(state: &AppState) -> Result<Vec<ListedSession>, BoxError> {
+    let live_hosts = state.hosts.read().await.clone();
+    let client = postgres_backup::connect_read_client_from_env_required().await?;
+    let archived_sessions = postgres_backup::load_sessions(&client).await?;
+    Ok(merged_postgres_listed_sessions(
+        &live_hosts,
+        archived_sessions,
+    ))
+}
+
+fn merged_postgres_host_sessions(
+    live_hosts: &HashMap<String, HostRecord>,
+    archived_sessions: Vec<postgres_backup::ArchivedSession>,
+) -> Vec<HostSessions> {
+    let mut archived_sessions_by_host: HashMap<String, Vec<postgres_backup::ArchivedSession>> =
+        HashMap::new();
+    for archived_session in archived_sessions {
+        archived_sessions_by_host
+            .entry(archived_session.host_location.clone())
+            .or_default()
+            .push(archived_session);
+    }
+
+    let mut response = live_hosts
+        .iter()
+        .map(|(location, record)| {
+            let archived_for_host = archived_sessions_by_host
+                .remove(location)
+                .unwrap_or_default();
+            let mut sessions_by_id = record
+                .sessions
+                .clone()
+                .into_iter()
+                .map(|session| (session.id.clone(), session))
+                .collect::<HashMap<_, _>>();
+            let mut archived_last_seen_at = None;
+
+            for archived_session in archived_for_host {
+                archived_last_seen_at =
+                    archived_last_seen_at.max(Some(archived_session.last_seen_at));
+                let Some(session) = archived_session.active_session() else {
+                    continue;
+                };
+                let Some(existing) = sessions_by_id.get(&session.id) else {
+                    continue;
+                };
+                if should_prefer_active_session(&session, existing) {
+                    sessions_by_id.insert(session.id.clone(), session);
+                }
+            }
+
+            let mut sessions = sessions_by_id.into_values().collect::<Vec<_>>();
+            sessions.sort_by(|left, right| {
+                right
+                    .updated_at
+                    .cmp(&left.updated_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+
+            HostSessions {
+                location: location.clone(),
+                auth: record.host.auth,
+                connected: record.connected,
+                missing: !record.connected,
+                last_seen_at: record.last_seen_at.max(archived_last_seen_at),
+                sessions,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    for (location, archived_for_host) in archived_sessions_by_host {
+        let mut sessions_by_id: HashMap<String, ActiveSession> = HashMap::new();
+        let mut host_auth = HostAuth::None;
+        let mut last_seen_at = None;
+
+        for archived_session in archived_for_host {
+            host_auth = archived_session.host_auth;
+            last_seen_at = last_seen_at.max(Some(archived_session.last_seen_at));
+            let Some(session) = archived_session.active_session() else {
+                continue;
+            };
+            match sessions_by_id.get(&session.id) {
+                Some(existing) if !should_prefer_active_session(&session, existing) => {}
+                _ => {
+                    sessions_by_id.insert(session.id.clone(), session);
+                }
+            }
+        }
+
+        let mut sessions = sessions_by_id.into_values().collect::<Vec<_>>();
+        sessions.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+
+        response.push(HostSessions {
+            location,
+            auth: host_auth,
+            connected: false,
+            missing: true,
+            last_seen_at,
+            sessions,
+        });
+    }
+
+    response.sort_by(|left, right| left.location.cmp(&right.location));
+    response
+}
+
+fn merged_postgres_listed_sessions(
+    live_hosts: &HashMap<String, HostRecord>,
+    archived_sessions: Vec<postgres_backup::ArchivedSession>,
+) -> Vec<ListedSession> {
+    let hosts = merged_postgres_listed_host_sessions(live_hosts, archived_sessions);
+    listed_sessions_from_host_sessions(&hosts)
+}
+
+fn merged_postgres_listed_host_sessions(
+    live_hosts: &HashMap<String, HostRecord>,
+    archived_sessions: Vec<postgres_backup::ArchivedSession>,
+) -> Vec<HostSessions> {
+    let mut sessions_by_host: HashMap<String, HashMap<String, ActiveSession>> = HashMap::new();
+    let mut host_auth_by_location = HashMap::new();
+    let mut host_last_seen_at = HashMap::new();
+    let mut locations = HashSet::new();
+
+    for archived_session in archived_sessions {
+        let location = archived_session.host_location.clone();
+        locations.insert(location.clone());
+        host_auth_by_location.insert(location.clone(), archived_session.host_auth);
+        merge_host_last_seen(
+            &mut host_last_seen_at,
+            &location,
+            Some(archived_session.last_seen_at),
+        );
+        if let Some(session) = archived_session.active_session() {
+            merge_active_session(&mut sessions_by_host, location, session);
+        }
+    }
+
+    for (location, record) in live_hosts {
+        locations.insert(location.clone());
+        host_auth_by_location.insert(location.clone(), record.host.auth);
+        merge_host_last_seen(
+            &mut host_last_seen_at,
+            location,
+            record.last_seen_at.clone(),
+        );
+        for session in &record.sessions {
+            merge_active_session(&mut sessions_by_host, location.clone(), session.clone());
+        }
+    }
+
+    let mut response = locations
+        .into_iter()
+        .map(|location| {
+            let record = live_hosts.get(&location);
+            let connected = record.map(|record| record.connected).unwrap_or(false);
+            let auth = record.map(|record| record.host.auth).unwrap_or_else(|| {
+                host_auth_by_location
+                    .get(&location)
+                    .copied()
+                    .unwrap_or(HostAuth::None)
+            });
+            let mut sessions = sessions_by_host
+                .remove(&location)
+                .unwrap_or_default()
+                .into_values()
+                .collect::<Vec<_>>();
+            sessions.sort_by(|left, right| {
+                right
+                    .updated_at
+                    .cmp(&left.updated_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+
+            HostSessions {
+                location: location.clone(),
+                auth,
+                connected,
+                missing: !connected,
+                last_seen_at: record
+                    .and_then(|record| record.last_seen_at.clone())
+                    .max(host_last_seen_at.get(&location).cloned()),
+                sessions,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    response.sort_by(|left, right| left.location.cmp(&right.location));
+    response
+}
+
+fn merge_host_last_seen(
+    last_seen_by_host: &mut HashMap<String, DateTime<Utc>>,
+    host_location: &str,
+    last_seen_at: Option<DateTime<Utc>>,
+) {
+    let Some(last_seen_at) = last_seen_at else {
+        return;
+    };
+
+    match last_seen_by_host.get_mut(host_location) {
+        Some(existing) if *existing >= last_seen_at => {}
+        Some(existing) => *existing = last_seen_at,
+        None => {
+            last_seen_by_host.insert(host_location.to_string(), last_seen_at);
+        }
+    }
+}
+
+fn merge_active_session(
+    sessions_by_host: &mut HashMap<String, HashMap<String, ActiveSession>>,
+    host_location: String,
+    session: ActiveSession,
+) {
+    let sessions = sessions_by_host.entry(host_location).or_default();
+    match sessions.get(&session.id) {
+        Some(existing) if !should_prefer_active_session(&session, existing) => {}
+        _ => {
+            sessions.insert(session.id.clone(), session);
+        }
+    }
+}
+
+fn should_prefer_active_session(candidate: &ActiveSession, existing: &ActiveSession) -> bool {
+    if candidate.updated_at != existing.updated_at {
+        return candidate.updated_at > existing.updated_at;
+    }
+
+    candidate.last_activity_at() > existing.last_activity_at()
+}
+
+fn listed_sessions_from_host_sessions(hosts: &[HostSessions]) -> Vec<ListedSession> {
+    let mut sessions_by_id = HashMap::new();
+
+    for host in hosts {
+        for session in &host.sessions {
+            let candidate = ListedSession::new(
+                host.location.clone(),
+                host.connected,
+                host.missing,
+                host.last_seen_at.clone(),
+                session.clone(),
+            );
+            match sessions_by_id.get(&candidate.session.id) {
+                Some(existing) if !should_prefer_listed_session(&candidate, existing) => {}
+                _ => {
+                    sessions_by_id.insert(candidate.session.id.clone(), candidate);
+                }
+            }
+        }
+    }
+
+    sessions_by_id.into_values().collect()
 }
 
 async fn session_messages(
@@ -2293,6 +2587,18 @@ async fn resolve_session_snapshot(
         return Ok(cached.response);
     }
 
+    if state.postgres_backup.is_some() {
+        match archived_session_snapshot(state, session_id, host_location).await {
+            Ok(Some(snapshot)) => return Ok(snapshot),
+            Ok(None) => {}
+            Err(error) => {
+                return Err(bad_gateway(format!(
+                    "postgres transcript query failed: {error}"
+                )));
+            }
+        }
+    }
+
     let Some(host_location) = resolved_host_for_session(state, session_id, host_location).await
     else {
         return match host_location {
@@ -2350,6 +2656,79 @@ async fn resolve_session_snapshot(
             )))
         }
     }
+}
+
+async fn archived_session_snapshot(
+    state: &AppState,
+    session_id: &str,
+    host_location: Option<&str>,
+) -> Result<Option<SessionMessagesResponse>, BoxError> {
+    let client = postgres_backup::connect_read_client_from_env_required().await?;
+
+    let resolved_host_location = match host_location {
+        Some(host_location) => Some(host_location.to_string()),
+        None => match resolved_host_for_session(state, session_id, None).await {
+            Some(host_location) => Some(host_location),
+            None => preferred_archived_session_host(state, session_id, &client).await?,
+        },
+    };
+
+    let Some(host_location) = resolved_host_location else {
+        return Ok(None);
+    };
+
+    postgres_backup::load_transcript(&client, &host_location, session_id).await
+}
+
+async fn preferred_archived_session_host(
+    state: &AppState,
+    session_id: &str,
+    client: &tokio_postgres::Client,
+) -> Result<Option<String>, BoxError> {
+    let candidates = postgres_backup::load_sessions_by_session_id(client, session_id).await?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let live_hosts = state.hosts.read().await;
+    let mut preferred: Option<&postgres_backup::ArchivedSession> = None;
+    for candidate in &candidates {
+        match preferred {
+            Some(existing)
+                if !should_prefer_archived_session_host(candidate, existing, &live_hosts) => {}
+            _ => preferred = Some(candidate),
+        }
+    }
+
+    Ok(preferred.map(|session| session.host_location.clone()))
+}
+
+fn should_prefer_archived_session_host(
+    candidate: &postgres_backup::ArchivedSession,
+    existing: &postgres_backup::ArchivedSession,
+    live_hosts: &HashMap<String, HostRecord>,
+) -> bool {
+    let candidate_connected = live_hosts
+        .get(&candidate.host_location)
+        .map(|record| record.connected)
+        .unwrap_or(false);
+    let existing_connected = live_hosts
+        .get(&existing.host_location)
+        .map(|record| record.connected)
+        .unwrap_or(false);
+    if candidate_connected != existing_connected {
+        return candidate_connected;
+    }
+
+    if candidate.updated_at != existing.updated_at {
+        return candidate.updated_at > existing.updated_at;
+    }
+
+    if candidate.last_seen_at != existing.last_seen_at {
+        return candidate.last_seen_at > existing.last_seen_at;
+    }
+
+    candidate.host_location < existing.host_location
 }
 
 async fn fetch_attachment_from_host(
@@ -4391,6 +4770,94 @@ mod tests {
         assert_eq!(sessions[0].session.id, "session-1");
         assert_eq!(sessions[0].host_location, "dev@mac");
         assert!(sessions[0].host_connected);
+    }
+
+    #[test]
+    fn merged_postgres_host_sessions_prefers_newer_live_snapshot() {
+        let mut live_hosts = HashMap::new();
+        live_hosts.insert(
+            "dev@mac".to_string(),
+            HostRecord {
+                host: HostIdentity {
+                    location: "dev@mac".to_string(),
+                    auth: HostAuth::None,
+                },
+                sessions: vec![sample_active_session_with_updated(
+                    "session-1",
+                    timestamp(4_000),
+                )],
+                connected: true,
+                last_seen_at: Some(timestamp(5_000)),
+            },
+        );
+
+        let archived = postgres_backup::ArchivedSession {
+            host_location: "dev@mac".to_string(),
+            session_id: "session-1".to_string(),
+            host_auth: HostAuth::None,
+            summary: Some("Archived session".to_string()),
+            created_at: Some(timestamp(1_000)),
+            updated_at: Some(timestamp(2_000)),
+            last_user_message_at: Some(timestamp(1_500)),
+            last_assistant_message_at: Some(timestamp(1_800)),
+            cwd: Some("/tmp/project".to_string()),
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            context_usage: None,
+            supports_images: None,
+            transcript_freshness: None,
+            activity: None,
+            warnings: Vec::new(),
+            last_seen_at: timestamp(2_500),
+        };
+
+        let merged = merged_postgres_host_sessions(&live_hosts, vec![archived]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].location, "dev@mac");
+        assert!(merged[0].connected);
+        assert_eq!(merged[0].last_seen_at, Some(timestamp(5_000)));
+        assert_eq!(merged[0].sessions.len(), 1);
+        assert_eq!(merged[0].sessions[0].updated_at, timestamp(4_000));
+    }
+
+    #[test]
+    fn merged_postgres_host_sessions_keeps_connected_host_session_list_from_live_snapshot() {
+        let mut live_hosts = HashMap::new();
+        live_hosts.insert(
+            "dev@mac".to_string(),
+            HostRecord {
+                host: HostIdentity {
+                    location: "dev@mac".to_string(),
+                    auth: HostAuth::None,
+                },
+                sessions: vec![sample_active_session("session-live")],
+                connected: true,
+                last_seen_at: Some(timestamp(5_000)),
+            },
+        );
+
+        let archived_extra = postgres_backup::ArchivedSession {
+            host_location: "dev@mac".to_string(),
+            session_id: "session-archived".to_string(),
+            host_auth: HostAuth::None,
+            summary: Some("Archived session".to_string()),
+            created_at: Some(timestamp(1_000)),
+            updated_at: Some(timestamp(2_000)),
+            last_user_message_at: Some(timestamp(1_500)),
+            last_assistant_message_at: Some(timestamp(1_800)),
+            cwd: Some("/tmp/project".to_string()),
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            context_usage: None,
+            supports_images: None,
+            transcript_freshness: None,
+            activity: None,
+            warnings: Vec::new(),
+            last_seen_at: timestamp(2_500),
+        };
+
+        let merged = merged_postgres_host_sessions(&live_hosts, vec![archived_extra]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].sessions.len(), 1);
+        assert_eq!(merged[0].sessions[0].id, "session-live");
     }
 
     #[tokio::test]

@@ -30,10 +30,10 @@ The app stores its local SQLite database in the app documents directory.
 From the repo root:
 
 ```sh
-cargo run --manifest-path pimux-server/Cargo.toml -- server
+PIMUX_BACKUP_POSTGRES_URL=postgres://... cargo run --manifest-path pimux-server/Cargo.toml -- server
 ```
 
-That starts the local `pimux` server process. For broader usage, the Rust project also supports managed server and agent installation flows.
+That starts the local `pimux` server process. `PIMUX_BACKUP_POSTGRES_URL` is required because the iOS app now reads server-backed session data from Postgres. For broader usage, the Rust project also supports managed server and agent installation flows.
 
 See the server README for details:
 

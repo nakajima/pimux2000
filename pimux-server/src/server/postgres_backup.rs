@@ -9,8 +9,11 @@ use tracing::{info, warn};
 use crate::{
     host::{HostAuth, HostIdentity},
     message::{Message, MessageContentBlockKind, Role},
-    session::ActiveSession,
-    transcript::{SessionMessagesResponse, TranscriptFreshnessState, TranscriptSource},
+    session::{ActiveSession, SessionContextUsage},
+    transcript::{
+        SessionActivity, SessionMessagesResponse, TranscriptFreshness, TranscriptFreshnessState,
+        TranscriptSource,
+    },
 };
 
 use super::BoxError;
@@ -51,6 +54,8 @@ CREATE INDEX IF NOT EXISTS sessions_updated_at_idx
     ON sessions (updated_at DESC NULLS LAST);
 CREATE INDEX IF NOT EXISTS sessions_last_seen_at_idx
     ON sessions (last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS sessions_session_id_idx
+    ON sessions (session_id);
 
 CREATE TABLE IF NOT EXISTS messages (
     host_location TEXT NOT NULL,
@@ -136,6 +141,63 @@ struct SessionRow {
     last_seen_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ArchivedSession {
+    pub host_location: String,
+    pub session_id: String,
+    pub host_auth: HostAuth,
+    pub summary: Option<String>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub last_user_message_at: Option<DateTime<Utc>>,
+    pub last_assistant_message_at: Option<DateTime<Utc>>,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub context_usage: Option<SessionContextUsage>,
+    pub supports_images: Option<bool>,
+    pub transcript_freshness: Option<TranscriptFreshness>,
+    pub activity: Option<SessionActivity>,
+    pub warnings: Vec<String>,
+    pub last_seen_at: DateTime<Utc>,
+}
+
+impl ArchivedSession {
+    pub fn active_session(&self) -> Option<ActiveSession> {
+        Some(ActiveSession {
+            id: self.session_id.clone(),
+            summary: self.summary.clone()?,
+            created_at: self.created_at?,
+            updated_at: self.updated_at?,
+            last_user_message_at: self.last_user_message_at?,
+            last_assistant_message_at: self.last_assistant_message_at?,
+            cwd: self.cwd.clone()?,
+            model: self.model.clone()?,
+            context_usage: self.context_usage.clone(),
+            supports_images: self.supports_images,
+        })
+    }
+
+    pub fn transcript_response(&self, messages: Vec<Message>) -> SessionMessagesResponse {
+        SessionMessagesResponse {
+            session_id: self.session_id.clone(),
+            messages,
+            freshness: self
+                .transcript_freshness
+                .clone()
+                .unwrap_or(TranscriptFreshness {
+                    state: TranscriptFreshnessState::Persisted,
+                    source: TranscriptSource::File,
+                    as_of: self.last_seen_at,
+                }),
+            activity: self.activity.clone().unwrap_or(SessionActivity {
+                active: false,
+                attached: false,
+            }),
+            warnings: self.warnings.clone(),
+        }
+    }
+}
+
 pub async fn start_from_env() -> Result<Option<PostgresBackupHandle>, BoxError> {
     let Some(url) = postgres_url_from_env() else {
         return Ok(None);
@@ -150,6 +212,112 @@ pub async fn connect_from_env_required() -> Result<PostgresBackupStore, BoxError
     };
 
     PostgresBackupStore::connect(&url).await
+}
+
+pub async fn connect_read_client_from_env_required() -> Result<Client, BoxError> {
+    let Some(url) = postgres_url_from_env() else {
+        return Err(format!("{POSTGRES_BACKUP_URL_ENV} is not set").into());
+    };
+
+    connect_read_client(&url).await
+}
+
+pub async fn load_sessions(client: &Client) -> Result<Vec<ArchivedSession>, BoxError> {
+    let rows = client
+        .query(
+            concat!(
+                "SELECT host_location, session_id, host_auth, summary, created_at, updated_at, ",
+                "last_user_message_at, last_assistant_message_at, cwd, model, ",
+                "context_usage_used_tokens, context_usage_max_tokens, supports_images, ",
+                "transcript_freshness_state, transcript_freshness_source, transcript_freshness_as_of, ",
+                "activity_active, activity_attached, warnings_json, last_seen_at ",
+                "FROM sessions ",
+                "ORDER BY COALESCE(updated_at, last_seen_at) DESC, host_location ASC, session_id ASC"
+            ),
+            &[],
+        )
+        .await?;
+
+    Ok(rows.into_iter().map(map_archived_session_row).collect())
+}
+
+pub async fn load_session(
+    client: &Client,
+    host_location: &str,
+    session_id: &str,
+) -> Result<Option<ArchivedSession>, BoxError> {
+    let row = client
+        .query_opt(
+            concat!(
+                "SELECT host_location, session_id, host_auth, summary, created_at, updated_at, ",
+                "last_user_message_at, last_assistant_message_at, cwd, model, ",
+                "context_usage_used_tokens, context_usage_max_tokens, supports_images, ",
+                "transcript_freshness_state, transcript_freshness_source, transcript_freshness_as_of, ",
+                "activity_active, activity_attached, warnings_json, last_seen_at ",
+                "FROM sessions ",
+                "WHERE host_location = $1 AND session_id = $2"
+            ),
+            &[&host_location, &session_id],
+        )
+        .await?;
+
+    Ok(row.map(map_archived_session_row))
+}
+
+pub async fn load_sessions_by_session_id(
+    client: &Client,
+    session_id: &str,
+) -> Result<Vec<ArchivedSession>, BoxError> {
+    let rows = client
+        .query(
+            concat!(
+                "SELECT host_location, session_id, host_auth, summary, created_at, updated_at, ",
+                "last_user_message_at, last_assistant_message_at, cwd, model, ",
+                "context_usage_used_tokens, context_usage_max_tokens, supports_images, ",
+                "transcript_freshness_state, transcript_freshness_source, transcript_freshness_as_of, ",
+                "activity_active, activity_attached, warnings_json, last_seen_at ",
+                "FROM sessions ",
+                "WHERE session_id = $1 ",
+                "ORDER BY COALESCE(updated_at, last_seen_at) DESC, host_location ASC"
+            ),
+            &[&session_id],
+        )
+        .await?;
+
+    Ok(rows.into_iter().map(map_archived_session_row).collect())
+}
+
+pub async fn load_messages(
+    client: &Client,
+    host_location: &str,
+    session_id: &str,
+) -> Result<Vec<Message>, BoxError> {
+    let rows = client
+        .query(
+            concat!(
+                "SELECT message_id, created_at, role, body, tool_name, tool_call_id, message_json ",
+                "FROM messages ",
+                "WHERE host_location = $1 AND session_id = $2 ",
+                "ORDER BY created_at ASC, ordinal ASC"
+            ),
+            &[&host_location, &session_id],
+        )
+        .await?;
+
+    Ok(rows.into_iter().map(map_archived_message_row).collect())
+}
+
+pub async fn load_transcript(
+    client: &Client,
+    host_location: &str,
+    session_id: &str,
+) -> Result<Option<SessionMessagesResponse>, BoxError> {
+    let Some(session) = load_session(client, host_location, session_id).await? else {
+        return Ok(None);
+    };
+
+    let messages = load_messages(client, host_location, session_id).await?;
+    Ok(Some(session.transcript_response(messages)))
 }
 
 impl PostgresBackupHandle {
@@ -324,6 +492,101 @@ async fn connect_and_initialize(url: &str) -> Result<Client, BoxError> {
     Ok(client)
 }
 
+async fn connect_read_client(url: &str) -> Result<Client, BoxError> {
+    let (client, connection) = tokio_postgres::connect(url, NoTls).await?;
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            warn!(%error, "postgres read connection ended");
+        }
+    });
+    Ok(client)
+}
+
+fn map_archived_session_row(row: tokio_postgres::Row) -> ArchivedSession {
+    let host_location = row.get("host_location");
+    let session_id = row.get("session_id");
+    let last_seen_at = row.get("last_seen_at");
+    let context_usage_used_tokens = row
+        .get::<_, Option<i64>>("context_usage_used_tokens")
+        .and_then(nonnegative_i64_to_u64);
+    let context_usage_max_tokens = row
+        .get::<_, Option<i64>>("context_usage_max_tokens")
+        .and_then(nonnegative_i64_to_u64);
+    let transcript_freshness_state = row.get::<_, Option<String>>("transcript_freshness_state");
+    let transcript_freshness_source = row.get::<_, Option<String>>("transcript_freshness_source");
+    let transcript_freshness_as_of: Option<DateTime<Utc>> = row.get("transcript_freshness_as_of");
+    let activity_active: Option<bool> = row.get("activity_active");
+    let activity_attached: Option<bool> = row.get("activity_attached");
+    let warnings = row
+        .get::<_, Option<Value>>("warnings_json")
+        .and_then(|value| serde_json::from_value::<Vec<String>>(value).ok())
+        .unwrap_or_default();
+
+    ArchivedSession {
+        host_location,
+        session_id,
+        host_auth: host_auth_from_raw(&row.get::<_, String>("host_auth")),
+        summary: row.get("summary"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        last_user_message_at: row.get("last_user_message_at"),
+        last_assistant_message_at: row.get("last_assistant_message_at"),
+        cwd: row.get("cwd"),
+        model: row.get("model"),
+        context_usage: if context_usage_used_tokens.is_some() || context_usage_max_tokens.is_some()
+        {
+            Some(SessionContextUsage {
+                used_tokens: context_usage_used_tokens,
+                max_tokens: context_usage_max_tokens,
+            })
+        } else {
+            None
+        },
+        supports_images: row.get("supports_images"),
+        transcript_freshness: match (
+            transcript_freshness_state
+                .as_deref()
+                .and_then(transcript_freshness_state_from_raw),
+            transcript_freshness_source
+                .as_deref()
+                .and_then(transcript_freshness_source_from_raw),
+        ) {
+            (Some(state), Some(source)) => Some(TranscriptFreshness {
+                state,
+                source,
+                as_of: transcript_freshness_as_of.unwrap_or(last_seen_at),
+            }),
+            _ => None,
+        },
+        activity: if activity_active.is_some() || activity_attached.is_some() {
+            Some(SessionActivity {
+                active: activity_active.unwrap_or(false),
+                attached: activity_attached.unwrap_or(false),
+            })
+        } else {
+            None
+        },
+        warnings,
+        last_seen_at,
+    }
+}
+
+fn map_archived_message_row(row: tokio_postgres::Row) -> Message {
+    let message_json = row.get::<_, Value>("message_json");
+    match serde_json::from_value::<Message>(message_json) {
+        Ok(message) => message,
+        Err(_) => Message {
+            created_at: row.get("created_at"),
+            role: Role::from_raw(&row.get::<_, String>("role")),
+            body: row.get("body"),
+            tool_name: row.get("tool_name"),
+            tool_call_id: row.get("tool_call_id"),
+            blocks: Vec::new(),
+            message_id: row.get("message_id"),
+        },
+    }
+}
+
 async fn upsert_session_row(client: &impl GenericClient, row: &SessionRow) -> Result<(), BoxError> {
     client
         .execute(
@@ -490,6 +753,35 @@ fn host_auth_name(auth: HostAuth) -> &'static str {
         HostAuth::None => "none",
         HostAuth::Pk => "pk",
     }
+}
+
+fn host_auth_from_raw(value: &str) -> HostAuth {
+    match value {
+        "pk" => HostAuth::Pk,
+        _ => HostAuth::None,
+    }
+}
+
+fn transcript_freshness_state_from_raw(value: &str) -> Option<TranscriptFreshnessState> {
+    match value {
+        "live" => Some(TranscriptFreshnessState::Live),
+        "persisted" => Some(TranscriptFreshnessState::Persisted),
+        "liveUnknown" => Some(TranscriptFreshnessState::LiveUnknown),
+        _ => None,
+    }
+}
+
+fn transcript_freshness_source_from_raw(value: &str) -> Option<TranscriptSource> {
+    match value {
+        "extension" => Some(TranscriptSource::Extension),
+        "helper" => Some(TranscriptSource::Helper),
+        "file" => Some(TranscriptSource::File),
+        _ => None,
+    }
+}
+
+fn nonnegative_i64_to_u64(value: i64) -> Option<u64> {
+    u64::try_from(value).ok()
 }
 
 fn sanitize_postgres_text(value: &str) -> String {

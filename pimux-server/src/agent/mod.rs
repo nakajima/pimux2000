@@ -169,7 +169,11 @@ pub fn normalize_server_url(server_url: &str) -> Result<NormalizedServerUrl, Box
 
 pub async fn list(config: ListConfig) -> Result<(), BoxError> {
     let pi_agent_dir = discovery::resolve_pi_agent_dir(config.pi_agent_dir)?;
-    eprintln!("discovering sessions in {}...", pi_agent_dir.display());
+    let session_roots = discovery::session_roots(&pi_agent_dir);
+    eprintln!(
+        "discovering sessions in {}...",
+        format_paths(&session_roots)
+    );
 
     let summary_config = summarizer::Config {
         model: resolve_summary_model_or_default(&pi_agent_dir, config.summary_model.as_deref()),
@@ -247,7 +251,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     crate::self_update::spawn_auto_update_task();
 
     let pi_agent_dir = discovery::resolve_pi_agent_dir(config.pi_agent_dir)?;
-    let session_root = discovery::session_root(&pi_agent_dir);
+    let session_roots = discovery::session_roots(&pi_agent_dir);
     let summary_config = summarizer::Config {
         model: resolve_summary_model_or_default(&pi_agent_dir, config.summary_model.as_deref()),
         pi_agent_dir: pi_agent_dir.clone(),
@@ -306,14 +310,14 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
 
     info!(
         "agent watching {} and connecting to {} as {}",
-        session_root.display(),
+        format_paths(&session_roots),
         websocket_url,
         host.location
     );
 
     let (tx, mut rx) = unbounded_channel();
     let (live_updates_tx, mut live_updates_rx) = unbounded_channel::<live::LiveUpdate>();
-    let _watcher = create_watcher(&session_root, tx)?;
+    let _watcher = create_watcher(&session_roots, tx)?;
     let _live_updates_tx_guard = match live::start_listener(
         live_store.clone(),
         live_socket_path.clone(),
@@ -781,10 +785,12 @@ async fn handle_server_message(
         ServerToAgentMessage::RetainSessionHelper { session_id } => {
             let discovered_session = find_discovered_session(pi_agent_dir, &session_id)
                 .map_err(std::io::Error::other)?;
-            helper_store
-                .retain_session(&discovered_session, pi_agent_dir, live_store)
-                .await
-                .map_err(std::io::Error::other)?;
+            if discovered_session.source.supports_pi_control() {
+                helper_store
+                    .retain_session(&discovered_session, pi_agent_dir, live_store)
+                    .await
+                    .map_err(std::io::Error::other)?;
+            }
         }
         ServerToAgentMessage::ReleaseSessionHelper { session_id } => {
             helper_store.release_session(&session_id).await;
@@ -1007,6 +1013,10 @@ async fn handle_send_message(
         return Err(format!("session {} was not found", session_id));
     };
 
+    if !discovered_session.source.supports_pi_control() {
+        return Err(mi_sessions_unsupported("sending messages"));
+    }
+
     send::send_message_to_session(
         discovered_session,
         body,
@@ -1042,14 +1052,8 @@ async fn handle_pimux_resummarize_command(
     live_store: &live::LiveSessionStoreHandle,
     live_updates_tx: &tokio::sync::mpsc::UnboundedSender<live::LiveUpdate>,
 ) -> Result<(), String> {
-    let discovered_sessions =
-        discovery::discover_sessions(pi_agent_dir).map_err(|error| error.to_string())?;
-    let Some(discovered_session) = discovered_sessions
-        .into_iter()
-        .find(|session| session.id == session_id)
-    else {
-        return Err(format!("session {} was not found", session_id));
-    };
+    let discovered_session =
+        find_pi_controllable_session(pi_agent_dir, session_id, "re-summarizing session names")?;
 
     let summary = summarizer::resummarize_session(&discovered_session, summary_config).await;
     let rename_command = format!("/name {summary}");
@@ -1070,7 +1074,8 @@ async fn resummarize_session_name_headless(
     pi_agent_dir: &Path,
     summary_config: &summarizer::Config,
 ) -> Result<(), String> {
-    let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+    let discovered_session =
+        find_pi_controllable_session(pi_agent_dir, session_id, "re-summarizing session names")?;
     let summary = summarizer::resummarize_session(&discovered_session, summary_config).await;
     send::set_session_name(discovered_session, summary, pi_agent_dir.to_path_buf()).await
 }
@@ -1095,7 +1100,8 @@ async fn handle_builtin_command(
                 return Ok(SessionBuiltinCommandResponse::default());
             }
 
-            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            let discovered_session =
+                find_pi_controllable_session(pi_agent_dir, session_id, "builtin commands")?;
             send::set_session_name(discovered_session, name, pi_agent_dir.to_path_buf()).await?;
             Ok(SessionBuiltinCommandResponse::default())
         }
@@ -1110,7 +1116,8 @@ async fn handle_builtin_command(
                 return Ok(SessionBuiltinCommandResponse::default());
             }
 
-            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            let discovered_session =
+                find_pi_controllable_session(pi_agent_dir, session_id, "builtin commands")?;
             send::compact_session(
                 discovered_session,
                 custom_instructions,
@@ -1139,7 +1146,8 @@ async fn handle_builtin_command(
             Err("reload requires an attached live pi session".to_string())
         }
         SessionBuiltinCommandRequest::NewSession => {
-            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            let discovered_session =
+                find_pi_controllable_session(pi_agent_dir, session_id, "builtin commands")?;
             let state = send::new_session(discovered_session, pi_agent_dir.to_path_buf()).await?;
             publish_persisted_snapshot_for_session(
                 &state.session_id,
@@ -1153,7 +1161,8 @@ async fn handle_builtin_command(
             })
         }
         SessionBuiltinCommandRequest::GetForkMessages => {
-            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            let discovered_session =
+                find_pi_controllable_session(pi_agent_dir, session_id, "builtin commands")?;
             let messages = send::get_fork_messages(discovered_session, pi_agent_dir.to_path_buf())
                 .await?
                 .into_iter()
@@ -1173,7 +1182,8 @@ async fn handle_builtin_command(
                 return Err("fork entry id must not be empty".to_string());
             }
 
-            let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+            let discovered_session =
+                find_pi_controllable_session(pi_agent_dir, session_id, "builtin commands")?;
             let state =
                 send::fork_session(discovered_session, entry_id, pi_agent_dir.to_path_buf())
                     .await?;
@@ -1201,6 +1211,22 @@ fn find_discovered_session(
         .into_iter()
         .find(|session| session.id == session_id)
         .ok_or_else(|| format!("session {} was not found", session_id))
+}
+
+fn find_pi_controllable_session(
+    pi_agent_dir: &Path,
+    session_id: &str,
+    action: &str,
+) -> Result<discovery::DiscoveredSession, String> {
+    let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
+    if !discovered_session.source.supports_pi_control() {
+        return Err(mi_sessions_unsupported(action));
+    }
+    Ok(discovered_session)
+}
+
+fn mi_sessions_unsupported(action: &str) -> String {
+    format!("{action} for mi sessions is not supported yet")
 }
 
 fn trimmed_non_empty(value: String) -> Option<String> {
@@ -1360,28 +1386,49 @@ fn detect_host_location() -> Result<String, BoxError> {
     Ok(normalize_host_location(&format!("{user}@{hostname}")))
 }
 
+fn format_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn create_watcher(
-    session_root: &Path,
+    session_roots: &[PathBuf],
     tx: tokio::sync::mpsc::UnboundedSender<()>,
 ) -> Result<RecommendedWatcher, BoxError> {
-    let watched_path = watch_path_for_session_root(session_root)?;
-    let session_root = session_root.to_path_buf();
+    let watched_paths = watch_paths_for_session_roots(session_roots)?;
+    let session_roots = session_roots.to_vec();
 
     let mut watcher =
         notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
             Ok(event) => {
-                if should_refresh_for_event(&event, &session_root) {
+                if should_refresh_for_event(&event, &session_roots) {
                     let _ = tx.send(());
                 }
             }
             Err(error) => warn!(%error, "watch error"),
         })?;
 
-    watcher.watch(&watched_path, RecursiveMode::Recursive)?;
+    for watched_path in watched_paths {
+        watcher.watch(&watched_path, RecursiveMode::Recursive)?;
+    }
     Ok(watcher)
 }
 
-fn should_refresh_for_event(event: &notify::Event, session_root: &Path) -> bool {
+fn watch_paths_for_session_roots(session_roots: &[PathBuf]) -> Result<Vec<PathBuf>, BoxError> {
+    let mut watched_paths = Vec::new();
+    for session_root in session_roots {
+        let watched_path = watch_path_for_session_root(session_root)?;
+        if !watched_paths.contains(&watched_path) {
+            watched_paths.push(watched_path);
+        }
+    }
+    Ok(watched_paths)
+}
+
+fn should_refresh_for_event(event: &notify::Event, session_roots: &[PathBuf]) -> bool {
     if event.need_rescan() {
         return true;
     }
@@ -1391,10 +1438,11 @@ fn should_refresh_for_event(event: &notify::Event, session_root: &Path) -> bool 
     }
 
     event.paths.is_empty()
-        || event
-            .paths
-            .iter()
-            .any(|path| path.starts_with(session_root))
+        || event.paths.iter().any(|path| {
+            session_roots
+                .iter()
+                .any(|session_root| path.starts_with(session_root))
+        })
 }
 
 fn watch_path_for_session_root(session_root: &Path) -> Result<PathBuf, BoxError> {
@@ -1488,7 +1536,7 @@ mod tests {
         let event = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Read))
             .add_path(session_root.join("session.jsonl"));
 
-        assert!(!should_refresh_for_event(&event, &session_root));
+        assert!(!should_refresh_for_event(&event, &[session_root]));
     }
 
     #[test]
@@ -1499,7 +1547,7 @@ mod tests {
         )))
         .add_path(session_root.join("session.jsonl"));
 
-        assert!(should_refresh_for_event(&event, &session_root));
+        assert!(should_refresh_for_event(&event, &[session_root]));
     }
 
     #[test]
@@ -1510,7 +1558,7 @@ mod tests {
         )))
         .add_path(PathBuf::from("/tmp/elsewhere/session.jsonl"));
 
-        assert!(!should_refresh_for_event(&event, &session_root));
+        assert!(!should_refresh_for_event(&event, &[session_root]));
     }
 
     #[test]
@@ -1652,6 +1700,7 @@ mod tests {
         updated_at: chrono::DateTime<Utc>,
     ) -> discovery::DiscoveredSession {
         discovery::DiscoveredSession {
+            source: discovery::SessionSource::Pi,
             session_file: PathBuf::from(format!("/tmp/{id}.jsonl")),
             fingerprint: discovery::SessionFingerprint {
                 file_size: 1,

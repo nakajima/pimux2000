@@ -25,8 +25,28 @@ const MAX_TRANSCRIPT_ENTRY_CHARS: usize = 400;
 const MODEL_CAPABILITIES_SUCCESS_TTL: Duration = Duration::from_secs(15 * 60);
 const MODEL_CAPABILITIES_FAILURE_TTL: Duration = Duration::from_secs(30);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSource {
+    Pi,
+    Mi,
+}
+
+impl SessionSource {
+    pub fn supports_pi_control(self) -> bool {
+        matches!(self, Self::Pi)
+    }
+
+    fn public_id(self, native_id: &str) -> String {
+        match self {
+            Self::Pi => native_id.to_string(),
+            Self::Mi => format!("mi:{native_id}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DiscoveredSession {
+    pub source: SessionSource,
     pub session_file: PathBuf,
     pub fingerprint: SessionFingerprint,
     pub id: String,
@@ -84,37 +104,68 @@ pub fn resolve_pi_agent_dir(override_dir: Option<PathBuf>) -> Result<PathBuf, Bo
     Ok(PathBuf::from(home).join(".pi").join("agent"))
 }
 
+pub fn maybe_mi_agent_dir() -> Option<PathBuf> {
+    if let Ok(path) = env::var("MI_CODING_AGENT_DIR") {
+        return Some(PathBuf::from(path));
+    }
+
+    env::var("HOME")
+        .ok()
+        .map(|home| PathBuf::from(home).join(".mi"))
+}
+
 pub fn session_root(pi_agent_dir: &Path) -> PathBuf {
     pi_agent_dir.join("sessions")
 }
 
-pub fn discover_sessions(pi_agent_dir: &Path) -> Result<Vec<DiscoveredSession>, BoxError> {
-    let session_root = session_root(pi_agent_dir);
-    if !session_root.exists() {
-        return Ok(Vec::new());
+pub fn session_roots(pi_agent_dir: &Path) -> Vec<PathBuf> {
+    session_roots_with_sources(pi_agent_dir)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
+}
+
+fn session_roots_with_sources(pi_agent_dir: &Path) -> Vec<(SessionSource, PathBuf)> {
+    let mut roots = vec![(SessionSource::Pi, session_root(pi_agent_dir))];
+
+    if let Some(mi_agent_dir) = maybe_mi_agent_dir() {
+        let mi_root = mi_agent_dir.join("sessions");
+        if !roots.iter().any(|(_, existing)| *existing == mi_root) {
+            roots.push((SessionSource::Mi, mi_root));
+        }
     }
 
+    roots
+}
+
+pub fn discover_sessions(pi_agent_dir: &Path) -> Result<Vec<DiscoveredSession>, BoxError> {
     let mut sessions = Vec::new();
 
-    for entry in WalkDir::new(&session_root)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        if !entry.file_type().is_file() {
+    for (source, session_root) in session_roots_with_sources(pi_agent_dir) {
+        if !session_root.exists() {
             continue;
         }
 
-        if entry.path().extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
-            continue;
-        }
+        for entry in WalkDir::new(&session_root)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
 
-        match parse_session_file(entry.path()) {
-            Ok(session) => sessions.push(session),
-            Err(error) => warn!(
-                path = %entry.path().display(),
-                %error,
-                "skipping unreadable session file"
-            ),
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            match parse_session_file(entry.path(), source) {
+                Ok(session) => sessions.push(session),
+                Err(error) => warn!(
+                    path = %entry.path().display(),
+                    %error,
+                    "skipping unreadable session file"
+                ),
+            }
         }
     }
 
@@ -128,7 +179,7 @@ pub fn discover_sessions(pi_agent_dir: &Path) -> Result<Vec<DiscoveredSession>, 
     Ok(sessions)
 }
 
-fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
+fn parse_session_file(path: &Path, source: SessionSource) -> Result<DiscoveredSession, BoxError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let metadata = fs::metadata(path)?;
@@ -226,21 +277,34 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
         .unwrap_or(header.created_at);
     let summary_input = transcript_entries.into_summary_input();
     let model = model.unwrap_or_else(|| "unknown".to_string());
-    let context_usage = match (
-        last_assistant_usage_total_tokens,
-        model_context_window_tokens(&model),
-    ) {
-        (None, None) => None,
-        (used_tokens, max_tokens) => Some(SessionContextUsage {
-            used_tokens,
-            max_tokens,
-        }),
+    let context_usage = match source {
+        SessionSource::Pi => match (
+            last_assistant_usage_total_tokens,
+            model_context_window_tokens(&model),
+        ) {
+            (None, None) => None,
+            (used_tokens, max_tokens) => Some(SessionContextUsage {
+                used_tokens,
+                max_tokens,
+            }),
+        },
+        SessionSource::Mi => {
+            last_assistant_usage_total_tokens.map(|used_tokens| SessionContextUsage {
+                used_tokens: Some(used_tokens),
+                max_tokens: None,
+            })
+        }
+    };
+    let supports_images = match source {
+        SessionSource::Pi => model_supports_images(&model),
+        SessionSource::Mi => None,
     };
 
     Ok(DiscoveredSession {
+        source,
         session_file: path.to_path_buf(),
         fingerprint: session_fingerprint(&metadata),
-        id: header.id,
+        id: source.public_id(&header.id),
         explicit_summary: session_name,
         heuristic_summary,
         summary_input,
@@ -249,9 +313,9 @@ fn parse_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
         last_user_message_at: last_user_message_at.unwrap_or(header.created_at),
         last_assistant_message_at: last_assistant_message_at.unwrap_or(header.created_at),
         cwd: header.cwd,
-        model: model.clone(),
+        model,
         context_usage,
-        supports_images: model_supports_images(&model),
+        supports_images,
     })
 }
 
@@ -741,5 +805,44 @@ mod tests {
         assert_eq!(cache.capabilities, capabilities);
         assert!(!cache.should_refresh(now + Duration::from_secs(30)));
         assert!(cache.should_refresh(now + MODEL_CAPABILITIES_SUCCESS_TTL));
+    }
+
+    #[test]
+    fn mi_sessions_use_prefixed_public_ids_and_persisted_usage_only() {
+        let root = std::env::temp_dir().join(format!(
+            "pimux-discovery-mi-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        fs::write(
+            &path,
+            [
+                r#"{"type":"session","version":3,"id":"session-1","timestamp":"2026-04-08T00:00:00.000Z","cwd":"/tmp/project"}"#,
+                r#"{"type":"message","id":"00000001","parentId":null,"timestamp":"2026-04-08T00:00:01.000Z","message":{"role":"user","content":"Hello","timestamp":1712534401000}}"#,
+                r#"{"type":"message","id":"00000002","parentId":"00000001","timestamp":"2026-04-08T00:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Hi!"}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-20250514","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":15},"stopReason":"stop","timestamp":1712534402000}}"#,
+                r#"{"type":"session_info","id":"00000003","parentId":"00000002","timestamp":"2026-04-08T00:00:03.000Z","name":"Scaffold Session"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let session = parse_session_file(&path, SessionSource::Mi).unwrap();
+        assert_eq!(session.id, "mi:session-1");
+        assert_eq!(
+            session.explicit_summary.as_deref(),
+            Some("Scaffold Session")
+        );
+        assert_eq!(
+            session.context_usage,
+            Some(SessionContextUsage {
+                used_tokens: Some(15),
+                max_tokens: None,
+            })
+        );
+        assert_eq!(session.supports_images, None);
+
+        let _ = fs::remove_dir_all(root);
     }
 }

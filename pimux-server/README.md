@@ -13,7 +13,7 @@ For the iOS app, the important part is the HTTP API documented below.
 Run the server:
 
 ```sh
-pimux server
+PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux server
 ```
 
 For normal background use, install the server as a per-user service:
@@ -612,8 +612,11 @@ Behavior:
 Runs the server in the foreground.
 
 ```sh
-pimux server
+PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux server
 ```
+
+`PIMUX_BACKUP_POSTGRES_URL` is required.
+If it is missing, the server exits at startup because the iOS app now reads its server-backed session data from Postgres.
 
 The server listens on port `3000` by default.
 You can still override that with the `PORT` environment variable.
@@ -650,13 +653,14 @@ Default host-registry path:
 - Linux: `${XDG_STATE_HOME:-~/.local/state}/pimux/expected-hosts.json`
 - override with `PIMUX_SERVER_STATE_PATH`
 
-Optional Postgres backup:
-- set `PIMUX_BACKUP_POSTGRES_URL` to enable it
-- when enabled, the server creates `sessions` and `messages` tables automatically
+Required Postgres archive:
+- set `PIMUX_BACKUP_POSTGRES_URL` before starting the server
+- the server creates `sessions` and `messages` tables automatically
+- the iOS app's read path now uses this Postgres-backed archive, with live in-memory state layered on top when fresher data is available
 - `sessions` stores best-effort session metadata the server learns from host snapshots and transcript updates
 - `messages` stores one row per transcript message, upserted from transcript snapshots the server receives from agents
 - if the initial Postgres connection or schema setup fails, server startup fails fast
-- if Postgres disconnects after startup, the server keeps retrying and resumes writes when it reconnects
+- if Postgres disconnects after startup, app-facing archive reads fail until Postgres is reachable again, while the write worker keeps retrying in the background
 
 ### `pimux server status`
 
@@ -693,12 +697,12 @@ Behavior:
 - the installed service runs the equivalent of:
 
 ```sh
-pimux server
+PIMUX_BACKUP_POSTGRES_URL=postgres://... pimux server
 ```
 
 Notes:
 - reinstalling updates the service definition and reloads/restarts it
-- if `PIMUX_BACKUP_POSTGRES_URL` is set in your environment when you run `pimux server install`, that value is persisted into the installed service definition too
+- `PIMUX_BACKUP_POSTGRES_URL` must be set in your environment when you run `pimux server install`; that value is persisted into the installed service definition
 - on Linux, a `systemd --user` service may require user-session/linger setup depending on how that host is managed; this first implementation is per-user only
 
 ### `pimux server uninstall`

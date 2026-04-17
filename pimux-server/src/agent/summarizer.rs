@@ -585,7 +585,9 @@ fn resolve_summary_without_llm(
         );
     }
 
-    if discovered_session.summary_input.is_none() {
+    if !discovered_session.source.supports_pi_control()
+        || discovered_session.summary_input.is_none()
+    {
         return Some((
             discovered_session.heuristic_summary.clone(),
             SummarySource::Heuristic,

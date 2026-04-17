@@ -457,7 +457,8 @@ fn group_messages_by_project(messages: Vec<ArchivedMessage>) -> Vec<ProjectDayDa
     let mut projects = Vec::<ProjectDayData>::new();
 
     for message in messages {
-        let project_key = report_project_key(message.project_cwd.as_deref(), &message.host_location);
+        let project_key =
+            report_project_key(message.project_cwd.as_deref(), &message.host_location);
         let index = match project_indexes.get(&project_key) {
             Some(index) => *index,
             None => {
@@ -1482,7 +1483,10 @@ fn render_day_report(report_date: NaiveDate, projects: &[RenderedProjectReport])
             lines.push(String::new());
         }
 
-        lines.push(format!("## {}", markdown_heading_text(&project.project_key)));
+        lines.push(format!(
+            "## {}",
+            markdown_heading_text(&project.project_key)
+        ));
         lines.push(String::new());
 
         if !project.worked_on.is_empty() {
