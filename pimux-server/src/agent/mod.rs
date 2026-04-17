@@ -9,6 +9,7 @@ mod summarizer;
 mod transcript;
 
 use std::{
+    collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -341,6 +342,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
     let mut last_report: Option<ReportPayload> = None;
     let mut summary_cache = summarizer::SummaryCache::load(&pi_agent_dir);
     let mut last_full_summary_at: Option<Instant> = None;
+    let mut persisted_transcript_fingerprints = HashMap::new();
 
     if let Err(error) = refresh_host_snapshot(
         &pi_agent_dir,
@@ -350,6 +352,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
         &mut summary_cache,
         &mut last_report,
         &mut last_full_summary_at,
+        &mut persisted_transcript_fingerprints,
         false,
         false,
         &channel_tx,
@@ -383,6 +386,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                             &mut summary_cache,
                             &mut last_report,
                             &mut last_full_summary_at,
+                            &mut persisted_transcript_fingerprints,
                             &channel_tx,
                         ).await {
                             error!(%error, "failed to publish current state after connect");
@@ -465,6 +469,7 @@ pub async fn start(config: Config) -> Result<(), BoxError> {
                     &mut summary_cache,
                     &mut last_report,
                     &mut last_full_summary_at,
+                    &mut persisted_transcript_fingerprints,
                     connected,
                     false,
                     &channel_tx,
@@ -486,6 +491,7 @@ async fn send_current_state(
     summary_cache: &mut summarizer::SummaryCache,
     last_report: &mut Option<ReportPayload>,
     last_full_summary_at: &mut Option<Instant>,
+    persisted_transcript_fingerprints: &mut HashMap<String, discovery::SessionFingerprint>,
     channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
 ) -> Result<(), BoxError> {
     refresh_host_snapshot(
@@ -496,6 +502,7 @@ async fn send_current_state(
         summary_cache,
         last_report,
         last_full_summary_at,
+        persisted_transcript_fingerprints,
         true,
         true,
         channel_tx,
@@ -544,21 +551,23 @@ async fn refresh_host_snapshot(
     summary_cache: &mut summarizer::SummaryCache,
     last_report: &mut Option<ReportPayload>,
     last_full_summary_at: &mut Option<Instant>,
+    persisted_transcript_fingerprints: &mut HashMap<String, discovery::SessionFingerprint>,
     publish: bool,
     force_send: bool,
     channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
 ) -> Result<(), BoxError> {
     let discovered_sessions = discovery::discover_sessions(pi_agent_dir)?;
+    let sessions_for_summary = discovered_sessions.clone();
     let needs_full_summary = last_full_summary_at
         .map(|t| t.elapsed() >= SUMMARY_REFRESH_INTERVAL)
         .unwrap_or(true);
     let active_sessions = if needs_full_summary {
         let sessions =
-            summarizer::apply_summaries(discovered_sessions, summary_config, summary_cache).await;
+            summarizer::apply_summaries(sessions_for_summary, summary_config, summary_cache).await;
         *last_full_summary_at = Some(Instant::now());
         sessions
     } else {
-        summarizer::apply_summaries_cached_only(discovered_sessions, summary_cache)
+        summarizer::apply_summaries_cached_only(sessions_for_summary, summary_cache)
     };
     let active_sessions =
         merge_live_sessions(active_sessions, live_store.all_listed_sessions().await);
@@ -579,6 +588,52 @@ async fn refresh_host_snapshot(
         info!("reported {} sessions", report.active_sessions.len());
     }
 
+    if publish {
+        publish_persisted_transcript_updates(
+            &discovered_sessions,
+            persisted_transcript_fingerprints,
+            force_send,
+            channel_tx,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn publish_persisted_transcript_updates(
+    discovered_sessions: &[discovery::DiscoveredSession],
+    persisted_transcript_fingerprints: &mut HashMap<String, discovery::SessionFingerprint>,
+    force_send: bool,
+    channel_tx: &tokio::sync::mpsc::UnboundedSender<AgentToServerMessage>,
+) -> Result<(), BoxError> {
+    let mut current_persisted_ids = Vec::new();
+
+    for discovered_session in discovered_sessions {
+        if discovered_session.source.supports_pi_control() {
+            continue;
+        }
+
+        current_persisted_ids.push(discovered_session.id.clone());
+        let should_send = force_send
+            || persisted_transcript_fingerprints.get(&discovered_session.id)
+                != Some(&discovered_session.fingerprint);
+        if !should_send {
+            continue;
+        }
+
+        let transcript = transcript::build_persisted_snapshot(discovered_session)?;
+        let _ = channel_tx.send(AgentToServerMessage::LiveSessionUpdate {
+            session: session_for_transport(transcript),
+            active_session: None,
+        });
+        persisted_transcript_fingerprints.insert(
+            discovered_session.id.clone(),
+            discovered_session.fingerprint.clone(),
+        );
+    }
+
+    persisted_transcript_fingerprints
+        .retain(|session_id, _| current_persisted_ids.contains(session_id));
     Ok(())
 }
 
@@ -586,8 +641,6 @@ fn merge_live_sessions(
     sessions: Vec<crate::session::ActiveSession>,
     live_sessions: Vec<crate::session::ActiveSession>,
 ) -> Vec<crate::session::ActiveSession> {
-    use std::collections::HashMap;
-
     let mut sessions_by_id = sessions
         .into_iter()
         .map(|session| (session.id.clone(), session))
@@ -1471,7 +1524,10 @@ async fn debounce_changes(rx: &mut UnboundedReceiver<()>) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
+    use std::{
+        collections::HashMap,
+        sync::{Mutex, OnceLock},
+    };
 
     use chrono::{Duration as ChronoDuration, Local, Utc};
 
@@ -1578,6 +1634,71 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "today");
+    }
+
+    #[test]
+    fn publishes_changed_persisted_transcripts_for_mi_sessions() {
+        let base = temp_test_dir("mi-persisted-sync");
+        let session_file = base.join("mi-session.jsonl");
+        fs::write(
+            &session_file,
+            [
+                r#"{"type":"session","version":3,"id":"session-1","timestamp":"2026-04-08T00:00:00.000Z","cwd":"/tmp/project"}"#,
+                r#"{"type":"message","id":"00000001","parentId":null,"timestamp":"2026-04-08T00:00:01.000Z","message":{"role":"user","content":"Hello","timestamp":1712534401000}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let discovered_session = discovery::DiscoveredSession {
+            source: discovery::SessionSource::Mi,
+            session_file,
+            fingerprint: discovery::SessionFingerprint {
+                file_size: 10,
+                modified_at_millis: 20,
+            },
+            id: "mi:session-1".to_string(),
+            explicit_summary: Some("Test session".to_string()),
+            heuristic_summary: "Hello".to_string(),
+            summary_input: Some("User: Hello".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_user_message_at: Utc::now(),
+            last_assistant_message_at: Utc::now(),
+            cwd: "/tmp/project".to_string(),
+            model: "unknown".to_string(),
+            context_usage: None,
+            supports_images: None,
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut fingerprints = HashMap::new();
+        publish_persisted_transcript_updates(
+            &[discovered_session.clone()],
+            &mut fingerprints,
+            false,
+            &tx,
+        )
+        .unwrap();
+
+        let update = rx.try_recv().expect("expected mi transcript update");
+        match update {
+            AgentToServerMessage::LiveSessionUpdate {
+                session,
+                active_session,
+            } => {
+                assert_eq!(session.session_id, discovered_session.id);
+                assert!(active_session.is_none());
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        assert_eq!(
+            fingerprints.get(&discovered_session.id),
+            Some(&discovered_session.fingerprint)
+        );
+
+        let _ = fs::remove_dir_all(base);
     }
 
     #[test]
