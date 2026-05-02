@@ -36,6 +36,7 @@ const MAX_ACCOMPLISHMENTS: usize = 5;
 const MAX_EXCERPTS_PER_ACCOMPLISHMENT: usize = 2;
 const MAX_MISS_CANDIDATES: usize = 10;
 const MAX_LLM_MISSES: usize = 5;
+const MAX_PROMPT_LESSONS: usize = 5;
 const MAX_EVIDENCE_LINES_PER_MISS: usize = 3;
 const MAX_CORRECTION_WINDOW_GAP_MINUTES: i64 = 120;
 const MAX_FOOTNOTE_CHARS: usize = 160;
@@ -138,6 +139,8 @@ struct ProjectSummaryResponse {
     accomplishments: Vec<ProjectSummaryAccomplishment>,
     #[serde(default, rename = "llmMisses")]
     llm_misses: Vec<ProjectSummaryMiss>,
+    #[serde(default, rename = "promptLessons")]
+    prompt_lessons: Vec<ProjectSummaryPromptLesson>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -152,6 +155,14 @@ struct ProjectSummaryAccomplishment {
 struct ProjectSummaryMiss {
     #[serde(default)]
     summary: String,
+    #[serde(default, rename = "missIds")]
+    miss_ids: Vec<String>,
+    #[serde(default, rename = "excerptIds")]
+    excerpt_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ProjectSummaryPromptLesson {
     #[serde(default)]
     lesson: String,
     #[serde(default, rename = "missIds")]
@@ -166,6 +177,7 @@ struct RenderedProjectReport {
     worked_on: Vec<String>,
     accomplishments: Vec<RenderedAccomplishment>,
     llm_misses: Vec<RenderedMiss>,
+    prompt_lessons: Vec<RenderedPromptLesson>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,7 +189,12 @@ struct RenderedAccomplishment {
 #[derive(Debug, Clone)]
 struct RenderedMiss {
     summary: String,
-    lesson: Option<String>,
+    evidence_lines: Vec<FootnoteEvidence>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedPromptLesson {
+    lesson: String,
     evidence_lines: Vec<FootnoteEvidence>,
 }
 
@@ -1083,7 +1100,7 @@ fn build_project_summary_prompt(
             "- topic = issue/request/workstream context, usually best for Worked on\n",
             "- outcome = completed change, verified result, or concrete delivered decision, best for Accomplished\n",
             "- correction = user pushback or correction, usually not an accomplishment by itself\n\n",
-            "Potential LLM miss windows from that day (assistant statement followed by user correction):\n",
+            "Potential LLM miss and prompt lesson evidence from that day (assistant statement followed by user correction):\n",
             "{miss_lines}\n\n",
             "Return ONLY valid JSON in this exact shape:\n",
             "{{\n",
@@ -1092,13 +1109,16 @@ fn build_project_summary_prompt(
             "    {{ \"summary\": \"...\", \"excerptIds\": [\"E1\", \"E4\"] }}\n",
             "  ],\n",
             "  \"llmMisses\": [\n",
-            "    {{ \"summary\": \"...\", \"lesson\": \"...\", \"missIds\": [\"M1\"], \"excerptIds\": [\"E2\"] }}\n",
+            "    {{ \"summary\": \"...\", \"missIds\": [\"M1\"], \"excerptIds\": [\"E2\"] }}\n",
+            "  ],\n",
+            "  \"promptLessons\": [\n",
+            "    {{ \"lesson\": \"...\", \"missIds\": [\"M1\"], \"excerptIds\": [\"E2\"] }}\n",
             "  ]\n",
             "}}\n\n",
             "Rules:\n",
             "- Use only the evidence above\n",
             "- Keep it project-based, not session-based\n",
-            "- Do not mention sessions, hosts, or counts\n",
+            "- Do not mention hosts or counts; mention sessions only when the prompt lesson is about avoiding internal/session boundaries\n",
             "- \"workedOn\" should contain 1 to 5 short bullets about what the project work focused on that day\n",
             "- Use excerpts tagged `topic` mainly for `workedOn`\n",
             "- \"accomplishments\" should contain 1 to 5 concrete outcomes, decisions, or completed steps that actually happened\n",
@@ -1110,9 +1130,15 @@ fn build_project_summary_prompt(
             "- When citing evidence, prefer the single most direct quote; add a second quote only when it adds distinct support\n",
             "- Avoid selecting near-duplicate quotes or generic delivery chatter like 'Yep — I added it' when a more direct quote is available\n",
             "- Do NOT treat exploratory assistant chatter like 'let me inspect', 'now let me see', or tool-use narration as accomplishments\n",
-            "- \"llmMisses\" should contain only cases where the assistant clearly misunderstood scope, took the wrong direction, or needed user correction\n",
-            "- For each LLM miss, include a short \"lesson\" that could improve prompts or skills in the future\n",
+            "- \"llmMisses\" should contain concrete cases where the assistant clearly misunderstood scope, took the wrong direction, or needed user correction\n",
+            "- Each LLM miss summary should describe the specific miss, not the general lesson\n",
             "- Prefer missIds for llmMisses; excerptIds are optional supporting quotes\n",
+            "- \"promptLessons\" should contain only reusable prompt guidance derived from clear assistant misunderstanding, wrong direction, or user correction\n",
+            "- Each prompt lesson must be systemic enough to improve future prompts across projects, not just restate the specific incident\n",
+            "- BAD prompt lessons merely repeat the local fix, e.g. 'Daily reports should default to project-level aggregation'\n",
+            "- GOOD prompt lessons generalize the behavior, e.g. 'For user-facing summaries, prefer durable user concepts over internal/session boundaries unless requested'\n",
+            "- Omit correction cases that do not yield a reusable prompt lesson\n",
+            "- Prefer missIds for promptLessons; excerptIds are optional supporting quotes\n",
             "- Do not invent quote text or IDs\n",
             "- Keep each item concise and factual\n"
         ),
@@ -1183,7 +1209,6 @@ fn normalize_project_summary_response(
             continue;
         }
 
-        let lesson = normalize_report_line(&miss.lesson);
         let mut evidence_lines = Vec::new();
         let mut seen_evidence = HashSet::new();
 
@@ -1239,10 +1264,85 @@ fn normalize_project_summary_response(
 
         llm_misses.push(RenderedMiss {
             summary,
-            lesson,
             evidence_lines,
         });
         if llm_misses.len() >= MAX_LLM_MISSES {
+            break;
+        }
+    }
+
+    let mut prompt_lessons = Vec::new();
+    for prompt_lesson in response.prompt_lessons {
+        let Some(lesson) = normalize_report_line(&prompt_lesson.lesson) else {
+            continue;
+        };
+        if prompt_lessons
+            .iter()
+            .any(|existing: &RenderedPromptLesson| existing.lesson.eq_ignore_ascii_case(&lesson))
+        {
+            continue;
+        }
+
+        let mut evidence_lines = Vec::new();
+        let mut seen_evidence = HashSet::new();
+
+        for miss_id in prompt_lesson.miss_ids {
+            let miss_id = collapse_whitespace(&miss_id);
+            let Some(candidate) = miss_lookup.get(miss_id.as_str()) else {
+                continue;
+            };
+            if let Some(assistant_text) = candidate.assistant_text.as_deref() {
+                let line = format!("LLM: {}", truncate_chars(assistant_text, MAX_EXCERPT_CHARS));
+                if seen_evidence.insert(line.to_ascii_lowercase()) {
+                    evidence_lines.push(FootnoteEvidence {
+                        text: line,
+                        ui_url: candidate
+                            .assistant_link_target
+                            .as_ref()
+                            .map(|target| report_ui_message_url(ui_base_url, target)),
+                    });
+                }
+            }
+            let correction_line = format!(
+                "Correction: {}",
+                truncate_chars(&candidate.correction_text, MAX_EXCERPT_CHARS)
+            );
+            if seen_evidence.insert(correction_line.to_ascii_lowercase()) {
+                evidence_lines.push(FootnoteEvidence {
+                    text: correction_line,
+                    ui_url: Some(report_ui_message_url(
+                        ui_base_url,
+                        &candidate.correction_link_target,
+                    )),
+                });
+            }
+            if evidence_lines.len() >= MAX_EVIDENCE_LINES_PER_MISS {
+                break;
+            }
+        }
+
+        if evidence_lines.len() < MAX_EVIDENCE_LINES_PER_MISS {
+            for excerpt in
+                excerpts_from_ids(&prompt_lesson.excerpt_ids, &excerpt_lookup, ui_base_url)
+            {
+                let line = truncate_chars(&excerpt.text, MAX_EXCERPT_CHARS);
+                if seen_evidence.insert(line.to_ascii_lowercase()) {
+                    evidence_lines.push(FootnoteEvidence {
+                        text: line,
+                        ui_url: excerpt.ui_url,
+                    });
+                }
+                if evidence_lines.len() >= MAX_EVIDENCE_LINES_PER_MISS {
+                    break;
+                }
+            }
+        }
+
+        prompt_lessons.push(RenderedPromptLesson {
+            lesson,
+            evidence_lines,
+        });
+        if prompt_lessons.len() >= MAX_PROMPT_LESSONS {
             break;
         }
     }
@@ -1268,7 +1368,11 @@ fn normalize_project_summary_response(
         }
     }
 
-    if worked_on.is_empty() && accomplishments.is_empty() && llm_misses.is_empty() {
+    if worked_on.is_empty()
+        && accomplishments.is_empty()
+        && llm_misses.is_empty()
+        && prompt_lessons.is_empty()
+    {
         None
     } else {
         Some(RenderedProjectReport {
@@ -1276,6 +1380,7 @@ fn normalize_project_summary_response(
             worked_on,
             accomplishments,
             llm_misses,
+            prompt_lessons,
         })
     }
 }
@@ -1384,7 +1489,6 @@ fn heuristic_project_report(
             continue;
         }
 
-        let lesson = normalize_report_line(&miss.correction_text);
         let mut evidence_lines = Vec::new();
         if let Some(assistant_text) = miss.assistant_text.as_deref() {
             evidence_lines.push(FootnoteEvidence {
@@ -1408,13 +1512,14 @@ fn heuristic_project_report(
 
         llm_misses.push(RenderedMiss {
             summary,
-            lesson,
             evidence_lines,
         });
         if llm_misses.len() >= MAX_LLM_MISSES {
             break;
         }
     }
+
+    let prompt_lessons = Vec::new();
 
     if worked_on.is_empty() {
         for accomplishment in &accomplishments {
@@ -1434,6 +1539,7 @@ fn heuristic_project_report(
         worked_on,
         accomplishments,
         llm_misses,
+        prompt_lessons,
     }
 }
 
@@ -1521,9 +1627,22 @@ fn render_day_report(report_date: NaiveDate, projects: &[RenderedProjectReport])
                     &mut footnotes,
                 );
                 lines.push(format!("- {summary}"));
-                if let Some(lesson) = miss.lesson.as_deref() {
-                    lines.push(format!("  Lesson: {lesson}"));
-                }
+            }
+            if !project.prompt_lessons.is_empty() {
+                lines.push(String::new());
+            }
+        }
+
+        if !project.prompt_lessons.is_empty() {
+            lines.push("Prompt lessons:".to_string());
+            for prompt_lesson in &project.prompt_lessons {
+                let lesson = with_footnote_refs(
+                    &prompt_lesson.lesson,
+                    &prompt_lesson.evidence_lines,
+                    &mut next_footnote_index,
+                    &mut footnotes,
+                );
+                lines.push(format!("- {lesson}"));
             }
         }
     }
@@ -2016,7 +2135,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn render_day_report_escapes_leading_tilde_in_project_heading() {
         let rendered = render_day_report(
             NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
@@ -2025,6 +2143,7 @@ mod tests {
                 worked_on: vec!["Shell setup".to_string()],
                 accomplishments: vec![],
                 llm_misses: vec![],
+                prompt_lessons: vec![],
             }],
         );
 
@@ -2054,9 +2173,13 @@ mod tests {
                     ],
                     llm_misses: vec![RenderedMiss {
                         summary: "Mis-scoped the report as session-based".to_string(),
-                        lesson: Some(
-                            "Daily reports should default to project-level aggregation".to_string(),
-                        ),
+                        evidence_lines: vec![
+                            footnote("LLM: I'd start with session-grouped output"),
+                            footnote("Correction: it should be project-based, not session based"),
+                        ],
+                    }],
+                    prompt_lessons: vec![RenderedPromptLesson {
+                        lesson: "For user-facing summaries, prefer durable user concepts over internal/session boundaries unless requested".to_string(),
                         evidence_lines: vec![
                             footnote("LLM: I'd start with session-grouped output"),
                             footnote("Correction: it should be project-based, not session based"),
@@ -2073,22 +2196,23 @@ mod tests {
                         )],
                     }],
                     llm_misses: vec![],
+                    prompt_lessons: vec![],
                 },
             ],
         );
 
         assert!(rendered.contains("- Defined project-based daily report output[^1]"));
         assert!(rendered.contains("- Allowed accomplishment bullets without forced excerpts"));
+        assert!(rendered.contains("LLM misses:"));
         assert!(rendered.contains("- Mis-scoped the report as session-based[^2]"));
-        assert!(rendered.contains("- Fixed focus handoff for new windows[^3]"));
-        assert!(
-            rendered
-                .contains("  Lesson: Daily reports should default to project-level aggregation")
-        );
+        assert!(rendered.contains("Prompt lessons:"));
+        assert!(rendered.contains("- For user-facing summaries, prefer durable user concepts over internal/session boundaries unless requested[^3]"));
+        assert!(rendered.contains("- Fixed focus handoff for new windows[^4]"));
+        assert!(!rendered.contains("  Lesson:"));
         assert!(rendered.contains("[^1]: it should be project-based, not session based"));
-        assert!(rendered.contains("[^3]: activate the app before ordering the window front"));
+        assert!(rendered.contains("[^4]: activate the app before ordering the window front"));
 
-        let termsy_heading = rendered.find("## ~/apps/Termsy").unwrap();
+        let termsy_heading = rendered.find(r#"## \~/apps/Termsy"#).unwrap();
         let first_footnote = rendered
             .find("[^1]: it should be project-based, not session based")
             .unwrap();
@@ -2113,9 +2237,9 @@ mod tests {
                         ),
                     ],
                 }],
-                llm_misses: vec![RenderedMiss {
-                    summary: "Footnotes were duplicated".to_string(),
-                    lesson: Some("Deduplicate correction evidence".to_string()),
+                llm_misses: vec![],
+                prompt_lessons: vec![RenderedPromptLesson {
+                    lesson: "Deduplicate correction evidence".to_string(),
                     evidence_lines: vec![
                         footnote("Correction: all of the footnotes should be at the bottom"),
                         footnote("all of the footnotes should be at the bottom"),
@@ -2130,7 +2254,7 @@ mod tests {
                 "[^1]: Logs macOS `keyDown`, `keyUp`, and `flagsChanged` before dispatch"
             )
         );
-        assert!(rendered.contains("- Footnotes were duplicated[^2]"));
+        assert!(rendered.contains("- Deduplicate correction evidence[^2]"));
         assert!(
             rendered.contains("[^2]: Correction: all of the footnotes should be at the bottom")
         );
@@ -2160,7 +2284,7 @@ mod tests {
     #[test]
     fn parse_json_response_accepts_markdown_fenced_json() {
         let response = parse_json_response::<ProjectSummaryResponse>(
-            "```json\n{\"workedOn\":[\"Added reporting\"],\"accomplishments\":[],\"llmMisses\":[]}\n```",
+            "```json\n{\"workedOn\":[\"Added reporting\"],\"accomplishments\":[],\"promptLessons\":[]}\n```",
         )
         .unwrap();
 

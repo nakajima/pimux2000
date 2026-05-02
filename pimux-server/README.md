@@ -599,7 +599,7 @@ Behavior:
 - requires `PIMUX_BACKUP_POSTGRES_URL`
 - reads archived messages for that local day across all hosts
 - groups output by normalized project cwd, for example both `/Users/alice/apps/foo` and `/home/alice/apps/foo` render as `~/apps/foo`
-- prints `Worked on` bullets, `Accomplished` bullets, and an `LLM misses` section for clear assistant mis-scopes or corrections seen in the archived sessions
+- prints `Worked on` bullets, `Accomplished` bullets, an `LLM misses` section for concrete assistant mis-scopes or corrections, and a `Prompt lessons` section with reusable prompt guidance derived from those misses
 - includes supporting excerpts as Markdown footnotes when they are good fits, but does not force every accomplishment to have one
 - footnotes include links into `/ui/session?...&message=...` so you can jump from report evidence to the archived web UI
 - does not show hosts or session counts in the rendered report
