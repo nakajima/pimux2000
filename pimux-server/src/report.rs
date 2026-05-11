@@ -3,6 +3,7 @@ use std::{
     env,
     error::Error as StdError,
     path::PathBuf,
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -39,6 +40,7 @@ const MAX_LLM_MISSES: usize = 5;
 const MAX_PROMPT_LESSONS: usize = 5;
 const MAX_EVIDENCE_LINES_PER_MISS: usize = 3;
 const MAX_CORRECTION_WINDOW_GAP_MINUTES: i64 = 120;
+const PROJECT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_FOOTNOTE_CHARS: usize = 160;
 const MIN_FOOTNOTE_SCORE: i32 = 35;
 
@@ -1018,7 +1020,16 @@ async fn summarize_project_day_via_pi(
         .current_dir(pi_agent_dir)
         .kill_on_drop(true);
 
-    let output = command.output().await?;
+    let output = match tokio::time::timeout(PROJECT_SUMMARY_TIMEOUT, command.output()).await {
+        Ok(output) => output?,
+        Err(_) => {
+            return Err(format!(
+                "pi summary timed out after {} seconds",
+                PROJECT_SUMMARY_TIMEOUT.as_secs()
+            )
+            .into());
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();

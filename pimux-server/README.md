@@ -633,7 +633,8 @@ Daily report UI behavior:
 - defaults to the `America/Los_Angeles` report timezone
 - stores generated reports under `PIMUX_REPORTS_DIR` when set
 - otherwise stores them in the pimux server state directory under `reports/daily`
-- opening a missing report starts background generation and returns immediately; the page auto-refreshes until the saved report is ready
+- opening `/ui/reports` queues missing recent reports for background generation in small batches; the list auto-refreshes while reports are being built
+- opening a specific missing report starts background generation for that date and returns immediately; the page auto-refreshes until the saved report is ready
 - the report page shows in-browser progress logs emitted during background generation so you can see what step it is on
 - the `regenerate` button also runs in the background so the existing saved report can stay visible while a fresh one is built
 - saves sidecar metadata so the web UI can warn when a report was generated with heuristic fallback instead of Pi summarization

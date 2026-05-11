@@ -15,7 +15,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 #[cfg(not(debug_assertions))]
 use bytes::Bytes;
-use chrono::{DateTime, Days, NaiveDate, Utc};
+use chrono::{DateTime, Days, Duration as ChronoDuration, NaiveDate, Utc};
 use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, TagEnd, html};
 use sailfish::{TemplateSimple, runtime::escape::escape_to_string};
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,8 @@ const DEFAULT_ARCHIVE_SESSION_COUNT: i64 = 100;
 const MAX_ARCHIVE_SESSION_COUNT: i64 = 500;
 const DEFAULT_REPORT_DAY_COUNT: u32 = 14;
 const MAX_REPORT_DAY_COUNT: u32 = 90;
+const MAX_REPORT_LIST_AUTOSTARTS: usize = 4;
+const REPORT_GENERATION_RETRY_AFTER_MINUTES: i64 = 30;
 const REPORTS_DIR_ENV: &str = "PIMUX_REPORTS_DIR";
 const WEB_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 #[cfg(not(debug_assertions))]
@@ -444,9 +446,18 @@ pub(super) async fn reports(
         };
 
     let report_dates = recent_report_dates(today, count);
-    let generation_statuses = report_generation_statuses(&state, &report_dates).await;
+    let mut generation_statuses = report_generation_statuses(&state, &report_dates).await;
+    if start_missing_report_generations(&state, &reports_dir, &report_dates, &generation_statuses)
+        .await
+        > 0
+    {
+        generation_statuses = report_generation_statuses(&state, &report_dates).await;
+    }
+    let auto_refresh_seconds =
+        reports_auto_refresh_seconds(&reports_dir, &report_dates, &generation_statuses);
     let days = report_dates
-        .into_iter()
+        .iter()
+        .copied()
         .map(|date| {
             let path = daily_report_path(&reports_dir, date);
             let has_saved_report = path.is_file();
@@ -476,7 +487,7 @@ pub(super) async fn reports(
                     code_html(&days.len().to_string()),
                     code_html(&reports_dir.display().to_string())
                 )),
-                None,
+                auto_refresh_seconds,
             ),
             days,
         },
@@ -509,7 +520,7 @@ pub(super) async fn report(
     let mut generation_status = report_generation_status(&state, report_date).await;
     let mut has_saved_report = report_path.is_file();
 
-    if !has_saved_report && generation_status.is_none() {
+    if !has_saved_report && should_auto_start_report_generation(generation_status.as_ref()) {
         if let Err(error) = start_report_generation(state.clone(), report_date, false).await {
             return error_response(
                 StatusCode::BAD_GATEWAY,
@@ -1373,6 +1384,63 @@ async fn report_generation_statuses(
         .collect()
 }
 
+async fn start_missing_report_generations(
+    state: &AppState,
+    reports_dir: &Path,
+    report_dates: &[NaiveDate],
+    generation_statuses: &HashMap<String, ReportGenerationStatus>,
+) -> usize {
+    let mut started = 0usize;
+    for report_date in report_dates {
+        if started >= MAX_REPORT_LIST_AUTOSTARTS {
+            break;
+        }
+
+        let report_path = daily_report_path(reports_dir, *report_date);
+        if report_path.is_file() {
+            continue;
+        }
+
+        let key = report_generation_key(*report_date);
+        if !should_auto_start_report_generation(generation_statuses.get(&key)) {
+            continue;
+        }
+
+        match start_report_generation(state.clone(), *report_date, false).await {
+            Ok(()) => started += 1,
+            Err(error) => {
+                warn!(date = %report_date, %error, "failed to auto-start report generation");
+            }
+        }
+    }
+    started
+}
+
+fn reports_auto_refresh_seconds(
+    reports_dir: &Path,
+    report_dates: &[NaiveDate],
+    generation_statuses: &HashMap<String, ReportGenerationStatus>,
+) -> Option<u32> {
+    if report_dates.iter().any(|report_date| {
+        matches!(
+            generation_statuses.get(&report_generation_key(*report_date)),
+            Some(ReportGenerationStatus::Running { .. })
+        )
+    }) {
+        return Some(10);
+    }
+
+    report_dates
+        .iter()
+        .any(|report_date| {
+            !daily_report_path(reports_dir, *report_date).is_file()
+                && should_auto_start_report_generation(
+                    generation_statuses.get(&report_generation_key(*report_date)),
+                )
+        })
+        .then_some(10)
+}
+
 async fn start_report_generation(
     state: AppState,
     report_date: NaiveDate,
@@ -1384,14 +1452,16 @@ async fn start_report_generation(
 
     {
         let mut generations = state.report_generations.lock().await;
+        let now = Utc::now();
         match generations.get(&key) {
-            Some(ReportGenerationStatus::Running { .. }) => return Ok(()),
-            Some(ReportGenerationStatus::Failed { .. }) if !force => return Ok(()),
+            Some(status) if !force && !should_auto_start_report_generation(Some(status)) => {
+                return Ok(());
+            }
             _ => {
                 generations.insert(
                     key.clone(),
                     ReportGenerationStatus::Running {
-                        started_at: Utc::now(),
+                        started_at: now,
                         logs: Arc::clone(&logs),
                     },
                 );
@@ -1410,6 +1480,15 @@ async fn start_report_generation(
         })
         .await;
         let mut generations = state.report_generations.lock().await;
+        let is_current_generation = matches!(
+            generations.get(&key),
+            Some(ReportGenerationStatus::Running { logs: current_logs, .. })
+                if Arc::ptr_eq(current_logs, &logs)
+        );
+        if !is_current_generation {
+            return;
+        }
+
         match result {
             Ok(()) => {
                 generations.remove(&key);
@@ -1430,6 +1509,19 @@ async fn start_report_generation(
     });
 
     Ok(())
+}
+
+fn should_auto_start_report_generation(status: Option<&ReportGenerationStatus>) -> bool {
+    let now = Utc::now();
+    match status {
+        None => true,
+        Some(ReportGenerationStatus::Running { started_at, .. }) => {
+            now - *started_at > ChronoDuration::minutes(REPORT_GENERATION_RETRY_AFTER_MINUTES)
+        }
+        Some(ReportGenerationStatus::Failed { failed_at, .. }) => {
+            now - *failed_at > ChronoDuration::minutes(REPORT_GENERATION_RETRY_AFTER_MINUTES)
+        }
+    }
 }
 
 fn parse_report_date_param(value: Option<&str>) -> Result<NaiveDate, Response> {
@@ -1983,17 +2075,22 @@ fn error_response(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::{
+        collections::HashMap,
+        fs,
+        sync::{Arc, Mutex as StdMutex},
+    };
 
-    use chrono::{NaiveDate, TimeZone, Utc};
+    use chrono::{Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
     use serde_json::{Value, json};
 
     use super::{
-        ReportGenerationStatus, SavedReportMetadata, archive_session_url,
-        display_message_body_text, format_timestamp, markdown_to_html_with_scope,
-        message_anchor_id, percent_encode_component, recent_report_dates, render_message_body,
-        report_generation_view, report_list_status, report_warning, short_tool_call_id,
-        transcript_freshness_label,
+        REPORT_GENERATION_RETRY_AFTER_MINUTES, ReportGenerationStatus, SavedReportMetadata,
+        archive_session_url, daily_report_path, display_message_body_text, format_timestamp,
+        markdown_to_html_with_scope, message_anchor_id, percent_encode_component,
+        recent_report_dates, render_message_body, report_generation_view, report_list_status,
+        report_warning, reports_auto_refresh_seconds, short_tool_call_id,
+        should_auto_start_report_generation, transcript_freshness_label,
     };
 
     #[test]
@@ -2183,6 +2280,57 @@ mod tests {
 
         assert_eq!(label, "generating in background");
         assert_eq!(class_name, "status-pending");
+    }
+
+    #[test]
+    fn report_generation_auto_start_retries_old_statuses() {
+        assert!(should_auto_start_report_generation(None));
+
+        let fresh_running = ReportGenerationStatus::Running {
+            started_at: Utc::now(),
+            logs: Arc::new(StdMutex::new(Vec::new())),
+        };
+        assert!(!should_auto_start_report_generation(Some(&fresh_running)));
+
+        let old_running = ReportGenerationStatus::Running {
+            started_at: Utc::now()
+                - ChronoDuration::minutes(REPORT_GENERATION_RETRY_AFTER_MINUTES + 1),
+            logs: Arc::new(StdMutex::new(Vec::new())),
+        };
+        assert!(should_auto_start_report_generation(Some(&old_running)));
+
+        let old_failed = ReportGenerationStatus::Failed {
+            failed_at: Utc::now()
+                - ChronoDuration::minutes(REPORT_GENERATION_RETRY_AFTER_MINUTES + 1),
+            message: "previous failure".to_string(),
+            logs: Vec::new(),
+        };
+        assert!(should_auto_start_report_generation(Some(&old_failed)));
+    }
+
+    #[test]
+    fn reports_auto_refreshes_for_missing_or_running_reports() {
+        let reports_dir = std::env::temp_dir().join(format!(
+            "pimux-report-test-{}",
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir_all(&reports_dir).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 5, 10).unwrap();
+        let dates = vec![date];
+        let statuses = HashMap::new();
+
+        assert_eq!(
+            reports_auto_refresh_seconds(&reports_dir, &dates, &statuses),
+            Some(10)
+        );
+
+        fs::write(daily_report_path(&reports_dir, date), "# report\n").unwrap();
+        assert_eq!(
+            reports_auto_refresh_seconds(&reports_dir, &dates, &statuses),
+            None
+        );
+
+        fs::remove_dir_all(reports_dir).unwrap();
     }
 
     #[test]
