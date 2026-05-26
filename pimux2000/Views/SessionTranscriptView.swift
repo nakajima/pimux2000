@@ -28,8 +28,20 @@ enum TranscriptMessage: Identifiable {
 	}
 }
 
+struct TranscriptLoadingDetails: Equatable {
+	let title: String
+	let message: String
+	let details: [String]
+
+	init(title: String, message: String, details: [String] = []) {
+		self.title = title
+		self.message = message
+		self.details = details
+	}
+}
+
 enum TranscriptEmptyState: Equatable {
-	case loading
+	case loading(TranscriptLoadingDetails)
 	case error(String)
 	case noServer
 	case empty
@@ -82,6 +94,7 @@ enum TranscriptEmptyState: Equatable {
 			private var lastForcePinToken: Int = 0
 			private var messagesByID: [String: TranscriptMessage] = [:]
 			private var dataSource: UITableViewDiffableDataSource<Int, String>!
+			private var renderedEmptyState: TranscriptEmptyState?
 
 			/// In the flipped table, contentOffset.y ≈ 0 means the user is viewing the
 			/// newest messages (visual bottom). A positive offset means scrolled toward
@@ -311,13 +324,15 @@ enum TranscriptEmptyState: Equatable {
 
 			private func updateEmptyState(on tableView: UITableView) {
 				if messagesByID.isEmpty, let emptyState = parent.emptyState {
-					if !(tableView.backgroundView is TranscriptEmptyStateView) {
+					if renderedEmptyState != emptyState || !(tableView.backgroundView is TranscriptEmptyStateView) {
 						let view = TranscriptEmptyStateView(state: emptyState, onRetry: parent.onRetry)
 						view.transform = CGAffineTransform(scaleX: 1, y: -1)
 						tableView.backgroundView = view
+						renderedEmptyState = emptyState
 					}
 				} else {
 					tableView.backgroundView = nil
+					renderedEmptyState = nil
 				}
 			}
 
@@ -387,12 +402,16 @@ enum TranscriptEmptyState: Equatable {
 			stack.addArrangedSubview(icon)
 
 			switch state {
-			case .loading:
+			case let .loading(details):
 				icon.image = UIImage(systemName: "ellipsis.circle")
 				let spinner = UIActivityIndicatorView(style: .medium)
 				spinner.startAnimating()
 				stack.addArrangedSubview(spinner)
-				stack.addArrangedSubview(makeLabel("Loading messages…", style: .body, color: .secondaryLabel, alignment: .center))
+				stack.addArrangedSubview(makeLabel(details.title, style: .headline, color: .label, alignment: .center))
+				stack.addArrangedSubview(makeLabel(details.message, style: .body, color: .secondaryLabel, alignment: .center))
+				for line in details.details {
+					stack.addArrangedSubview(makeLabel(line, style: .footnote, color: .secondaryLabel, alignment: .center))
+				}
 			case let .error(message):
 				icon.image = UIImage(systemName: "exclamationmark.triangle")
 				icon.tintColor = .systemOrange
@@ -504,6 +523,27 @@ enum TranscriptEmptyState: Equatable {
 	}
 
 	// MARK: - Preview
+
+	#Preview("iOS transcript loading") {
+		NavigationStack {
+			SessionTranscriptView(
+				messages: [],
+				sessionID: "preview-session",
+				emptyState: .loading(
+					TranscriptLoadingDetails(
+						title: "Connecting to session…",
+						message: "Opening the live transcript stream and waiting for the initial snapshot.",
+						details: [
+							"Request: GET /sessions/preview-session/stream",
+							"The server may be reading cache, Postgres, or the host agent.",
+						]
+					)
+				),
+				onOpenMessageContext: { _ in }
+			)
+			.background(.background)
+		}
+	}
 
 	#Preview("iOS transcript") {
 		let messages: [TranscriptMessage] = [

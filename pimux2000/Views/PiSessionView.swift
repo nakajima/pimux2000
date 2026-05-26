@@ -379,16 +379,82 @@ struct PiSessionView: View {
 		$storedMessages.request.wrappedValue = request
 	}
 
+	private var transcriptLoadingDetails: TranscriptLoadingDetails {
+		if isLoadingMessages {
+			return makeTranscriptLoadingDetails(
+				title: "Fetching transcript snapshot…",
+				message: "Fetching the current transcript over HTTP before retrying the live stream.",
+				request: "GET /sessions/\(session.sessionID)/messages",
+				includesServerSnapshotStep: false
+			)
+		}
+
+		switch liveStreamState {
+		case .idle:
+			return makeTranscriptLoadingDetails(
+				title: "Starting session load…",
+				message: "Preparing the live transcript request.",
+				request: "GET /sessions/\(session.sessionID)/stream",
+				includesServerSnapshotStep: false
+			)
+		case .connecting:
+			return makeTranscriptLoadingDetails(
+				title: "Connecting to session…",
+				message: "Opening the live transcript stream and waiting for the initial snapshot.",
+				request: "GET /sessions/\(session.sessionID)/stream",
+				includesServerSnapshotStep: true
+			)
+		case .reconnecting:
+			return makeTranscriptLoadingDetails(
+				title: "Reconnecting to session…",
+				message: "The live stream ended. The app is refreshing the transcript before retrying.",
+				request: "GET /sessions/\(session.sessionID)/stream",
+				includesServerSnapshotStep: true
+			)
+		case .live:
+			return makeTranscriptLoadingDetails(
+				title: "Waiting for messages…",
+				message: "The live stream is connected, but no transcript messages are stored yet.",
+				request: "GET /sessions/\(session.sessionID)/stream",
+				includesServerSnapshotStep: false
+			)
+		}
+	}
+
+	private func makeTranscriptLoadingDetails(
+		title: String,
+		message: String,
+		request: String,
+		includesServerSnapshotStep: Bool
+	) -> TranscriptLoadingDetails {
+		var details = [
+			"Session ID: \(session.sessionID)",
+			"Request: \(request)",
+		]
+
+		if let streamStatus = liveStreamState.statusText {
+			details.append("Stream state: \(streamStatus)")
+		}
+		if let cwd = session.cwd, !cwd.isEmpty {
+			details.append("Working directory: \(cwd)")
+		}
+		if includesServerSnapshotStep {
+			details.append("Server step: resolve snapshot from cache, Postgres, or host agent")
+		}
+
+		return TranscriptLoadingDetails(title: title, message: message, details: details)
+	}
+
 	private var transcriptEmptyState: TranscriptEmptyState? {
 		guard transcriptMessages.isEmpty else { return nil }
 		if isLoadingMessages {
-			return .loading
+			return .loading(transcriptLoadingDetails)
 		} else if let loadError {
 			return .error(loadError)
 		} else if pimuxServerClient == nil {
 			return .noServer
-		} else if liveStreamState == .idle || liveStreamState == .connecting {
-			return .loading
+		} else if liveStreamState == .idle || liveStreamState == .connecting || liveStreamState == .reconnecting {
+			return .loading(transcriptLoadingDetails)
 		} else {
 			return .empty
 		}
@@ -578,11 +644,7 @@ struct PiSessionView: View {
 	@ViewBuilder
 	private var emptyStateView: some View {
 		if isLoadingMessages {
-			ContentUnavailableView {
-				ProgressView()
-			} description: {
-				Text("Loading messages…")
-			}
+			transcriptLoadingView(transcriptLoadingDetails)
 		} else if let loadError {
 			ContentUnavailableView {
 				Label("Couldn't Load Messages", systemImage: "exclamationmark.triangle")
@@ -595,14 +657,28 @@ struct PiSessionView: View {
 			}
 		} else if pimuxServerClient == nil {
 			ContentUnavailableView("No server configured", systemImage: "server.rack")
-		} else if liveStreamState == .idle || liveStreamState == .connecting {
-			ContentUnavailableView {
-				ProgressView()
-			} description: {
-				Text("Loading messages…")
-			}
+		} else if liveStreamState == .idle || liveStreamState == .connecting || liveStreamState == .reconnecting {
+			transcriptLoadingView(transcriptLoadingDetails)
 		} else {
 			ContentUnavailableView("No messages yet", systemImage: "text.bubble")
+		}
+	}
+
+	private func transcriptLoadingView(_ details: TranscriptLoadingDetails) -> some View {
+		ContentUnavailableView {
+			VStack(spacing: 10) {
+				ProgressView()
+				Text(details.title)
+			}
+		} description: {
+			VStack(spacing: 6) {
+				Text(details.message)
+				ForEach(details.details, id: \.self) { line in
+					Text(verbatim: line)
+						.font(.caption)
+						.foregroundStyle(.secondary)
+				}
+			}
 		}
 	}
 

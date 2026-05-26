@@ -8,6 +8,8 @@ struct ServerConnectionSheet: View {
 	@StateObject private var discovery: PimuxBonjourDiscovery
 	@State private var serverURL: String
 	@State private var isConnecting = false
+	@State private var connectionStatus: String?
+	@State private var connectionDetail: String?
 	@State private var errorMessage: String?
 
 	@MainActor
@@ -90,13 +92,26 @@ struct ServerConnectionSheet: View {
 						if isConnecting {
 							HStack {
 								ProgressView()
-								Text("Connecting…")
+								Text(connectionStatus ?? "Connecting…")
 							}
 						} else {
 							Text("Connect")
 						}
 					}
 					.disabled(serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isConnecting)
+				}
+
+				if isConnecting, let connectionStatus {
+					Section {
+						Text(verbatim: connectionStatus)
+						if let connectionDetail {
+							Text(verbatim: connectionDetail)
+								.font(.caption)
+								.foregroundStyle(.secondary)
+						}
+					} header: {
+						Text("Connection Status")
+					}
 				}
 
 				if let errorMessage {
@@ -130,12 +145,22 @@ struct ServerConnectionSheet: View {
 		guard let appDatabase else { return }
 		isConnecting = true
 		errorMessage = nil
-		defer { isConnecting = false }
+		connectionStatus = "Validating server URL…"
+		connectionDetail = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+		defer {
+			isConnecting = false
+			connectionStatus = nil
+			connectionDetail = nil
+		}
 
 		do {
 			let normalized = try PimuxServerClient.normalizedBaseURLString(from: serverURL)
+			connectionStatus = "Checking server health…"
+			connectionDetail = "GET \(normalized)/health"
 			let client = try PimuxServerClient(baseURL: normalized)
 			try await client.health()
+			connectionStatus = "Saving server connection…"
+			connectionDetail = normalized
 			try appDatabase.saveServerURL(normalized)
 			dismiss()
 		} catch {
