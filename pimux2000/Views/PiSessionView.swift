@@ -48,6 +48,10 @@ struct PiSessionView: View {
 	@State private var isLoadingMessages = false
 	// Error shown when transcript loading fails.
 	@State private var loadError: String?
+	// Increments to cancel and restart the live transcript stream on manual retry.
+	@State private var liveTaskRetryToken = 0
+	// Shows retry controls after an empty transcript load has been stuck for a short grace period.
+	@State private var isTranscriptLoadStalled = false
 	// Warnings returned alongside the current transcript snapshot.
 	@State var transcriptWarnings: [String] = []
 	// Metadata describing whether the transcript is live, persisted, or reconstructed.
@@ -272,6 +276,9 @@ struct PiSessionView: View {
 					await group.waitForAll()
 				}
 			}
+			.task(id: transcriptLoadingStallKey) {
+				await updateTranscriptStallState()
+			}
 			.onChange(of: transcriptActivity?.attached) { _, attached in
 				guard attached == true else { return }
 				Task { await loadCustomCommands(force: true) }
@@ -285,7 +292,37 @@ struct PiSessionView: View {
 	}
 
 	private var liveTaskKey: String {
-		"\(session.sessionID)|\(pimuxServerClient.map { String(describing: ObjectIdentifier($0)) } ?? "none")"
+		"\(session.sessionID)|\(pimuxServerClient.map { String(describing: ObjectIdentifier($0)) } ?? "none")|\(liveTaskRetryToken)"
+	}
+
+	private var shouldWatchTranscriptLoadingStall: Bool {
+		guard transcriptMessages.isEmpty, loadError == nil, pimuxServerClient != nil else { return false }
+		return isLoadingMessages || liveStreamState == .idle || liveStreamState == .connecting || liveStreamState == .reconnecting
+	}
+
+	private var transcriptLoadingStallKey: String {
+		guard shouldWatchTranscriptLoadingStall else { return "not-loading|\(liveTaskKey)" }
+		return "loading|\(liveTaskKey)|\(liveStreamState)|\(isLoadingMessages)"
+	}
+
+	private func updateTranscriptStallState() async {
+		guard shouldWatchTranscriptLoadingStall else {
+			isTranscriptLoadStalled = false
+			return
+		}
+
+		isTranscriptLoadStalled = false
+		try? await Task.sleep(for: .seconds(8))
+		guard !Task.isCancelled, shouldWatchTranscriptLoadingStall else { return }
+		isTranscriptLoadStalled = true
+	}
+
+	private func retryTranscriptLoad() {
+		loadError = nil
+		isTranscriptLoadStalled = false
+		lastStreamSequence = 0
+		liveTaskRetryToken &+= 1
+		Task { await loadMessages() }
 	}
 
 	private var isAgentWorking: Bool {
@@ -441,8 +478,16 @@ struct PiSessionView: View {
 		if includesServerSnapshotStep {
 			details.append("Server step: resolve snapshot from cache, Postgres, or host agent")
 		}
+		if isTranscriptLoadStalled {
+			details.append("This load has not advanced after 8 seconds.")
+		}
 
-		return TranscriptLoadingDetails(title: title, message: message, details: details)
+		return TranscriptLoadingDetails(
+			title: title,
+			message: message,
+			details: details,
+			showsRetry: isTranscriptLoadStalled
+		)
 	}
 
 	private var transcriptEmptyState: TranscriptEmptyState? {
@@ -469,7 +514,7 @@ struct PiSessionView: View {
 					sessionID: session.sessionID,
 					emptyState: transcriptEmptyState,
 					forcePinToken: transcriptForcePinToken,
-					onRetry: { Task { await loadMessages() } },
+					onRetry: { retryTranscriptLoad() },
 					onOpenMessageContext: { requestedMessageContext = $0 },
 					onScrollOffsetChanged: { offset in
 						let scrolledUp = offset > 100
@@ -652,7 +697,7 @@ struct PiSessionView: View {
 				Text(verbatim: loadError)
 			} actions: {
 				Button("Retry") {
-					Task { await loadMessages() }
+					retryTranscriptLoad()
 				}
 			}
 		} else if pimuxServerClient == nil {
@@ -677,6 +722,12 @@ struct PiSessionView: View {
 					Text(verbatim: line)
 						.font(.caption)
 						.foregroundStyle(.secondary)
+				}
+			}
+		} actions: {
+			if details.showsRetry {
+				Button("Retry") {
+					retryTranscriptLoad()
 				}
 			}
 		}

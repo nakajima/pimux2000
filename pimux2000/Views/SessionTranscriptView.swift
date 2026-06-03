@@ -32,11 +32,13 @@ struct TranscriptLoadingDetails: Equatable {
 	let title: String
 	let message: String
 	let details: [String]
+	let showsRetry: Bool
 
-	init(title: String, message: String, details: [String] = []) {
+	init(title: String, message: String, details: [String] = [], showsRetry: Bool = false) {
 		self.title = title
 		self.message = message
 		self.details = details
+		self.showsRetry = showsRetry
 	}
 }
 
@@ -412,6 +414,13 @@ enum TranscriptEmptyState: Equatable {
 				for line in details.details {
 					stack.addArrangedSubview(makeLabel(line, style: .footnote, color: .secondaryLabel, alignment: .center))
 				}
+				if details.showsRetry, let onRetry {
+					let button = UIButton(type: .system)
+					button.translatesAutoresizingMaskIntoConstraints = false
+					button.setTitle("Retry", for: .normal)
+					button.addAction(UIAction { _ in onRetry() }, for: .touchUpInside)
+					stack.addArrangedSubview(button)
+				}
 			case let .error(message):
 				icon.image = UIImage(systemName: "exclamationmark.triangle")
 				icon.tintColor = .systemOrange
@@ -536,7 +545,8 @@ enum TranscriptEmptyState: Equatable {
 						details: [
 							"Request: GET /sessions/preview-session/stream",
 							"The server may be reading cache, Postgres, or the host agent.",
-						]
+						],
+						showsRetry: true
 					)
 				),
 				onOpenMessageContext: { _ in }

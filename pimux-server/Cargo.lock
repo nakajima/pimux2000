@@ -1470,7 +1470,7 @@ dependencies = [
 
 [[package]]
 name = "pimux-server"
-version = "0.2.65"
+version = "0.2.66"
 dependencies = [
  "ammonia",
  "axum",
