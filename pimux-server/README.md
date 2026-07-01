@@ -117,7 +117,7 @@ Behavior:
 
 - All timestamps are RFC 3339 / ISO 8601 strings in UTC.
 - Responses are JSON, except the live transcript stream which uses **chunked NDJSON**.
-- `GET /sessions/{id}/messages` returns a **full snapshot**, not a delta.
+- `GET /sessions/{id}/messages` returns a **snapshot**, not a delta; without pagination params it returns the full transcript.
 - `GET /sessions/{id}/stream` is the client-facing live stream for an open session.
 - The server talks to host agents over a **single persistent outbound WebSocket connection** from each agent.
 - Transcript messages include both:
@@ -389,6 +389,8 @@ Returns the best transcript snapshot the server currently has for a session.
 
 Query params:
 - `hostLocation=...` — optional exact host selector; when provided, the server resolves the transcript only for that host/session pair
+- `count=...` — optional max messages to return; without `before_id`, returns the newest `count` messages while preserving chronological order
+- `before_id=...` — optional cursor; returns messages older than the message whose `messageId` matches the cursor (`beforeId` is also accepted)
 
 Current behavior:
 1. if the server already has a cached snapshot for the requested session (and host, when `hostLocation` is provided), it returns it immediately
@@ -519,6 +521,7 @@ That means “recently live snapshot, but not currently attached.”
 #### Status codes for `GET /sessions/{id}/messages`
 
 - `200 OK` — transcript snapshot returned
+- `400 Bad Request` — `before_id` did not match a message in the snapshot
 - `404 Not Found` — server does not know this session, or the owning host reported that it could not find it
 - `502 Bad Gateway` — host-side fetch failed
 - `504 Gateway Timeout` — server timed out waiting for the host to provide the transcript

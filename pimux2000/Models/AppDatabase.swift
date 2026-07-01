@@ -259,6 +259,10 @@ private struct PimuxServerClientKey: EnvironmentKey {
 	static let defaultValue: PimuxServerClient? = nil
 }
 
+private struct SyncerKey: EnvironmentKey {
+	static let defaultValue: PiSessionSync? = nil
+}
+
 extension EnvironmentValues {
 	var appDatabase: AppDatabase? {
 		get { self[AppDatabaseKey.self] }
@@ -268,5 +272,10 @@ extension EnvironmentValues {
 	var pimuxServerClient: PimuxServerClient? {
 		get { self[PimuxServerClientKey.self] }
 		set { self[PimuxServerClientKey.self] = newValue }
+	}
+	
+	var syncer: PiSessionSync? {
+		get { self[SyncerKey.self] }
+		set { self[SyncerKey.self] = newValue }
 	}
 }

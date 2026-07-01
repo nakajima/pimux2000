@@ -12,6 +12,7 @@ struct SidebarView: View {
 	@State private var isShowingSettings = false
 	@State private var collapsedGroupIDs: Set<String> = []
 	@State private var showsUnconnectedSessions = false
+	@Environment(\.syncer) private var syncer
 
 	private var groupedSessions: [SidebarSessionGroup] {
 		sidebarSessionGroups(from: sessions)
@@ -76,8 +77,8 @@ struct SidebarView: View {
 		.animation(.default, value: sessions.map(\.session.sessionID))
 		.refreshable {
 			guard let pimuxServerClient else { return }
-			let syncer = PiSessionSync(dbContext: dbContext, pimuxServerClient: pimuxServerClient)
-			await syncer.sync(full: true)
+			
+			await syncer!.sync(full: true)
 		}
 		.toolbar {
 			ToolbarItem(placement: .primaryAction) {

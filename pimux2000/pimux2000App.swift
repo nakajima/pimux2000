@@ -90,6 +90,7 @@ private struct AppRootView: View {
 
 	var body: some View {
 		ContentView()
+			.environment(\.syncer, syncer)
 			.environment(\.appDatabase, appDatabase)
 			.environment(\.pimuxServerClient, pimuxServerClient)
 			.databaseContext(.readWrite { appDatabase.dbQueue })
@@ -103,6 +104,14 @@ private struct AppRootView: View {
 			.task {
 				await requestScreenshotLandscapeIfNeeded()
 			}
+	}
+	
+	var syncer: PiSessionSync? {
+		if let pimuxServerClient {
+			PiSessionSync(dbContext: .readWrite { appDatabase.dbQueue }, pimuxServerClient: pimuxServerClient)
+		} else {
+			nil
+		}
 	}
 
 	@MainActor

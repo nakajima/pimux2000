@@ -2,9 +2,14 @@ import Foundation
 import GRDB
 import GRDBQuery
 
-struct PiSessionSync {
+actor PiSessionSync {
 	var dbContext: DatabaseContext
 	let pimuxServerClient: PimuxServerClient
+	
+	init(dbContext: DatabaseContext, pimuxServerClient: PimuxServerClient) {
+		self.dbContext = dbContext
+		self.pimuxServerClient = pimuxServerClient
+	}
 
 	/// Syncs session data from the server.
 	/// - Parameter full: When `true`, fetches all session pages and deletes stale
@@ -13,13 +18,14 @@ struct PiSessionSync {
 	func sync(full: Bool = false) async {
 		do {
 			async let remoteHosts = pimuxServerClient.listHosts()
-			let remoteSessions = try await full
+			async let remoteSessions = full
 				? pimuxServerClient.listAllSessions()
 				: pimuxServerClient.listSessions(count: 25)
 			let hosts = try await remoteHosts
+			let sessions = try await remoteSessions
 
 			try await dbContext.writer.write { db in
-				try Self.store(remoteHosts: hosts, remoteSessions: remoteSessions, deleteStale: full, in: db)
+				try Self.store(remoteHosts: hosts, remoteSessions: sessions, deleteStale: full, in: db)
 			}
 		} catch {
 			print("Error syncing pimux server: \(error)")

@@ -507,76 +507,37 @@ struct PiSessionView: View {
 
 	@ViewBuilder
 	private var transcriptView: some View {
-		#if canImport(UIKit) && !os(macOS)
-			ZStack(alignment: .bottom) {
-				SessionTranscriptView(
-					messages: transcriptMessages,
-					sessionID: session.sessionID,
-					emptyState: transcriptEmptyState,
-					forcePinToken: transcriptForcePinToken,
-					onRetry: { retryTranscriptLoad() },
-					onOpenMessageContext: { requestedMessageContext = $0 },
-					onScrollOffsetChanged: { offset in
-						let scrolledUp = offset > 100
-						if scrolledUp != isScrolledUp {
-							withAnimation(.easeInOut(duration: 0.2)) {
-								isScrolledUp = scrolledUp
-							}
-						}
-					},
-					onReachOldestVisibleMessage: {
-						guard hasOlderStoredMessages else { return }
-						loadOlderStoredMessagesIfNeeded()
-					}
-				)
-
-				if isScrolledUp {
-					Button {
-						transcriptForcePinToken &+= 1
-					} label: {
-						Label("Scroll to bottom", systemImage: "chevron.down")
-							.font(.footnote.weight(.medium))
-							.padding(.horizontal, 14)
-							.padding(.vertical, 8)
-							.background(.thinMaterial, in: Capsule())
-					}
-					.padding(.bottom, 8)
-					.transition(.move(edge: .bottom).combined(with: .opacity))
-				}
-			}
-		#else
-			ScrollViewReader { proxy in
-				ScrollView {
-					LazyVStack(alignment: .leading, spacing: 16) {
-						if transcriptMessages.isEmpty {
-							emptyStateView
-						} else {
-							ForEach(transcriptMessages) { message in
-								switch message {
-								case let .confirmed(messageInfo):
-									TranscriptMessageView(
-										messageInfo: messageInfo,
-										sessionID: session.sessionID
-									)
+		ScrollViewReader { proxy in
+			ScrollView {
+				LazyVStack(alignment: .leading, spacing: 16) {
+					if transcriptMessages.isEmpty {
+						emptyStateView
+					} else {
+						ForEach(transcriptMessages) { message in
+							switch message {
+							case let .confirmed(messageInfo):
+								TranscriptMessageView(
+									messageInfo: messageInfo,
+									sessionID: session.sessionID
+								)
+								.id(message.id)
+							case let .pending(pendingMessage):
+								PendingLocalMessageView(message: pendingMessage)
 									.id(message.id)
-								case let .pending(pendingMessage):
-									PendingLocalMessageView(message: pendingMessage)
-										.id(message.id)
-								}
 							}
 						}
 					}
-					.padding()
 				}
-				.refreshable {
-					await loadMessages()
-				}
-				.defaultScrollAnchor(.bottom)
-				.onChange(of: transcriptMessagesScrollSignature) {
-					scrollToBottom(proxy: proxy)
-				}
+				.padding()
 			}
-		#endif
+			.refreshable {
+				await loadMessages()
+			}
+			.defaultScrollAnchor(.bottom)
+			.onChange(of: transcriptMessagesScrollSignature) {
+				scrollToBottom(proxy: proxy)
+			}
+		}
 	}
 
 	private var confirmedUserMessageCount: Int {

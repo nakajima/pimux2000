@@ -1,0 +1,9 @@
+{
+  "id" : "002e1cd7-726d-4e06-a029-61f9dd8c85f8",
+  "targets" : [
+    {
+      "id" : "D43B9FF6-9D10-42D5-A2BE-D9D340E86DCC",
+      "name" : "pimux2000"
+    }
+  ]
+}

@@ -307,6 +307,39 @@ struct SessionsQuery {
 #[serde(rename_all = "camelCase")]
 struct SessionMessagesQuery {
     host_location: Option<String>,
+    count: Option<usize>,
+    #[serde(alias = "before_id")]
+    before_id: Option<String>,
+}
+
+impl SessionMessagesQuery {
+    fn apply_to_snapshot(
+        &self,
+        mut snapshot: SessionMessagesResponse,
+    ) -> Result<SessionMessagesResponse, (StatusCode, Json<ErrorResponse>)> {
+        if self.count.is_none() && self.before_id.is_none() {
+            return Ok(snapshot);
+        }
+
+        let end = match self.before_id.as_deref() {
+            Some(before_id) => snapshot
+                .messages
+                .iter()
+                .position(|message| message.message_id.as_deref() == Some(before_id))
+                .ok_or_else(|| bad_request(format!("message `{before_id}` not found")))?,
+            None => snapshot.messages.len(),
+        };
+        let count = self.count.unwrap_or(end);
+        let start = end.saturating_sub(count);
+        snapshot.messages = snapshot
+            .messages
+            .into_iter()
+            .skip(start)
+            .take(end - start)
+            .collect();
+
+        Ok(snapshot)
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -1289,6 +1322,7 @@ async fn session_messages(
     let normalized_host_location = query.host_location.as_deref().map(normalize_host_location);
     let snapshot =
         resolve_session_snapshot(&state, &session_id, normalized_host_location.as_deref()).await?;
+    let snapshot = query.apply_to_snapshot(snapshot)?;
     Ok(Json(ApiSessionMessagesResponse::from(&snapshot)))
 }
 
@@ -5164,6 +5198,7 @@ mod tests {
                     Path("session-1".to_string()),
                     Query(SessionMessagesQuery {
                         host_location: Some(host_location),
+                        ..Default::default()
                     }),
                 )
                 .await
@@ -5282,6 +5317,111 @@ mod tests {
             image_attachment_id("image/png", "ZmFrZQ==")
         );
         assert!(block.get("data").is_none());
+    }
+
+    #[tokio::test]
+    async fn message_snapshots_respect_count_and_before_id() {
+        let state = AppState::default();
+        let messages = (1..=4)
+            .map(|index| {
+                let body = format!("message {index}");
+                TranscriptMessage {
+                    created_at: timestamp(2_000 + index),
+                    role: Role::Assistant,
+                    body: body.clone(),
+                    tool_name: None,
+                    tool_call_id: None,
+                    blocks: vec![MessageContentBlock::text(&body).unwrap()],
+                    message_id: Some(format!("message-{index}")),
+                }
+            })
+            .collect();
+        {
+            let mut transcripts = state.transcripts.write().await;
+            upsert_cached_transcript(
+                &mut transcripts,
+                "dev@mac".to_string(),
+                SessionMessagesResponse {
+                    session_id: "session-1".to_string(),
+                    messages,
+                    freshness: TranscriptFreshness {
+                        state: TranscriptFreshnessState::Live,
+                        source: TranscriptSource::Extension,
+                        as_of: timestamp(2_004),
+                    },
+                    activity: SessionActivity {
+                        active: true,
+                        attached: true,
+                    },
+                    warnings: Vec::new(),
+                },
+            );
+        }
+
+        let app = app(state);
+        let response = app
+            .clone()
+            .oneshot(empty_request(
+                Method::GET,
+                "/sessions/session-1/messages?count=2",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let returned: ApiSessionMessagesResponse = json_response(response).await;
+        let message_ids = returned
+            .messages
+            .into_iter()
+            .map(|message| message.message_id.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(message_ids, vec!["message-3", "message-4"]);
+
+        let response = app
+            .oneshot(empty_request(
+                Method::GET,
+                "/sessions/session-1/messages?count=2&before_id=message-3",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let returned: ApiSessionMessagesResponse = json_response(response).await;
+        let message_ids = returned
+            .messages
+            .into_iter()
+            .map(|message| message.message_id.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(message_ids, vec!["message-1", "message-2"]);
+    }
+
+    #[tokio::test]
+    async fn message_before_id_not_found_returns_400() {
+        let state = AppState::default();
+        {
+            let mut transcripts = state.transcripts.write().await;
+            upsert_cached_transcript(
+                &mut transcripts,
+                "dev@mac".to_string(),
+                sample_transcript(
+                    "session-1",
+                    "cached transcript",
+                    TranscriptFreshnessState::Live,
+                    TranscriptSource::Extension,
+                    true,
+                    true,
+                    2_000,
+                ),
+            );
+        }
+
+        let app = app(state);
+        let response = app
+            .oneshot(empty_request(
+                Method::GET,
+                "/sessions/session-1/messages?before_id=missing",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
