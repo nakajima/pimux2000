@@ -372,7 +372,7 @@ Current behavior:
 Example events:
 
 ```json
-{"type":"snapshot","sequence":1,"session":{"sessionId":"4047b693-44a1-4917-884b-f7d8f2d5882a","messages":[{"created_at":"2026-03-27T20:10:00.000Z","role":"user","body":"hello live","blocks":[{"type":"text","text":"hello live"}]}],"freshness":{"state":"live","source":"extension","asOf":"2026-03-27T20:10:00.000Z"},"activity":{"active":true,"attached":true},"warnings":[]}}
+{"type":"snapshot","sequence":1,"session":{"sessionId":"4047b693-44a1-4917-884b-f7d8f2d5882a","messages":[{"messageId":"synthetic-00000000","created_at":"2026-03-27T20:10:00.000Z","role":"user","body":"hello live","blocks":[{"type":"text","text":"hello live"}]}],"freshness":{"state":"live","source":"extension","asOf":"2026-03-27T20:10:00.000Z"},"activity":{"active":true,"attached":true},"warnings":[]}}
 {"type":"sessionState","sequence":2,"connected":true,"missing":false,"lastSeenAt":"2026-03-28T06:20:00.000Z"}
 {"type":"keepalive","sequence":3,"timestamp":"2026-03-28T06:20:10.000Z"}
 ```
@@ -385,7 +385,7 @@ Notes:
 
 ### GET /sessions/{id}/messages
 
-Returns the best transcript snapshot the server currently has for a session.
+Returns the transcript snapshot stored in the server's Postgres archive for a session. This endpoint does not read the in-memory live cache or fetch from the host on demand.
 
 Query params:
 - `hostLocation=...` — optional exact host selector; when provided, the server resolves the transcript only for that host/session pair
@@ -393,10 +393,10 @@ Query params:
 - `before_id=...` — optional cursor; returns messages older than the message whose `messageId` matches the cursor (`beforeId` is also accepted)
 
 Current behavior:
-1. if the server already has a cached snapshot for the requested session (and host, when `hostLocation` is provided), it returns it immediately
-2. otherwise it asks the owning host agent to fetch the transcript over the persistent agent WebSocket
-3. it waits up to about **5 seconds** for that host response
-4. if the host cannot provide a transcript in time, the request fails
+1. the server reads the transcript from Postgres
+2. `messageId` values are assigned from the full transcript position before pagination
+3. `count` and `before_id` are applied to that Postgres-backed snapshot
+4. if the transcript is not present in Postgres, the request fails instead of falling back to live memory or host fetch
 
 Response shape:
 
@@ -405,6 +405,7 @@ Response shape:
   "sessionId": "4047b693-44a1-4917-884b-f7d8f2d5882a",
   "messages": [
     {
+      "messageId": "synthetic-00000000",
       "created_at": "2026-03-27T20:10:00.000Z",
       "role": "user",
       "body": "hello live",
@@ -413,6 +414,7 @@ Response shape:
       ]
     },
     {
+      "messageId": "synthetic-00000001",
       "created_at": "2026-03-27T20:10:02.000Z",
       "role": "assistant",
       "body": "final live reply",
@@ -438,12 +440,13 @@ Response shape:
 Notes:
 - `messages` are ordered oldest to newest.
 - This is a full transcript snapshot for the currently selected branch that pimux knows about.
-- `warnings` contains non-fatal notes. Persisted fallback responses currently include a warning explaining that the transcript was reconstructed from disk.
+- `warnings` contains non-fatal notes captured with the archived transcript.
 
 #### Message model
 
 Each message has:
 
+- `messageId: string` - durable HTTP API cursor/key for the message, assigned by pimux from the message position in the full transcript before pagination. These IDs do not change when the backing transcript source changes between live, persisted, and archived snapshots with the same message order.
 - `created_at: string`
 - `role: string`
 - `body: string` — compatibility/plain-text rendering field; image-only messages may use placeholders like `[Image]`
@@ -522,9 +525,9 @@ That means “recently live snapshot, but not currently attached.”
 
 - `200 OK` — transcript snapshot returned
 - `400 Bad Request` — `before_id` did not match a message in the snapshot
-- `404 Not Found` — server does not know this session, or the owning host reported that it could not find it
-- `502 Bad Gateway` — host-side fetch failed
-- `504 Gateway Timeout` — server timed out waiting for the host to provide the transcript
+- `404 Not Found` — the transcript was not found in Postgres
+- `502 Bad Gateway` — Postgres transcript query failed
+- `503 Service Unavailable` — Postgres archive is not configured
 
 ### Recommended polling strategy
 

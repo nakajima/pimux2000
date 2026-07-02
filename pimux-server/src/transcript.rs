@@ -25,6 +25,19 @@ pub struct ApiSessionMessagesResponse {
     pub warnings: Vec<String>,
 }
 
+impl SessionMessagesResponse {
+    pub fn with_public_message_ids(mut self) -> Self {
+        self.assign_public_message_ids();
+        self
+    }
+
+    pub fn assign_public_message_ids(&mut self) {
+        for (index, message) in self.messages.iter_mut().enumerate() {
+            message.message_id = Some(format!("synthetic-{index:08}"));
+        }
+    }
+}
+
 impl From<&SessionMessagesResponse> for ApiSessionMessagesResponse {
     fn from(response: &SessionMessagesResponse) -> Self {
         Self {

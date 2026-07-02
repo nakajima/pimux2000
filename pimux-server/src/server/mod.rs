@@ -1321,7 +1321,8 @@ async fn session_messages(
 ) -> Result<Json<ApiSessionMessagesResponse>, (StatusCode, Json<ErrorResponse>)> {
     let normalized_host_location = query.host_location.as_deref().map(normalize_host_location);
     let snapshot =
-        resolve_session_snapshot(&state, &session_id, normalized_host_location.as_deref()).await?;
+        resolve_archived_session_snapshot(&state, &session_id, normalized_host_location.as_deref())
+            .await?;
     let snapshot = query.apply_to_snapshot(snapshot)?;
     Ok(Json(ApiSessionMessagesResponse::from(&snapshot)))
 }
@@ -2612,18 +2613,46 @@ async fn is_current_agent_connection(
         .unwrap_or(false)
 }
 
+async fn resolve_archived_session_snapshot(
+    state: &AppState,
+    session_id: &str,
+    host_location: Option<&str>,
+) -> Result<SessionMessagesResponse, (StatusCode, Json<ErrorResponse>)> {
+    if state.postgres_backup.is_none() {
+        return Err(service_unavailable(format!(
+            "postgres transcript archive is not configured; set {}",
+            postgres_backup::POSTGRES_BACKUP_URL_ENV
+        )));
+    }
+
+    match archived_session_snapshot(state, session_id, host_location).await {
+        Ok(Some(snapshot)) => Ok(snapshot.with_public_message_ids()),
+        Ok(None) => match host_location {
+            Some(host_location) => Err(not_found(format!(
+                "session {session_id} was not found in postgres for host {host_location}"
+            ))),
+            None => Err(not_found(format!(
+                "session {session_id} was not found in postgres"
+            ))),
+        },
+        Err(error) => Err(bad_gateway(format!(
+            "postgres transcript query failed: {error}"
+        ))),
+    }
+}
+
 async fn resolve_session_snapshot(
     state: &AppState,
     session_id: &str,
     host_location: Option<&str>,
 ) -> Result<SessionMessagesResponse, (StatusCode, Json<ErrorResponse>)> {
     if let Some(cached) = cached_transcript(state, session_id, host_location).await {
-        return Ok(cached.response);
+        return Ok(cached.response.with_public_message_ids());
     }
 
     if state.postgres_backup.is_some() {
         match archived_session_snapshot(state, session_id, host_location).await {
-            Ok(Some(snapshot)) => return Ok(snapshot),
+            Ok(Some(snapshot)) => return Ok(snapshot.with_public_message_ids()),
             Ok(None) => {}
             Err(error) => {
                 return Err(bad_gateway(format!(
@@ -2673,7 +2702,7 @@ async fn resolve_session_snapshot(
     }
 
     match tokio::time::timeout(ON_DEMAND_FETCH_TIMEOUT, receiver).await {
-        Ok(Ok(Ok(session))) => Ok(session),
+        Ok(Ok(Ok(session))) => Ok(session.with_public_message_ids()),
         Ok(Ok(Err(error))) => Err((
             status_for_fetch_error(&error),
             Json(ErrorResponse { error }),
@@ -3008,10 +3037,13 @@ fn session_subscription_event_to_stream_event(
     sequence: u64,
 ) -> SessionStreamEvent {
     match event {
-        SessionSubscriptionEvent::Snapshot(session) => SessionStreamEvent::Snapshot {
-            sequence,
-            session: ApiSessionMessagesResponse::from(&session),
-        },
+        SessionSubscriptionEvent::Snapshot(session) => {
+            let session = session.with_public_message_ids();
+            SessionStreamEvent::Snapshot {
+                sequence,
+                session: ApiSessionMessagesResponse::from(&session),
+            }
+        }
         SessionSubscriptionEvent::SessionState {
             connected,
             missing,
@@ -3878,6 +3910,13 @@ fn bad_gateway(error: String) -> (StatusCode, Json<ErrorResponse>) {
     (StatusCode::BAD_GATEWAY, Json(ErrorResponse { error }))
 }
 
+fn service_unavailable(error: String) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse { error }),
+    )
+}
+
 fn gateway_timeout(error: String) -> (StatusCode, Json<ErrorResponse>) {
     (StatusCode::GATEWAY_TIMEOUT, Json(ErrorResponse { error }))
 }
@@ -4292,7 +4331,6 @@ mod tests {
 
     use axum::{
         body::{Body, to_bytes},
-        extract::Query,
         http::{Method, Request, header},
     };
     use chrono::{Duration as ChronoDuration, TimeZone, Utc};
@@ -4925,7 +4963,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returns_cached_transcript_snapshot() {
+    async fn rest_messages_requires_postgres_archive() {
         let state = AppState::default();
         {
             let mut transcripts = state.transcripts.write().await;
@@ -4949,7 +4987,7 @@ mod tests {
             .oneshot(empty_request(Method::GET, "/sessions/session-1/messages"))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -4961,12 +4999,7 @@ mod tests {
         };
         update_host_snapshot(&state, host, vec![sample_active_session("session-1")]).await;
 
-        let result = session_messages(
-            State(state.clone()),
-            Path("session-1".to_string()),
-            Query(SessionMessagesQuery::default()),
-        )
-        .await;
+        let result = resolve_session_snapshot(&state, "session-1", None).await;
         let (status, _) = result.err().expect("request should fail");
 
         assert_eq!(status, StatusCode::BAD_GATEWAY);
@@ -5007,14 +5040,9 @@ mod tests {
         let waiter = tokio::spawn({
             let state = state.clone();
             async move {
-                session_messages(
-                    State(state),
-                    Path("session-1".to_string()),
-                    Query(SessionMessagesQuery::default()),
-                )
-                .await
-                .unwrap()
-                .0
+                resolve_session_snapshot(&state, "session-1", None)
+                    .await
+                    .unwrap()
             }
         });
 
@@ -5070,14 +5098,9 @@ mod tests {
         let waiter = tokio::spawn({
             let state = state.clone();
             async move {
-                session_messages(
-                    State(state),
-                    Path("session-1".to_string()),
-                    Query(SessionMessagesQuery::default()),
-                )
-                .await
-                .unwrap()
-                .0
+                resolve_session_snapshot(&state, "session-1", None)
+                    .await
+                    .unwrap()
             }
         });
 
@@ -5193,17 +5216,9 @@ mod tests {
             let state = state.clone();
             let host_location = host_b.location.clone();
             async move {
-                session_messages(
-                    State(state),
-                    Path("session-1".to_string()),
-                    Query(SessionMessagesQuery {
-                        host_location: Some(host_location),
-                        ..Default::default()
-                    }),
-                )
-                .await
-                .unwrap()
-                .0
+                resolve_session_snapshot(&state, "session-1", Some(&host_location))
+                    .await
+                    .unwrap()
             }
         });
 
@@ -5292,21 +5307,8 @@ mod tests {
 
     #[tokio::test]
     async fn message_snapshots_expose_attachment_ids_without_inline_data() {
-        let state = AppState::default();
-        let response = sample_image_transcript("session-1");
-        {
-            let mut transcripts = state.transcripts.write().await;
-            upsert_cached_transcript(&mut transcripts, "dev@mac".to_string(), response);
-        }
-
-        let response = session_messages(
-            State(state),
-            Path("session-1".to_string()),
-            Query(SessionMessagesQuery::default()),
-        )
-        .await
-        .unwrap()
-        .0;
+        let response = sample_image_transcript("session-1").with_public_message_ids();
+        let response = ApiSessionMessagesResponse::from(&response);
         let payload = serde_json::to_value(&response).unwrap();
         let block = &payload["messages"][0]["blocks"][0];
 
@@ -5321,7 +5323,6 @@ mod tests {
 
     #[tokio::test]
     async fn message_snapshots_respect_count_and_before_id() {
-        let state = AppState::default();
         let messages = (1..=4)
             .map(|index| {
                 let body = format!("message {index}");
@@ -5332,96 +5333,124 @@ mod tests {
                     tool_name: None,
                     tool_call_id: None,
                     blocks: vec![MessageContentBlock::text(&body).unwrap()],
-                    message_id: Some(format!("message-{index}")),
+                    message_id: None,
                 }
             })
             .collect();
-        {
-            let mut transcripts = state.transcripts.write().await;
-            upsert_cached_transcript(
-                &mut transcripts,
-                "dev@mac".to_string(),
-                SessionMessagesResponse {
-                    session_id: "session-1".to_string(),
-                    messages,
-                    freshness: TranscriptFreshness {
-                        state: TranscriptFreshnessState::Live,
-                        source: TranscriptSource::Extension,
-                        as_of: timestamp(2_004),
-                    },
-                    activity: SessionActivity {
-                        active: true,
-                        attached: true,
-                    },
-                    warnings: Vec::new(),
-                },
-            );
+        let snapshot = SessionMessagesResponse {
+            session_id: "session-1".to_string(),
+            messages,
+            freshness: TranscriptFreshness {
+                state: TranscriptFreshnessState::Live,
+                source: TranscriptSource::Extension,
+                as_of: timestamp(2_004),
+            },
+            activity: SessionActivity {
+                active: true,
+                attached: true,
+            },
+            warnings: Vec::new(),
         }
+        .with_public_message_ids();
 
-        let app = app(state);
-        let response = app
-            .clone()
-            .oneshot(empty_request(
-                Method::GET,
-                "/sessions/session-1/messages?count=2",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let returned: ApiSessionMessagesResponse = json_response(response).await;
+        let returned = SessionMessagesQuery {
+            count: Some(2),
+            ..Default::default()
+        }
+        .apply_to_snapshot(snapshot.clone())
+        .unwrap();
         let message_ids = returned
             .messages
             .into_iter()
             .map(|message| message.message_id.unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(message_ids, vec!["message-3", "message-4"]);
+        assert_eq!(
+            message_ids,
+            vec!["synthetic-00000002", "synthetic-00000003"]
+        );
 
-        let response = app
-            .oneshot(empty_request(
-                Method::GET,
-                "/sessions/session-1/messages?count=2&before_id=message-3",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let returned: ApiSessionMessagesResponse = json_response(response).await;
+        let returned = SessionMessagesQuery {
+            count: Some(2),
+            before_id: Some("synthetic-00000002".to_string()),
+            ..Default::default()
+        }
+        .apply_to_snapshot(snapshot)
+        .unwrap();
         let message_ids = returned
             .messages
             .into_iter()
             .map(|message| message.message_id.unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(message_ids, vec!["message-1", "message-2"]);
+        assert_eq!(
+            message_ids,
+            vec!["synthetic-00000000", "synthetic-00000001"]
+        );
+    }
+
+    #[tokio::test]
+    async fn message_snapshots_assign_message_ids_when_source_has_none() {
+        let messages = (1..=3)
+            .map(|index| {
+                let body = format!("message {index}");
+                TranscriptMessage {
+                    created_at: timestamp(2_000 + index),
+                    role: Role::Assistant,
+                    body: body.clone(),
+                    tool_name: None,
+                    tool_call_id: None,
+                    blocks: vec![MessageContentBlock::text(&body).unwrap()],
+                    message_id: None,
+                }
+            })
+            .collect();
+        let returned = SessionMessagesResponse {
+            session_id: "session-1".to_string(),
+            messages,
+            freshness: TranscriptFreshness {
+                state: TranscriptFreshnessState::Live,
+                source: TranscriptSource::Extension,
+                as_of: timestamp(2_003),
+            },
+            activity: SessionActivity {
+                active: true,
+                attached: true,
+            },
+            warnings: Vec::new(),
+        }
+        .with_public_message_ids();
+
+        let message_ids = returned
+            .messages
+            .into_iter()
+            .map(|message| message.message_id.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            message_ids,
+            vec![
+                "synthetic-00000000",
+                "synthetic-00000001",
+                "synthetic-00000002"
+            ]
+        );
     }
 
     #[tokio::test]
     async fn message_before_id_not_found_returns_400() {
-        let state = AppState::default();
-        {
-            let mut transcripts = state.transcripts.write().await;
-            upsert_cached_transcript(
-                &mut transcripts,
-                "dev@mac".to_string(),
-                sample_transcript(
-                    "session-1",
-                    "cached transcript",
-                    TranscriptFreshnessState::Live,
-                    TranscriptSource::Extension,
-                    true,
-                    true,
-                    2_000,
-                ),
-            );
+        let result = SessionMessagesQuery {
+            before_id: Some("missing".to_string()),
+            ..Default::default()
         }
-
-        let app = app(state);
-        let response = app
-            .oneshot(empty_request(
-                Method::GET,
-                "/sessions/session-1/messages?before_id=missing",
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        .apply_to_snapshot(sample_transcript(
+            "session-1",
+            "cached transcript",
+            TranscriptFreshnessState::Live,
+            TranscriptSource::Extension,
+            true,
+            true,
+            2_000,
+        ))
+        .expect_err("request should fail");
+        assert_eq!(result.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

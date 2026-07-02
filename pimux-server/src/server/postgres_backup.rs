@@ -342,11 +342,13 @@ impl PostgresBackupHandle {
         active_session: Option<&ActiveSession>,
         transcript: &SessionMessagesResponse,
     ) -> Result<(), ()> {
+        let mut transcript = transcript.clone();
+        transcript.assign_public_message_ids();
         self.sender
             .send(BackupEvent::Transcript {
                 host: host.clone(),
                 active_session: active_session.cloned(),
-                transcript: transcript.clone(),
+                transcript,
                 observed_at: Utc::now(),
             })
             .await
@@ -368,21 +370,6 @@ impl PostgresBackupStore {
     ) -> Result<(), BoxError> {
         let row = session_row(host, Some(session), None, observed_at)?;
         upsert_session_row(&self.client, &row).await
-    }
-
-    pub async fn upsert_transcript(
-        &mut self,
-        host: &HostIdentity,
-        active_session: Option<&ActiveSession>,
-        transcript: &SessionMessagesResponse,
-        observed_at: DateTime<Utc>,
-    ) -> Result<usize, BoxError> {
-        let row = session_row(host, active_session, Some(transcript), observed_at)?;
-        let transaction = self.client.transaction().await?;
-        upsert_session_row(&transaction, &row).await?;
-        let inserted = upsert_message_rows(&transaction, host, transcript, observed_at).await?;
-        transaction.commit().await?;
-        Ok(inserted)
     }
 
     pub async fn replace_transcript(
@@ -458,7 +445,7 @@ async fn apply_event(store: &mut PostgresBackupStore, event: &BackupEvent) -> Re
             observed_at,
         } => {
             store
-                .upsert_transcript(host, active_session.as_ref(), transcript, *observed_at)
+                .replace_transcript(host, active_session.as_ref(), transcript, *observed_at)
                 .await?;
             Ok(())
         }
