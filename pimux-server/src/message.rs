@@ -150,6 +150,8 @@ pub struct Message {
 pub struct ApiMessageContentBlock {
     #[serde(rename = "type")]
     pub kind: MessageContentBlockKind,
+    #[serde(default)]
+    pub position: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,7 +222,8 @@ impl Message {
             blocks: self
                 .blocks
                 .iter()
-                .map(ApiMessageContentBlock::from)
+                .enumerate()
+                .map(|(position, block)| ApiMessageContentBlock::from_positioned(block, position))
                 .collect(),
         }
     }
@@ -324,8 +327,8 @@ pub fn attachment_payload(messages: &[Message], attachment_id: &str) -> Option<(
     })
 }
 
-impl From<&MessageContentBlock> for ApiMessageContentBlock {
-    fn from(block: &MessageContentBlock) -> Self {
+impl ApiMessageContentBlock {
+    pub fn from_positioned(block: &MessageContentBlock, position: usize) -> Self {
         let attachment_id = match block.kind {
             MessageContentBlockKind::Image => block.attachment_id(),
             _ => None,
@@ -333,12 +336,19 @@ impl From<&MessageContentBlock> for ApiMessageContentBlock {
 
         Self {
             kind: block.kind,
+            position,
             text: block.text.clone(),
             tool_call_name: block.tool_call_name.clone(),
             tool_call_id: block.tool_call_id.clone(),
             mime_type: block.mime_type.clone(),
             attachment_id,
         }
+    }
+}
+
+impl From<&MessageContentBlock> for ApiMessageContentBlock {
+    fn from(block: &MessageContentBlock) -> Self {
+        Self::from_positioned(block, 0)
     }
 }
 
@@ -713,6 +723,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(message.body, "describe this");
+    }
+
+    #[test]
+    fn api_message_blocks_include_positions() {
+        let message = Message::from_blocks(
+            Utc::now(),
+            Role::User,
+            vec![
+                MessageContentBlock::text("describe this").unwrap(),
+                MessageContentBlock::image(Some("image/png"), Some("ZmFrZQ==")),
+            ],
+        )
+        .unwrap();
+
+        let api = message.to_api();
+        let positions = api
+            .blocks
+            .iter()
+            .map(|block| block.position)
+            .collect::<Vec<_>>();
+        assert_eq!(positions, vec![0, 1]);
     }
 
     #[test]

@@ -372,7 +372,7 @@ Current behavior:
 Example events:
 
 ```json
-{"type":"snapshot","sequence":1,"session":{"sessionId":"4047b693-44a1-4917-884b-f7d8f2d5882a","messages":[{"messageId":"synthetic-00000000","created_at":"2026-03-27T20:10:00.000Z","role":"user","body":"hello live","blocks":[{"type":"text","text":"hello live"}]}],"freshness":{"state":"live","source":"extension","asOf":"2026-03-27T20:10:00.000Z"},"activity":{"active":true,"attached":true},"warnings":[]}}
+{"type":"snapshot","sequence":1,"session":{"sessionId":"4047b693-44a1-4917-884b-f7d8f2d5882a","messages":[{"messageId":"synthetic-00000000","created_at":"2026-03-27T20:10:00.000Z","role":"user","body":"hello live","blocks":[{"type":"text","position":0,"text":"hello live"}]}],"freshness":{"state":"live","source":"extension","asOf":"2026-03-27T20:10:00.000Z"},"activity":{"active":true,"attached":true},"warnings":[]}}
 {"type":"sessionState","sequence":2,"connected":true,"missing":false,"lastSeenAt":"2026-03-28T06:20:00.000Z"}
 {"type":"keepalive","sequence":3,"timestamp":"2026-03-28T06:20:10.000Z"}
 ```
@@ -410,7 +410,7 @@ Response shape:
       "role": "user",
       "body": "hello live",
       "blocks": [
-        { "type": "text", "text": "hello live" }
+        { "type": "text", "position": 0, "text": "hello live" }
       ]
     },
     {
@@ -419,8 +419,8 @@ Response shape:
       "role": "assistant",
       "body": "final live reply",
       "blocks": [
-        { "type": "thinking", "text": "Planning the answer" },
-        { "type": "text", "text": "final live reply" }
+        { "type": "thinking", "position": 0, "text": "Planning the answer" },
+        { "type": "text", "position": 1, "text": "final live reply" }
       ]
     }
   ],
@@ -457,6 +457,7 @@ Snapshots do not inline raw image bytes. Image blocks reference fetchable attach
 
 `blocks` entries currently use:
 - `type: "text" | "thinking" | "toolCall" | "image" | "other"`
+- `position: number` — stable 0-based position within the message's full `blocks` array
 - `text?: string` — for text/thinking/other blocks, and for tool-call argument summaries when available
 - `toolCallName?: string`
 - `mimeType?: string`
