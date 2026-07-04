@@ -39,6 +39,7 @@ interface PimuxMessageBlock {
 	type: PimuxMessageBlockType;
 	text?: string;
 	toolCallName?: string;
+	toolCallId?: string;
 	mimeType?: string;
 	data?: string;
 }
@@ -48,6 +49,7 @@ interface PimuxMessage {
 	role: PimuxRole;
 	body: string;
 	toolName?: string;
+	toolCallId?: string;
 	blocks?: PimuxMessageBlock[];
 	messageId?: string;
 }
@@ -2410,7 +2412,8 @@ function agentMessageToPimuxMessage(message: any, fallbackTimestamp?: string): P
 				timestampToIso(message.timestamp, fallbackTimestamp),
 				"toolResult",
 				contentToBlocks(message.content, false),
-				typeof message.toolName === "string" ? collapseWhitespace(message.toolName) : undefined
+				typeof message.toolName === "string" ? collapseWhitespace(message.toolName) : undefined,
+				typeof message.toolCallId === "string" ? normalizeDisplayText(message.toolCallId) : undefined
 			);
 		case "bashExecution": {
 			const text = flattenBashExecution(message);
@@ -2455,7 +2458,8 @@ function pimuxMessageFromBlocks(
 	created_at: string,
 	role: PimuxRole,
 	blocks: PimuxMessageBlock[],
-	toolName?: string
+	toolName?: string,
+	toolCallId?: string
 ): PimuxMessage | undefined {
 	const normalizedBlocks = blocks
 		.map(normalizeBlock)
@@ -2467,6 +2471,7 @@ function pimuxMessageFromBlocks(
 		role,
 		body: bodyFromBlocks(role, normalizedBlocks),
 		toolName: toolName || undefined,
+		toolCallId: toolCallId || undefined,
 		blocks: normalizedBlocks,
 	};
 }
@@ -2485,8 +2490,14 @@ function normalizeBlock(block: PimuxMessageBlock | undefined): PimuxMessageBlock
 		case "toolCall": {
 			const toolCallName = collapseWhitespace(block.toolCallName);
 			if (!toolCallName) return undefined;
+			const toolCallId = normalizeDisplayText(block.toolCallId);
 			const text = normalizeDisplayText(block.text);
-			return text ? { type: "toolCall", toolCallName, text } : { type: "toolCall", toolCallName };
+			return {
+				type: "toolCall",
+				toolCallName,
+				...(toolCallId ? { toolCallId } : {}),
+				...(text ? { text } : {}),
+			};
 		}
 		case "image": {
 			const mimeType = normalizeMimeType(block.mimeType);
@@ -2615,10 +2626,14 @@ function contentToBlocks(content: any, includeToolCalls: boolean): PimuxMessageB
 					if (!includeToolCalls || typeof block.name !== "string") return undefined;
 					const toolCallName = collapseWhitespace(block.name);
 					if (!toolCallName) return undefined;
+					const toolCallId = typeof block.id === "string" ? normalizeDisplayText(block.id) : undefined;
 					const text = toolCallSummary(toolCallName, block.arguments);
-					return text
-						? ({ type: "toolCall", toolCallName, text } satisfies PimuxMessageBlock)
-						: ({ type: "toolCall", toolCallName } satisfies PimuxMessageBlock);
+					return {
+						type: "toolCall",
+						toolCallName,
+						...(toolCallId ? { toolCallId } : {}),
+						...(text ? { text } : {}),
+					} satisfies PimuxMessageBlock;
 				}
 				case "image": {
 					const mimeType = normalizeMimeType(block.mimeType);

@@ -451,6 +451,7 @@ Each message has:
 - `role: string`
 - `body: string` — compatibility/plain-text rendering field; image-only messages may use placeholders like `[Image]`
 - `toolName?: string` — present for tool result messages when available
+- `toolCallId?: string` — present for tool result messages when available; links the result to the assistant `toolCall` block with the same id
 - `blocks: MessageBlock[]` — structured display blocks for the app
 
 Snapshots do not inline raw image bytes. Image blocks reference fetchable attachments instead.
@@ -460,6 +461,7 @@ Snapshots do not inline raw image bytes. Image blocks reference fetchable attach
 - `position: number` — stable 0-based position within the message's full `blocks` array
 - `text?: string` — for text/thinking/other blocks, and for tool-call argument summaries when available
 - `toolCallName?: string`
+- `toolCallId?: string` — present for assistant tool-call blocks when pi provided a tool call id
 - `mimeType?: string`
 - `attachmentId?: string` — present for image blocks when the attachment can be fetched from `GET /sessions/{id}/attachments/{attachmentId}`
 
