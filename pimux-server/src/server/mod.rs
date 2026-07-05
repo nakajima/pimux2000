@@ -310,6 +310,8 @@ struct SessionMessagesQuery {
     count: Option<usize>,
     #[serde(alias = "before_id")]
     before_id: Option<String>,
+    #[serde(alias = "after_id")]
+    after_id: Option<String>,
 }
 
 impl SessionMessagesQuery {
@@ -317,20 +319,41 @@ impl SessionMessagesQuery {
         &self,
         mut snapshot: SessionMessagesResponse,
     ) -> Result<SessionMessagesResponse, (StatusCode, Json<ErrorResponse>)> {
-        if self.count.is_none() && self.before_id.is_none() {
+        if self.count.is_none() && self.before_id.is_none() && self.after_id.is_none() {
             return Ok(snapshot);
         }
+        if self.before_id.is_some() && self.after_id.is_some() {
+            return Err(bad_request(
+                "before_id and after_id cannot both be provided".to_string(),
+            ));
+        }
 
-        let end = match self.before_id.as_deref() {
-            Some(before_id) => snapshot
+        let (start, end) = if let Some(before_id) = self.before_id.as_deref() {
+            let end = snapshot
                 .messages
                 .iter()
                 .position(|message| message.message_id.as_deref() == Some(before_id))
-                .ok_or_else(|| bad_request(format!("message `{before_id}` not found")))?,
-            None => snapshot.messages.len(),
+                .ok_or_else(|| bad_request(format!("message `{before_id}` not found")))?;
+            let count = self.count.unwrap_or(end);
+            (end.saturating_sub(count), end)
+        } else if let Some(after_id) = self.after_id.as_deref() {
+            let after = snapshot
+                .messages
+                .iter()
+                .position(|message| message.message_id.as_deref() == Some(after_id))
+                .ok_or_else(|| bad_request(format!("message `{after_id}` not found")))?;
+            let start = after.saturating_add(1).min(snapshot.messages.len());
+            let end = match self.count {
+                Some(count) => start.saturating_add(count).min(snapshot.messages.len()),
+                None => snapshot.messages.len(),
+            };
+            (start, end)
+        } else {
+            let end = snapshot.messages.len();
+            let count = self.count.unwrap_or(end);
+            (end.saturating_sub(count), end)
         };
-        let count = self.count.unwrap_or(end);
-        let start = end.saturating_sub(count);
+
         snapshot.messages = snapshot
             .messages
             .into_iter()
@@ -5322,7 +5345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_snapshots_respect_count_and_before_id() {
+    async fn message_snapshots_respect_count_before_id_and_after_id() {
         let messages = (1..=4)
             .map(|index| {
                 let body = format!("message {index}");
@@ -5374,7 +5397,7 @@ mod tests {
             before_id: Some("synthetic-00000002".to_string()),
             ..Default::default()
         }
-        .apply_to_snapshot(snapshot)
+        .apply_to_snapshot(snapshot.clone())
         .unwrap();
         let message_ids = returned
             .messages
@@ -5385,6 +5408,31 @@ mod tests {
             message_ids,
             vec!["synthetic-00000000", "synthetic-00000001"]
         );
+
+        let returned = SessionMessagesQuery {
+            count: Some(2),
+            after_id: Some("synthetic-00000000".to_string()),
+            ..Default::default()
+        }
+        .apply_to_snapshot(snapshot.clone())
+        .unwrap();
+        let message_ids = returned
+            .messages
+            .into_iter()
+            .map(|message| message.message_id.unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            message_ids,
+            vec!["synthetic-00000001", "synthetic-00000002"]
+        );
+
+        let returned = SessionMessagesQuery {
+            after_id: Some("synthetic-00000003".to_string()),
+            ..Default::default()
+        }
+        .apply_to_snapshot(snapshot)
+        .unwrap();
+        assert!(returned.messages.is_empty());
     }
 
     #[tokio::test]
@@ -5435,12 +5483,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_before_id_not_found_returns_400() {
-        let result = SessionMessagesQuery {
-            before_id: Some("missing".to_string()),
-            ..Default::default()
-        }
-        .apply_to_snapshot(sample_transcript(
+    async fn message_cursor_errors_return_400() {
+        let snapshot = sample_transcript(
             "session-1",
             "cached transcript",
             TranscriptFreshnessState::Live,
@@ -5448,7 +5492,30 @@ mod tests {
             true,
             true,
             2_000,
-        ))
+        );
+
+        let result = SessionMessagesQuery {
+            before_id: Some("missing".to_string()),
+            ..Default::default()
+        }
+        .apply_to_snapshot(snapshot.clone())
+        .expect_err("request should fail");
+        assert_eq!(result.0, StatusCode::BAD_REQUEST);
+
+        let result = SessionMessagesQuery {
+            after_id: Some("missing".to_string()),
+            ..Default::default()
+        }
+        .apply_to_snapshot(snapshot.clone())
+        .expect_err("request should fail");
+        assert_eq!(result.0, StatusCode::BAD_REQUEST);
+
+        let result = SessionMessagesQuery {
+            before_id: Some("synthetic-00000000".to_string()),
+            after_id: Some("synthetic-00000000".to_string()),
+            ..Default::default()
+        }
+        .apply_to_snapshot(snapshot.with_public_message_ids())
         .expect_err("request should fail");
         assert_eq!(result.0, StatusCode::BAD_REQUEST);
     }

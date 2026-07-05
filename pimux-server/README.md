@@ -389,13 +389,14 @@ Returns the transcript snapshot stored in the server's Postgres archive for a se
 
 Query params:
 - `hostLocation=...` — optional exact host selector; when provided, the server resolves the transcript only for that host/session pair
-- `count=...` — optional max messages to return; without `before_id`, returns the newest `count` messages while preserving chronological order
+- `count=...` — optional max messages to return; without a cursor, returns the newest `count` messages while preserving chronological order
 - `before_id=...` — optional cursor; returns messages older than the message whose `messageId` matches the cursor (`beforeId` is also accepted)
+- `after_id=...` — optional cursor; returns messages newer than the message whose `messageId` matches the cursor (`afterId` is also accepted)
 
 Current behavior:
 1. the server reads the transcript from Postgres
 2. `messageId` values are assigned from the full transcript position before pagination
-3. `count` and `before_id` are applied to that Postgres-backed snapshot
+3. `count`, `before_id`, and `after_id` are applied to that Postgres-backed snapshot
 4. if the transcript is not present in Postgres, the request fails instead of falling back to live memory or host fetch
 
 Response shape:
@@ -527,7 +528,7 @@ That means “recently live snapshot, but not currently attached.”
 #### Status codes for `GET /sessions/{id}/messages`
 
 - `200 OK` — transcript snapshot returned
-- `400 Bad Request` — `before_id` did not match a message in the snapshot
+- `400 Bad Request` — `before_id` / `after_id` did not match a message in the snapshot, or both cursors were provided
 - `404 Not Found` — the transcript was not found in Postgres
 - `502 Bad Gateway` — Postgres transcript query failed
 - `503 Service Unavailable` — Postgres archive is not configured
