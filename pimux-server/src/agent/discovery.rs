@@ -29,6 +29,7 @@ const MODEL_CAPABILITIES_FAILURE_TTL: Duration = Duration::from_secs(30);
 pub enum SessionSource {
     Pi,
     Mi,
+    Claude,
 }
 
 impl SessionSource {
@@ -36,10 +37,19 @@ impl SessionSource {
         matches!(self, Self::Pi)
     }
 
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pi => "pi",
+            Self::Mi => "mi",
+            Self::Claude => "Claude Code",
+        }
+    }
+
     fn public_id(self, native_id: &str) -> String {
         match self {
             Self::Pi => native_id.to_string(),
             Self::Mi => format!("mi:{native_id}"),
+            Self::Claude => format!("claude:{native_id}"),
         }
     }
 }
@@ -114,6 +124,18 @@ pub fn maybe_mi_agent_dir() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".mi"))
 }
 
+fn maybe_claude_projects_dir() -> Option<PathBuf> {
+    let config_dir = env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".claude"))
+        })?;
+    Some(config_dir.join("projects"))
+}
+
 pub fn session_root(pi_agent_dir: &Path) -> PathBuf {
     pi_agent_dir.join("sessions")
 }
@@ -135,6 +157,12 @@ fn session_roots_with_sources(pi_agent_dir: &Path) -> Vec<(SessionSource, PathBu
         }
     }
 
+    if let Some(claude_root) = maybe_claude_projects_dir()
+        && !roots.iter().any(|(_, existing)| *existing == claude_root)
+    {
+        roots.push((SessionSource::Claude, claude_root));
+    }
+
     roots
 }
 
@@ -146,10 +174,12 @@ pub fn discover_sessions(pi_agent_dir: &Path) -> Result<Vec<DiscoveredSession>, 
             continue;
         }
 
-        for entry in WalkDir::new(&session_root)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
+        let walker = match source {
+            SessionSource::Claude => WalkDir::new(&session_root).max_depth(2),
+            SessionSource::Pi | SessionSource::Mi => WalkDir::new(&session_root),
+        };
+
+        for entry in walker.into_iter().filter_map(Result::ok) {
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -180,6 +210,10 @@ pub fn discover_sessions(pi_agent_dir: &Path) -> Result<Vec<DiscoveredSession>, 
 }
 
 fn parse_session_file(path: &Path, source: SessionSource) -> Result<DiscoveredSession, BoxError> {
+    if source == SessionSource::Claude {
+        return parse_claude_session_file(path);
+    }
+
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let metadata = fs::metadata(path)?;
@@ -294,10 +328,12 @@ fn parse_session_file(path: &Path, source: SessionSource) -> Result<DiscoveredSe
                 max_tokens: None,
             })
         }
+        SessionSource::Claude => unreachable!("Claude sessions use their own parser"),
     };
     let supports_images = match source {
         SessionSource::Pi => model_supports_images(&model),
         SessionSource::Mi => None,
+        SessionSource::Claude => unreachable!("Claude sessions use their own parser"),
     };
 
     Ok(DiscoveredSession {
@@ -316,6 +352,152 @@ fn parse_session_file(path: &Path, source: SessionSource) -> Result<DiscoveredSe
         model,
         context_usage,
         supports_images,
+    })
+}
+
+fn parse_claude_session_file(path: &Path) -> Result<DiscoveredSession, BoxError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let metadata = fs::metadata(path)?;
+
+    let mut native_id: Option<String> = None;
+    let mut explicit_summary: Option<String> = None;
+    let mut first_user_summary: Option<String> = None;
+    let mut created_at: Option<DateTime<Utc>> = None;
+    let mut last_user_message_at: Option<DateTime<Utc>> = None;
+    let mut last_assistant_message_at: Option<DateTime<Utc>> = None;
+    let mut last_assistant_usage_total_tokens: Option<u64> = None;
+    let mut cwd: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut transcript_entries = SummaryTranscriptCollector::default();
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let entry: Value = serde_json::from_str(&line)?;
+        if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+
+        if native_id.is_none()
+            && let Some(session_id) = entry.get("sessionId").and_then(Value::as_str)
+        {
+            native_id = Some(session_id.to_string());
+        }
+        if let Some(entry_cwd) = entry.get("cwd").and_then(Value::as_str)
+            && !entry_cwd.trim().is_empty()
+        {
+            cwd = Some(entry_cwd.to_string());
+        }
+
+        let entry_timestamp = entry
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339);
+        if let Some(timestamp) = entry_timestamp {
+            created_at = Some(created_at.map_or(timestamp, |current| current.min(timestamp)));
+        }
+
+        match entry.get("type").and_then(Value::as_str) {
+            Some("ai-title") => {
+                if let Some(title) = entry.get("aiTitle").and_then(Value::as_str) {
+                    let title = collapse_whitespace(title);
+                    if !title.is_empty() {
+                        explicit_summary = Some(title);
+                    }
+                }
+            }
+            Some("user") => {
+                if entry.get("isMeta").and_then(Value::as_bool) == Some(true) {
+                    continue;
+                }
+                let Some(message) = entry.get("message") else {
+                    continue;
+                };
+                let Some(text) = extract_message_text(message.get("content")) else {
+                    continue;
+                };
+
+                if first_user_summary.is_none() {
+                    first_user_summary = Some(truncate_chars(&text, MAX_SUMMARY_LEN));
+                }
+                if let Some(timestamp) = entry_timestamp {
+                    last_user_message_at = Some(timestamp);
+                }
+                transcript_entries.push(format!(
+                    "User: {}",
+                    truncate_chars(&collapse_whitespace(&text), MAX_TRANSCRIPT_ENTRY_CHARS)
+                ));
+            }
+            Some("assistant") => {
+                let Some(message) = entry.get("message") else {
+                    continue;
+                };
+                if let Some(timestamp) = entry_timestamp {
+                    last_assistant_message_at = Some(timestamp);
+                }
+                last_assistant_usage_total_tokens =
+                    extract_usage_total_tokens(message).or(last_assistant_usage_total_tokens);
+
+                if let Some(model_name) = message.get("model").and_then(Value::as_str) {
+                    model = Some(if model_name.contains('/') {
+                        model_name.to_string()
+                    } else {
+                        format!("anthropic/{model_name}")
+                    });
+                }
+
+                if let Some(text) = extract_message_text(message.get("content")) {
+                    transcript_entries.push(format!(
+                        "Assistant: {}",
+                        truncate_chars(&collapse_whitespace(&text), MAX_TRANSCRIPT_ENTRY_CHARS)
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let native_id =
+        native_id.ok_or_else(|| format!("missing Claude session id in {}", path.display()))?;
+    if let Some(index_metadata) = ClaudeSessionIndexMetadata::load(path, &native_id) {
+        explicit_summary = index_metadata.summary.or(explicit_summary);
+        first_user_summary = first_user_summary.or(index_metadata.first_prompt);
+        cwd = index_metadata.project_path.or(cwd);
+    }
+    let created_at = created_at
+        .or_else(|| metadata.created().ok().map(DateTime::<Utc>::from))
+        .unwrap_or_else(|| DateTime::<Utc>::from(UNIX_EPOCH));
+    let updated_at = metadata
+        .modified()
+        .ok()
+        .map(DateTime::<Utc>::from)
+        .unwrap_or(created_at);
+    let heuristic_summary = first_user_summary.unwrap_or_else(|| native_id.clone());
+    let context_usage = last_assistant_usage_total_tokens.map(|used_tokens| SessionContextUsage {
+        used_tokens: Some(used_tokens),
+        max_tokens: None,
+    });
+
+    Ok(DiscoveredSession {
+        source: SessionSource::Claude,
+        session_file: path.to_path_buf(),
+        fingerprint: session_fingerprint(&metadata),
+        id: SessionSource::Claude.public_id(&native_id),
+        explicit_summary,
+        heuristic_summary,
+        summary_input: transcript_entries.into_summary_input(),
+        created_at,
+        updated_at,
+        last_user_message_at: last_user_message_at.unwrap_or(created_at),
+        last_assistant_message_at: last_assistant_message_at.unwrap_or(created_at),
+        cwd: cwd.unwrap_or_else(|| "unknown".to_string()),
+        model: model.unwrap_or_else(|| "unknown".to_string()),
+        context_usage,
+        supports_images: None,
     })
 }
 
@@ -388,14 +570,34 @@ fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {
 
 fn extract_usage_total_tokens(message: &Value) -> Option<u64> {
     let usage = message.get("usage")?;
-    usage.get("totalTokens").and_then(positive_u64).or_else(|| {
-        let input = usage.get("input").and_then(positive_u64).unwrap_or(0);
-        let output = usage.get("output").and_then(positive_u64).unwrap_or(0);
-        let cache_read = usage.get("cacheRead").and_then(positive_u64).unwrap_or(0);
-        let cache_write = usage.get("cacheWrite").and_then(positive_u64).unwrap_or(0);
-        let total = input + output + cache_read + cache_write;
-        (total > 0).then_some(total)
-    })
+    usage
+        .get("totalTokens")
+        .or_else(|| usage.get("total_tokens"))
+        .and_then(positive_u64)
+        .or_else(|| {
+            let input = usage
+                .get("input")
+                .or_else(|| usage.get("input_tokens"))
+                .and_then(positive_u64)
+                .unwrap_or(0);
+            let output = usage
+                .get("output")
+                .or_else(|| usage.get("output_tokens"))
+                .and_then(positive_u64)
+                .unwrap_or(0);
+            let cache_read = usage
+                .get("cacheRead")
+                .or_else(|| usage.get("cache_read_input_tokens"))
+                .and_then(positive_u64)
+                .unwrap_or(0);
+            let cache_write = usage
+                .get("cacheWrite")
+                .or_else(|| usage.get("cache_creation_input_tokens"))
+                .and_then(positive_u64)
+                .unwrap_or(0);
+            let total = input + output + cache_read + cache_write;
+            (total > 0).then_some(total)
+        })
 }
 
 fn positive_u64(value: &Value) -> Option<u64> {
@@ -652,6 +854,44 @@ struct SessionHeader {
     cwd: String,
 }
 
+struct ClaudeSessionIndexMetadata {
+    summary: Option<String>,
+    first_prompt: Option<String>,
+    project_path: Option<String>,
+}
+
+impl ClaudeSessionIndexMetadata {
+    fn load(session_file: &Path, native_id: &str) -> Option<Self> {
+        let index_path = session_file.parent()?.join("sessions-index.json");
+        let index: Value = serde_json::from_reader(File::open(index_path).ok()?).ok()?;
+        let entry = index
+            .get("entries")?
+            .as_array()?
+            .iter()
+            .find(|entry| entry.get("sessionId").and_then(Value::as_str) == Some(native_id))?;
+
+        Some(Self {
+            summary: entry
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(collapse_whitespace)
+                .filter(|value| !value.is_empty()),
+            first_prompt: entry
+                .get("firstPrompt")
+                .and_then(Value::as_str)
+                .map(collapse_whitespace)
+                .filter(|value| !value.is_empty())
+                .map(|value| truncate_chars(&value, MAX_SUMMARY_LEN)),
+            project_path: entry
+                .get("projectPath")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -725,6 +965,20 @@ mod tests {
                 "output": 20,
                 "cacheRead": 30,
                 "cacheWrite": 40
+            }
+        });
+
+        assert_eq!(extract_usage_total_tokens(&message), Some(100));
+    }
+
+    #[test]
+    fn extract_usage_total_tokens_supports_claude_usage_fields() {
+        let message = json!({
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 40
             }
         });
 
@@ -842,6 +1096,66 @@ mod tests {
             })
         );
         assert_eq!(session.supports_images, None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_sessions_use_titles_metadata_and_prefixed_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "pimux-discovery-claude-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        fs::write(
+            &path,
+            [
+                r#"{"type":"user","uuid":"user-1","parentUuid":null,"sessionId":"session-1","timestamp":"2026-04-08T00:00:01.000Z","cwd":"/tmp/project","isSidechain":false,"message":{"role":"user","content":"Implement Claude digest sync"}}"#,
+                r#"{"type":"assistant","uuid":"assistant-1","parentUuid":"user-1","sessionId":"session-1","timestamp":"2026-04-08T00:00:02.000Z","cwd":"/tmp/project","isSidechain":false,"message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40},"content":[{"type":"text","text":"Implemented the sync."}]}}"#,
+                r#"{"type":"user","uuid":"meta-1","parentUuid":"assistant-1","sessionId":"session-1","timestamp":"2026-04-08T00:00:03.000Z","cwd":"/tmp/project","isMeta":true,"isSidechain":false,"message":{"role":"user","content":"local command metadata"}}"#,
+                r#"{"type":"user","uuid":"sidechain-1","parentUuid":null,"sessionId":"other-session","timestamp":"2026-04-08T00:00:04.000Z","cwd":"/tmp/other","isSidechain":true,"message":{"role":"user","content":"Ignore me"}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::write(
+            root.join("sessions-index.json"),
+            r#"{"version":1,"entries":[{"sessionId":"session-1","summary":"Claude digest integration","firstPrompt":"Indexed fallback prompt","projectPath":"/tmp/indexed-project"}]}"#,
+        )
+        .unwrap();
+
+        let session = parse_session_file(&path, SessionSource::Claude).unwrap();
+        assert_eq!(session.source, SessionSource::Claude);
+        assert_eq!(session.id, "claude:session-1");
+        assert_eq!(
+            session.explicit_summary.as_deref(),
+            Some("Claude digest integration")
+        );
+        assert_eq!(session.heuristic_summary, "Implement Claude digest sync");
+        assert_eq!(session.cwd, "/tmp/indexed-project");
+        assert_eq!(session.model, "anthropic/claude-sonnet-4-6");
+        assert_eq!(
+            session.context_usage,
+            Some(SessionContextUsage {
+                used_tokens: Some(100),
+                max_tokens: None,
+            })
+        );
+        assert_eq!(
+            session.last_user_message_at,
+            parse_rfc3339("2026-04-08T00:00:01.000Z").unwrap()
+        );
+        assert_eq!(
+            session.last_assistant_message_at,
+            parse_rfc3339("2026-04-08T00:00:02.000Z").unwrap()
+        );
+        let summary_input = session.summary_input.unwrap();
+        assert!(summary_input.contains("User: Implement Claude digest sync"));
+        assert!(summary_input.contains("Assistant: Implemented the sync."));
+        assert!(!summary_input.contains("metadata"));
+        assert!(!summary_input.contains("Ignore me"));
 
         let _ = fs::remove_dir_all(root);
     }

@@ -28,6 +28,10 @@ const PERSISTED_WARNING: &str = "This transcript was reconstructed from persiste
 pub fn build_persisted_snapshot(
     discovered_session: &DiscoveredSession,
 ) -> Result<SessionMessagesResponse, BoxError> {
+    if discovered_session.source == SessionSource::Claude {
+        return build_claude_snapshot(discovered_session);
+    }
+
     let file = File::open(&discovered_session.session_file)?;
     let reader = BufReader::new(file);
     let mut entries = Vec::new();
@@ -77,6 +81,7 @@ pub fn build_persisted_snapshot(
             vec![PERSISTED_WARNING.to_string()],
         ),
         SessionSource::Mi => (TranscriptFreshnessState::Persisted, Vec::new()),
+        SessionSource::Claude => unreachable!("Claude sessions use their own transcript parser"),
     };
 
     Ok(SessionMessagesResponse {
@@ -93,6 +98,237 @@ pub fn build_persisted_snapshot(
         },
         warnings,
     })
+}
+
+fn build_claude_snapshot(
+    discovered_session: &DiscoveredSession,
+) -> Result<SessionMessagesResponse, BoxError> {
+    let file = File::open(&discovered_session.session_file)?;
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+    let mut leaf_id = None;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let entry: Value = serde_json::from_str(&line)?;
+        if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let Some(id) = entry.get("uuid").and_then(Value::as_str) else {
+            continue;
+        };
+
+        leaf_id = Some(id.to_string());
+        entries.push(ParsedEntry {
+            id: id.to_string(),
+            parent_id: entry
+                .get("parentUuid")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            value: entry,
+        });
+    }
+
+    let branch = current_branch(entries, leaf_id)?;
+    let mut parser = ClaudeEntryParser::default();
+    let mut messages = Vec::new();
+    let mut last_timestamp = discovered_session.activity_timestamp();
+
+    for entry in branch {
+        let mut entry_messages = parser.messages(&entry.value);
+        let message_count = entry_messages.len();
+        for (position, mut message) in entry_messages.drain(..).enumerate() {
+            message.message_id = Some(if message_count == 1 {
+                entry.id.clone()
+            } else {
+                format!("{}:{position}", entry.id)
+            });
+            last_timestamp = message.created_at;
+            messages.push(message);
+        }
+    }
+
+    Ok(SessionMessagesResponse {
+        session_id: discovered_session.id.clone(),
+        messages,
+        freshness: TranscriptFreshness {
+            state: TranscriptFreshnessState::Persisted,
+            source: TranscriptSource::File,
+            as_of: last_timestamp,
+        },
+        activity: SessionActivity {
+            active: false,
+            attached: false,
+        },
+        warnings: Vec::new(),
+    })
+}
+
+#[derive(Default)]
+struct ClaudeEntryParser {
+    tool_names_by_call_id: HashMap<String, String>,
+}
+
+impl ClaudeEntryParser {
+    fn messages(&mut self, entry: &Value) -> Vec<Message> {
+        match entry.get("type").and_then(Value::as_str) {
+            Some("assistant") => self.assistant_message(entry).into_iter().collect(),
+            Some("user") => self.user_messages(entry),
+            _ => Vec::new(),
+        }
+    }
+
+    fn assistant_message(&mut self, entry: &Value) -> Option<Message> {
+        let created_at = parse_entry_timestamp(entry)?;
+        let content = entry.get("message")?.get("content")?;
+        let mut blocks = Vec::new();
+
+        match content {
+            Value::String(text) => blocks.extend(MessageContentBlock::text(text)),
+            Value::Array(content_blocks) => {
+                for block in content_blocks {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => blocks.extend(
+                            block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .and_then(MessageContentBlock::text),
+                        ),
+                        Some("thinking") => blocks.extend(
+                            block
+                                .get("thinking")
+                                .and_then(Value::as_str)
+                                .and_then(MessageContentBlock::thinking),
+                        ),
+                        Some("tool_use") => {
+                            let Some(name) = block.get("name").and_then(Value::as_str) else {
+                                continue;
+                            };
+                            let tool_call_id = block.get("id").and_then(Value::as_str);
+                            if let Some(tool_call_id) = tool_call_id {
+                                self.tool_names_by_call_id
+                                    .insert(tool_call_id.to_string(), name.to_string());
+                            }
+                            let summary =
+                                tool_call_summary(&name.to_ascii_lowercase(), block.get("input"));
+                            blocks.extend(MessageContentBlock::tool_call_with_id(
+                                tool_call_id,
+                                name,
+                                summary.as_deref(),
+                            ));
+                        }
+                        Some("image") => blocks.extend(Self::image_block(block)),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Message::from_blocks(created_at, Role::Assistant, blocks)
+    }
+
+    fn user_messages(&self, entry: &Value) -> Vec<Message> {
+        if entry.get("isMeta").and_then(Value::as_bool) == Some(true) {
+            return Vec::new();
+        }
+
+        let Some(created_at) = parse_entry_timestamp(entry) else {
+            return Vec::new();
+        };
+        let Some(content) = entry
+            .get("message")
+            .and_then(|message| message.get("content"))
+        else {
+            return Vec::new();
+        };
+
+        match content {
+            Value::String(text) => Message::from_text(created_at, Role::User, text)
+                .into_iter()
+                .collect(),
+            Value::Array(content_blocks) => {
+                let mut messages = Vec::new();
+                let mut user_blocks = Vec::new();
+
+                for block in content_blocks {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => user_blocks.extend(
+                            block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .and_then(MessageContentBlock::text),
+                        ),
+                        Some("image") => user_blocks.extend(Self::image_block(block)),
+                        Some("tool_result") => {
+                            if let Some(message) = Message::from_blocks(
+                                created_at,
+                                Role::User,
+                                std::mem::take(&mut user_blocks),
+                            ) {
+                                messages.push(message);
+                            }
+                            if let Some(message) = self.tool_result_message(created_at, block) {
+                                messages.push(message);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if let Some(message) = Message::from_blocks(created_at, Role::User, user_blocks) {
+                    messages.push(message);
+                }
+                messages
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn tool_result_message(&self, created_at: DateTime<Utc>, block: &Value) -> Option<Message> {
+        let tool_call_id = block.get("tool_use_id").and_then(Value::as_str);
+        let content = block.get("content")?;
+        let mut result_blocks = Vec::new();
+
+        match content {
+            Value::String(text) => result_blocks.extend(MessageContentBlock::text(text)),
+            Value::Array(content_blocks) => {
+                for block in content_blocks {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => result_blocks.extend(
+                            block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .and_then(MessageContentBlock::text),
+                        ),
+                        Some("image") => result_blocks.extend(Self::image_block(block)),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let mut message = Message::from_blocks(created_at, Role::ToolResult, result_blocks)?;
+        message.tool_call_id = tool_call_id.map(str::to_string);
+        message.tool_name = tool_call_id
+            .and_then(|tool_call_id| self.tool_names_by_call_id.get(tool_call_id).cloned());
+        Some(message)
+    }
+
+    fn image_block(block: &Value) -> Option<MessageContentBlock> {
+        let source = block.get("source").unwrap_or(block);
+        let mime_type = source
+            .get("media_type")
+            .or_else(|| source.get("mimeType"))
+            .and_then(Value::as_str)?;
+        let data = source.get("data").and_then(Value::as_str)?;
+        Some(MessageContentBlock::image(Some(mime_type), Some(data)))
+    }
 }
 
 fn current_branch(
@@ -358,7 +594,7 @@ mod tests {
     use super::{build_persisted_snapshot, content_blocks, flatten_bash_execution};
     use crate::{
         agent::discovery::{DiscoveredSession, SessionFingerprint, SessionSource},
-        message::MessageContentBlockKind,
+        message::{MessageContentBlockKind, Role},
         transcript::TranscriptFreshnessState,
     };
 
@@ -485,6 +721,88 @@ mod tests {
             TranscriptFreshnessState::Persisted
         );
         assert!(snapshot.warnings.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_snapshots_preserve_digest_text_and_tool_linkage() {
+        let root = std::env::temp_dir().join(format!(
+            "pimux-transcript-claude-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("session.jsonl");
+        fs::write(
+            &path,
+            [
+                r#"{"type":"user","uuid":"user-1","parentUuid":null,"sessionId":"session-1","timestamp":"2026-04-08T00:00:01.000Z","cwd":"/tmp/project","isSidechain":false,"message":{"role":"user","content":"Implement the digest feature"}}"#,
+                r#"{"type":"user","uuid":"alternate","parentUuid":"user-1","sessionId":"session-1","timestamp":"2026-04-08T00:00:02.000Z","cwd":"/tmp/project","isSidechain":false,"message":{"role":"user","content":"This branch should be excluded"}}"#,
+                r#"{"type":"assistant","uuid":"assistant-thinking","parentUuid":"user-1","sessionId":"session-1","timestamp":"2026-04-08T00:00:03.000Z","cwd":"/tmp/project","isSidechain":false,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"Inspecting the report flow"}]}}"#,
+                r#"{"type":"assistant","uuid":"assistant-tool","parentUuid":"assistant-thinking","sessionId":"session-1","timestamp":"2026-04-08T00:00:04.000Z","cwd":"/tmp/project","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"pwd"}}]}}"#,
+                r#"{"type":"user","uuid":"tool-result","parentUuid":"assistant-tool","sessionId":"session-1","timestamp":"2026-04-08T00:00:05.000Z","cwd":"/tmp/project","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"/tmp/project"}]}}"#,
+                r#"{"type":"assistant","uuid":"assistant-text","parentUuid":"tool-result","sessionId":"session-1","timestamp":"2026-04-08T00:00:06.000Z","cwd":"/tmp/project","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"Implemented and verified the digest feature."}]}}"#,
+                r#"{"type":"user","uuid":"meta","parentUuid":"assistant-text","sessionId":"session-1","timestamp":"2026-04-08T00:00:07.000Z","cwd":"/tmp/project","isMeta":true,"isSidechain":false,"message":{"role":"user","content":"local command metadata"}}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let discovered_session = DiscoveredSession {
+            source: SessionSource::Claude,
+            session_file: path,
+            fingerprint: SessionFingerprint {
+                file_size: 1,
+                modified_at_millis: 1,
+            },
+            id: "claude:session-1".to_string(),
+            explicit_summary: Some("Digest work".to_string()),
+            heuristic_summary: "Implement the digest feature".to_string(),
+            summary_input: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_user_message_at: Utc::now(),
+            last_assistant_message_at: Utc::now(),
+            cwd: "/tmp/project".to_string(),
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            context_usage: None,
+            supports_images: None,
+        };
+
+        let snapshot = build_persisted_snapshot(&discovered_session).unwrap();
+        assert_eq!(snapshot.session_id, "claude:session-1");
+        assert_eq!(
+            snapshot.freshness.state,
+            TranscriptFreshnessState::Persisted
+        );
+        assert!(snapshot.warnings.is_empty());
+        assert_eq!(snapshot.messages.len(), 5);
+        assert_eq!(snapshot.messages[0].role, Role::User);
+        assert_eq!(snapshot.messages[0].body, "Implement the digest feature");
+        assert_eq!(
+            snapshot.messages[1].blocks[0].kind,
+            MessageContentBlockKind::Thinking
+        );
+        assert_eq!(
+            snapshot.messages[2].blocks[0].kind,
+            MessageContentBlockKind::ToolCall
+        );
+        assert_eq!(
+            snapshot.messages[2].blocks[0].tool_call_id.as_deref(),
+            Some("tool-1")
+        );
+        assert_eq!(snapshot.messages[3].role, Role::ToolResult);
+        assert_eq!(snapshot.messages[3].tool_name.as_deref(), Some("Bash"));
+        assert_eq!(snapshot.messages[3].tool_call_id.as_deref(), Some("tool-1"));
+        assert_eq!(snapshot.messages[4].role, Role::Assistant);
+        assert_eq!(
+            snapshot.messages[4].body,
+            "Implemented and verified the digest feature."
+        );
+        assert!(snapshot.messages.iter().all(
+            |message| !message.body.contains("excluded") && !message.body.contains("metadata")
+        ));
 
         let _ = fs::remove_dir_all(root);
     }

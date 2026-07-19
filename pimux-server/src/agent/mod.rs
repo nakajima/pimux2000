@@ -1067,7 +1067,10 @@ async fn handle_send_message(
     };
 
     if !discovered_session.source.supports_pi_control() {
-        return Err(mi_sessions_unsupported("sending messages"));
+        return Err(session_source_unsupported(
+            discovered_session.source,
+            "sending messages",
+        ));
     }
 
     send::send_message_to_session(
@@ -1273,13 +1276,19 @@ fn find_pi_controllable_session(
 ) -> Result<discovery::DiscoveredSession, String> {
     let discovered_session = find_discovered_session(pi_agent_dir, session_id)?;
     if !discovered_session.source.supports_pi_control() {
-        return Err(mi_sessions_unsupported(action));
+        return Err(session_source_unsupported(
+            discovered_session.source,
+            action,
+        ));
     }
     Ok(discovered_session)
 }
 
-fn mi_sessions_unsupported(action: &str) -> String {
-    format!("{action} for mi sessions is not supported yet")
+fn session_source_unsupported(source: discovery::SessionSource, action: &str) -> String {
+    format!(
+        "{action} for {} sessions is not supported yet",
+        source.name()
+    )
 }
 
 fn trimmed_non_empty(value: String) -> Option<String> {
@@ -1688,6 +1697,69 @@ mod tests {
                 active_session,
             } => {
                 assert_eq!(session.session_id, discovered_session.id);
+                assert!(active_session.is_none());
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        assert_eq!(
+            fingerprints.get(&discovered_session.id),
+            Some(&discovered_session.fingerprint)
+        );
+
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn publishes_changed_persisted_transcripts_for_claude_sessions() {
+        let base = temp_test_dir("claude-persisted-sync");
+        let session_file = base.join("claude-session.jsonl");
+        fs::write(
+            &session_file,
+            r#"{"type":"user","uuid":"user-1","parentUuid":null,"sessionId":"session-1","timestamp":"2026-04-08T00:00:01.000Z","cwd":"/tmp/project","isSidechain":false,"message":{"role":"user","content":"Include this in the digest"}}"#,
+        )
+        .unwrap();
+
+        let discovered_session = discovery::DiscoveredSession {
+            source: discovery::SessionSource::Claude,
+            session_file,
+            fingerprint: discovery::SessionFingerprint {
+                file_size: 10,
+                modified_at_millis: 20,
+            },
+            id: "claude:session-1".to_string(),
+            explicit_summary: Some("Digest session".to_string()),
+            heuristic_summary: "Include this in the digest".to_string(),
+            summary_input: Some("User: Include this in the digest".to_string()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_user_message_at: Utc::now(),
+            last_assistant_message_at: Utc::now(),
+            cwd: "/tmp/project".to_string(),
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            context_usage: None,
+            supports_images: None,
+        };
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut fingerprints = HashMap::new();
+        publish_persisted_transcript_updates(
+            &[discovered_session.clone()],
+            &mut fingerprints,
+            false,
+            &tx,
+        )
+        .unwrap();
+
+        let update = rx.try_recv().expect("expected Claude transcript update");
+        match update {
+            AgentToServerMessage::LiveSessionUpdate {
+                session,
+                active_session,
+            } => {
+                assert_eq!(session.session_id, discovered_session.id);
+                assert_eq!(session.messages.len(), 1);
+                assert_eq!(session.messages[0].body, "Include this in the digest");
                 assert!(active_session.is_none());
             }
             other => panic!("unexpected message: {other:?}"),

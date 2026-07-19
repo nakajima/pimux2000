@@ -569,6 +569,16 @@ The agent keeps memory bounded by holding:
 - a tiny short-lived recently-detached cache
 - metadata only for everything else, reconstructed on demand from persisted session files
 
+### Claude Code archive sync
+
+The agent also watches primary Claude Code sessions under `~/.claude/projects` (or `CLAUDE_CONFIG_DIR/projects`) and publishes changed persisted transcripts to the same Postgres archive used for pi sessions.
+
+- Claude Code session IDs are exposed as `claude:<session-id>`.
+- Primary project conversations are included; `subagents/` transcripts are excluded.
+- User text, assistant text, thinking, tool calls, tool results, and supported inline images are normalized into the existing message model.
+- Claude Code sessions are currently read-only in pimux: sending messages, commands, interruption, and live partial updates are not supported.
+- Archived Claude Code messages are automatically eligible for `pimux report day` and the server-generated daily reports.
+
 ## Local inspection command
 
 ### `pimux list`
