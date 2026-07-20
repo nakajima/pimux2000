@@ -74,10 +74,42 @@ pub struct VersionResponse {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ReportSource {
+    Pi,
+    Claude,
+    Mi,
+}
+
+impl ReportSource {
+    fn from_session_id(session_id: &str) -> Self {
+        if session_id.starts_with("claude:") {
+            Self::Claude
+        } else if session_id.starts_with("mi:") {
+            Self::Mi
+        } else {
+            Self::Pi
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pi => "pi",
+            Self::Claude => "claude",
+            Self::Mi => "mi",
+        }
+    }
+
+    fn render_bullet(self, text: &str) -> String {
+        format!("{text} ({})", self.label())
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ArchivedMessage {
     host_location: String,
     session_id: String,
+    source: ReportSource,
     message_key: String,
     project_cwd: Option<String>,
     created_at: DateTime<Utc>,
@@ -88,6 +120,7 @@ struct ArchivedMessage {
 #[derive(Debug, Clone)]
 struct ProjectDayData {
     project_key: String,
+    source: ReportSource,
     messages: Vec<ArchivedMessage>,
     last_activity_at: DateTime<Utc>,
 }
@@ -176,6 +209,7 @@ struct ProjectSummaryPromptLesson {
 #[derive(Debug, Clone)]
 struct RenderedProjectReport {
     project_key: String,
+    source: ReportSource,
     worked_on: Vec<String>,
     accomplishments: Vec<RenderedAccomplishment>,
     llm_misses: Vec<RenderedMiss>,
@@ -259,7 +293,7 @@ where
     });
 
     logger(format!(
-        "generating report for {} project(s) using {}...",
+        "generating report for {} project source group(s) using {}...",
         projects.len(),
         summary_model
     ));
@@ -268,10 +302,11 @@ where
     let mut heuristic_project_keys = Vec::new();
     for (index, project) in projects.iter().enumerate() {
         logger(format!(
-            "[{}/{}] summarizing {}",
+            "[{}/{}] summarizing {} ({})",
             index + 1,
             projects.len(),
-            project.project_key
+            project.project_key,
+            project.source.label()
         ));
 
         let excerpts = build_candidate_excerpts(project);
@@ -290,10 +325,15 @@ where
             Ok(rendered) => rendered,
             Err(error) => {
                 logger(format!(
-                    "report summary failed for project {}: {error}",
-                    project.project_key
+                    "report summary failed for project {} ({}): {error}",
+                    project.project_key,
+                    project.source.label()
                 ));
-                heuristic_project_keys.push(project.project_key.clone());
+                heuristic_project_keys.push(format!(
+                    "{} ({})",
+                    project.project_key,
+                    project.source.label()
+                ));
                 heuristic_project_report(project, &excerpts, &misses, &ui_base_url)
             }
         };
@@ -425,9 +465,11 @@ async fn load_archived_messages(
         .map(|row| {
             let body: String = row.get("body");
             let message_json: Value = row.get("message_json");
+            let session_id: String = row.get("session_id");
             ArchivedMessage {
                 host_location: row.get("host_location"),
-                session_id: row.get("session_id"),
+                source: ReportSource::from_session_id(&session_id),
+                session_id,
                 message_key: row.get("dedupe_key"),
                 project_cwd: row.get("cwd"),
                 created_at: row.get("created_at"),
@@ -472,19 +514,22 @@ fn extract_archived_message_text(message_json: &Value, body: &str) -> Option<Str
 }
 
 fn group_messages_by_project(messages: Vec<ArchivedMessage>) -> Vec<ProjectDayData> {
-    let mut project_indexes = HashMap::<String, usize>::new();
+    let mut project_indexes = HashMap::<(String, ReportSource), usize>::new();
     let mut projects = Vec::<ProjectDayData>::new();
 
     for message in messages {
         let project_key =
             report_project_key(message.project_cwd.as_deref(), &message.host_location);
-        let index = match project_indexes.get(&project_key) {
+        let source = message.source;
+        let group_key = (project_key.clone(), source);
+        let index = match project_indexes.get(&group_key) {
             Some(index) => *index,
             None => {
                 let index = projects.len();
-                project_indexes.insert(project_key.clone(), index);
+                project_indexes.insert(group_key, index);
                 projects.push(ProjectDayData {
                     project_key,
+                    source,
                     messages: Vec::new(),
                     last_activity_at: message.created_at,
                 });
@@ -1049,6 +1094,7 @@ async fn summarize_project_day_via_pi(
 
     normalize_project_summary_response(
         project.project_key.clone(),
+        project.source,
         response,
         excerpts,
         misses,
@@ -1104,7 +1150,8 @@ fn build_project_summary_prompt(
         concat!(
             "Generate a concise daily coding report for one project.\n\n",
             "Date: {report_date}\n",
-            "Project: {project}\n\n",
+            "Project: {project}\n",
+            "Session source: {source}\n\n",
             "Evidence excerpts from that day (each line is ID | role | tags | text):\n",
             "{excerpt_lines}\n\n",
             "Tag guide:\n",
@@ -1129,6 +1176,7 @@ fn build_project_summary_prompt(
             "Rules:\n",
             "- Use only the evidence above\n",
             "- Keep it project-based, not session-based\n",
+            "- Do not add source labels to bullets; the report renderer adds them\n",
             "- Do not mention hosts or counts; mention sessions only when the prompt lesson is about avoiding internal/session boundaries\n",
             "- \"workedOn\" should contain 1 to 5 short bullets about what the project work focused on that day\n",
             "- Use excerpts tagged `topic` mainly for `workedOn`\n",
@@ -1155,6 +1203,7 @@ fn build_project_summary_prompt(
         ),
         report_date = report_date,
         project = project.project_key,
+        source = project.source.label(),
         excerpt_lines = excerpt_lines,
         miss_lines = miss_lines,
     )
@@ -1162,6 +1211,7 @@ fn build_project_summary_prompt(
 
 fn normalize_project_summary_response(
     project_key: String,
+    source: ReportSource,
     response: ProjectSummaryResponse,
     excerpts: &[ExcerptCandidate],
     misses: &[MissCandidate],
@@ -1388,6 +1438,7 @@ fn normalize_project_summary_response(
     } else {
         Some(RenderedProjectReport {
             project_key,
+            source,
             worked_on,
             accomplishments,
             llm_misses,
@@ -1547,6 +1598,7 @@ fn heuristic_project_report(
 
     RenderedProjectReport {
         project_key: project.project_key.clone(),
+        source: project.source,
         worked_on,
         accomplishments,
         llm_misses,
@@ -1594,9 +1646,18 @@ fn render_day_report(report_date: NaiveDate, projects: &[RenderedProjectReport])
     let mut lines = vec![format!("# Daily report for {report_date}"), String::new()];
     let mut next_footnote_index = 1usize;
     let mut footnotes = Vec::new();
+    let mut rendered_project_keys = HashSet::new();
 
-    for (index, project) in projects.iter().enumerate() {
-        if index > 0 {
+    for project in projects {
+        if !rendered_project_keys.insert(project.project_key.as_str()) {
+            continue;
+        }
+
+        let source_reports = projects
+            .iter()
+            .filter(|candidate| candidate.project_key == project.project_key)
+            .collect::<Vec<_>>();
+        if lines.len() > 2 {
             lines.push(String::new());
         }
 
@@ -1606,54 +1667,78 @@ fn render_day_report(report_date: NaiveDate, projects: &[RenderedProjectReport])
         ));
         lines.push(String::new());
 
-        if !project.worked_on.is_empty() {
+        if source_reports
+            .iter()
+            .any(|report| !report.worked_on.is_empty())
+        {
             lines.push("Worked on:".to_string());
-            for item in &project.worked_on {
-                lines.push(format!("- {item}"));
+            for report in &source_reports {
+                for item in &report.worked_on {
+                    lines.push(format!("- {}", report.source.render_bullet(item)));
+                }
             }
             lines.push(String::new());
         }
 
-        if !project.accomplishments.is_empty() {
+        if source_reports
+            .iter()
+            .any(|report| !report.accomplishments.is_empty())
+        {
             lines.push("Accomplished:".to_string());
-            for accomplishment in &project.accomplishments {
-                let summary = with_footnote_refs(
-                    &accomplishment.summary,
-                    &accomplishment.excerpts,
-                    &mut next_footnote_index,
-                    &mut footnotes,
-                );
-                lines.push(format!("- {summary}"));
+            for report in &source_reports {
+                for accomplishment in &report.accomplishments {
+                    let sourced_summary = report.source.render_bullet(&accomplishment.summary);
+                    let summary = with_footnote_refs(
+                        &sourced_summary,
+                        &accomplishment.excerpts,
+                        &mut next_footnote_index,
+                        &mut footnotes,
+                    );
+                    lines.push(format!("- {summary}"));
+                }
             }
             lines.push(String::new());
         }
 
-        if !project.llm_misses.is_empty() {
+        let has_llm_misses = source_reports
+            .iter()
+            .any(|report| !report.llm_misses.is_empty());
+        let has_prompt_lessons = source_reports
+            .iter()
+            .any(|report| !report.prompt_lessons.is_empty());
+
+        if has_llm_misses {
             lines.push("LLM misses:".to_string());
-            for miss in &project.llm_misses {
-                let summary = with_footnote_refs(
-                    &miss.summary,
-                    &miss.evidence_lines,
-                    &mut next_footnote_index,
-                    &mut footnotes,
-                );
-                lines.push(format!("- {summary}"));
+            for report in &source_reports {
+                for miss in &report.llm_misses {
+                    let sourced_summary = report.source.render_bullet(&miss.summary);
+                    let summary = with_footnote_refs(
+                        &sourced_summary,
+                        &miss.evidence_lines,
+                        &mut next_footnote_index,
+                        &mut footnotes,
+                    );
+                    lines.push(format!("- {summary}"));
+                }
             }
-            if !project.prompt_lessons.is_empty() {
+            if has_prompt_lessons {
                 lines.push(String::new());
             }
         }
 
-        if !project.prompt_lessons.is_empty() {
+        if has_prompt_lessons {
             lines.push("Prompt lessons:".to_string());
-            for prompt_lesson in &project.prompt_lessons {
-                let lesson = with_footnote_refs(
-                    &prompt_lesson.lesson,
-                    &prompt_lesson.evidence_lines,
-                    &mut next_footnote_index,
-                    &mut footnotes,
-                );
-                lines.push(format!("- {lesson}"));
+            for report in &source_reports {
+                for prompt_lesson in &report.prompt_lessons {
+                    let sourced_lesson = report.source.render_bullet(&prompt_lesson.lesson);
+                    let lesson = with_footnote_refs(
+                        &sourced_lesson,
+                        &prompt_lesson.evidence_lines,
+                        &mut next_footnote_index,
+                        &mut footnotes,
+                    );
+                    lines.push(format!("- {lesson}"));
+                }
             }
         }
     }
@@ -2075,11 +2160,13 @@ mod tests {
     fn candidate_excerpts_skip_tool_calls_and_meta_assistant_text() {
         let project = ProjectDayData {
             project_key: "~/apps/pimux2000".to_string(),
+            source: ReportSource::Pi,
             last_activity_at: Utc.timestamp_opt(3_000, 0).unwrap(),
             messages: vec![
                 ArchivedMessage {
                     host_location: "dev@mac".to_string(),
                     session_id: "s1".to_string(),
+                    source: ReportSource::Pi,
                     message_key: "id:a1".to_string(),
                     project_cwd: Some("/Users/nakajima/apps/pimux2000".to_string()),
                     created_at: Utc.timestamp_opt(1_000, 0).unwrap(),
@@ -2089,6 +2176,7 @@ mod tests {
                 ArchivedMessage {
                     host_location: "dev@mac".to_string(),
                     session_id: "s1".to_string(),
+                    source: ReportSource::Pi,
                     message_key: "id:u1".to_string(),
                     project_cwd: Some("/Users/nakajima/apps/pimux2000".to_string()),
                     created_at: Utc.timestamp_opt(2_000, 0).unwrap(),
@@ -2110,11 +2198,13 @@ mod tests {
     fn build_miss_candidates_pairs_assistant_with_user_correction() {
         let project = ProjectDayData {
             project_key: "~/apps/pimux2000".to_string(),
+            source: ReportSource::Pi,
             last_activity_at: Utc.timestamp_opt(3_000, 0).unwrap(),
             messages: vec![
                 ArchivedMessage {
                     host_location: "dev@mac".to_string(),
                     session_id: "s1".to_string(),
+                    source: ReportSource::Pi,
                     message_key: "id:a2".to_string(),
                     project_cwd: Some("/Users/nakajima/apps/pimux2000".to_string()),
                     created_at: Utc.timestamp_opt(1_000, 0).unwrap(),
@@ -2124,6 +2214,7 @@ mod tests {
                 ArchivedMessage {
                     host_location: "dev@mac".to_string(),
                     session_id: "s1".to_string(),
+                    source: ReportSource::Pi,
                     message_key: "id:u2".to_string(),
                     project_cwd: Some("/Users/nakajima/apps/pimux2000".to_string()),
                     created_at: Utc.timestamp_opt(2_000, 0).unwrap(),
@@ -2146,11 +2237,61 @@ mod tests {
     }
 
     #[test]
+    fn report_sources_are_derived_from_namespaced_session_ids() {
+        assert_eq!(
+            ReportSource::from_session_id("claude:session-1"),
+            ReportSource::Claude
+        );
+        assert_eq!(
+            ReportSource::from_session_id("mi:session-1"),
+            ReportSource::Mi
+        );
+        assert_eq!(
+            ReportSource::from_session_id("4047b693-44a1-4917-884b-f7d8f2d5882a"),
+            ReportSource::Pi
+        );
+    }
+
+    #[test]
+    fn render_day_report_labels_bullets_from_each_source_under_one_project() {
+        let rendered = render_day_report(
+            NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
+            &[
+                RenderedProjectReport {
+                    project_key: "~/apps/pimux2000".to_string(),
+                    source: ReportSource::Claude,
+                    worked_on: vec!["Claude transcript ingestion".to_string()],
+                    accomplishments: vec![RenderedAccomplishment {
+                        summary: "Parsed Claude messages".to_string(),
+                        excerpts: vec![],
+                    }],
+                    llm_misses: vec![],
+                    prompt_lessons: vec![],
+                },
+                RenderedProjectReport {
+                    project_key: "~/apps/pimux2000".to_string(),
+                    source: ReportSource::Pi,
+                    worked_on: vec!["Report source labels".to_string()],
+                    accomplishments: vec![],
+                    llm_misses: vec![],
+                    prompt_lessons: vec![],
+                },
+            ],
+        );
+
+        assert_eq!(rendered.matches(r#"## \~/apps/pimux2000"#).count(), 1);
+        assert!(rendered.contains("- Claude transcript ingestion (claude)"));
+        assert!(rendered.contains("- Parsed Claude messages (claude)"));
+        assert!(rendered.contains("- Report source labels (pi)"));
+    }
+
+    #[test]
     fn render_day_report_escapes_leading_tilde_in_project_heading() {
         let rendered = render_day_report(
             NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
             &[RenderedProjectReport {
                 project_key: "~ (dev@mac)".to_string(),
+                source: ReportSource::Pi,
                 worked_on: vec!["Shell setup".to_string()],
                 accomplishments: vec![],
                 llm_misses: vec![],
@@ -2168,6 +2309,7 @@ mod tests {
             &[
                 RenderedProjectReport {
                     project_key: "~/apps/pimux2000".to_string(),
+                    source: ReportSource::Pi,
                     worked_on: vec!["Added report command plumbing".to_string()],
                     accomplishments: vec![
                         RenderedAccomplishment {
@@ -2199,6 +2341,7 @@ mod tests {
                 },
                 RenderedProjectReport {
                     project_key: "~/apps/Termsy".to_string(),
+                    source: ReportSource::Pi,
                     worked_on: vec!["Window focus behavior".to_string()],
                     accomplishments: vec![RenderedAccomplishment {
                         summary: "Fixed focus handoff for new windows".to_string(),
@@ -2212,13 +2355,13 @@ mod tests {
             ],
         );
 
-        assert!(rendered.contains("- Defined project-based daily report output[^1]"));
-        assert!(rendered.contains("- Allowed accomplishment bullets without forced excerpts"));
+        assert!(rendered.contains("- Defined project-based daily report output (pi)[^1]"));
+        assert!(rendered.contains("- Allowed accomplishment bullets without forced excerpts (pi)"));
         assert!(rendered.contains("LLM misses:"));
-        assert!(rendered.contains("- Mis-scoped the report as session-based[^2]"));
+        assert!(rendered.contains("- Mis-scoped the report as session-based (pi)[^2]"));
         assert!(rendered.contains("Prompt lessons:"));
-        assert!(rendered.contains("- For user-facing summaries, prefer durable user concepts over internal/session boundaries unless requested[^3]"));
-        assert!(rendered.contains("- Fixed focus handoff for new windows[^4]"));
+        assert!(rendered.contains("- For user-facing summaries, prefer durable user concepts over internal/session boundaries unless requested (pi)[^3]"));
+        assert!(rendered.contains("- Fixed focus handoff for new windows (pi)[^4]"));
         assert!(!rendered.contains("  Lesson:"));
         assert!(rendered.contains("[^1]: it should be project-based, not session based"));
         assert!(rendered.contains("[^4]: activate the app before ordering the window front"));
@@ -2236,6 +2379,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 4, 8).unwrap(),
             &[RenderedProjectReport {
                 project_key: "~/apps/Termsy".to_string(),
+                source: ReportSource::Pi,
                 worked_on: vec!["Input debugging".to_string()],
                 accomplishments: vec![RenderedAccomplishment {
                     summary: "Added raw keypress logging".to_string(),
@@ -2259,13 +2403,13 @@ mod tests {
             }],
         );
 
-        assert!(rendered.contains("- Added raw keypress logging[^1]"));
+        assert!(rendered.contains("- Added raw keypress logging (pi)[^1]"));
         assert!(
             rendered.contains(
                 "[^1]: Logs macOS `keyDown`, `keyUp`, and `flagsChanged` before dispatch"
             )
         );
-        assert!(rendered.contains("- Deduplicate correction evidence[^2]"));
+        assert!(rendered.contains("- Deduplicate correction evidence (pi)[^2]"));
         assert!(
             rendered.contains("[^2]: Correction: all of the footnotes should be at the bottom")
         );
